@@ -1,0 +1,31 @@
+rules:
+  - match: " /tmp"
+    send: Use a "tmp" directory in the project root instead.
+  - match: "go test "
+    send: This project uses "make test" for TDD integration.
+  - match: ^(gci|go vet|goimports|gofumpt|go *fmt|golangci-lint)
+    send: Use "make lint-fix" instead to resolve lint/formatting issues.
+  - match: git commit --no-verify|LEFTHOOK=0
+    send: Pre-commit hooks must not be skipped.
+  - match: fieldalignment
+    send: Fix field alignment by adding names to fields and run "make lint-fix".
+  - match: find\s+.*-exec\s+(rm(\s+-\w+)*|sed\s+-i|>\s*\S+)\s+
+    send: Don't use dangerous exec in find commands. Stick to manual edits.
+  - match: BUMPERS_SKIP=1
+    send: Bumpers should not be skipped.
+  - match: ^bumpers\.yml^
+    tool: Read|Edit|Grep
+    send: Bumpers configuration file should not be accessed.
+  - match: cat.*EOF.*>\s*[^\s]
+    send: Use Write tool instead of cat heredoc redirection to create files.
+  - match: sed -i
+    send: Using sed for editing can be dangerous, use manual edits instead.
+commands:
+  - name: test
+    send: Run "make test" to run all tests and fix ALL failing tests if any.
+  - name: lint
+    send: Run "make lint-fix" and fix ALL linting issues if any.
+  - name: check
+    send: Run "make lint-fix" and "make test" and fix ALL issues if any.
+session:
+  - add: "Today's date is: {{.Today}}"
