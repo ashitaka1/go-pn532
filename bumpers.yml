@@ -2,7 +2,11 @@ rules:
   - match: " /tmp"
     send: Use a "tmp" directory in the project root instead.
   - match: "go test "
-    send: This project uses "make test" for TDD integration.
+    send: |
+      Use "make test", "make test-unit", "make test-integration", or
+      'make _tdd ARGS="your-args"' for TDD integration instead of
+      direct go test.
+      The _tdd wrapper accepts the same arguments as go test.
   - match: ^(gci|go vet|goimports|gofumpt|go *fmt|golangci-lint)
     send: Use "make lint-fix" instead to resolve lint/formatting issues.
   - match: git commit --no-verify|LEFTHOOK=0

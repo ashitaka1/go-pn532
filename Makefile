@@ -5,30 +5,16 @@ GOCMD=go
 GOBUILD=$(GOCMD) build
 GOTEST=$(GOCMD) test
 
-# Package parameter for targeting specific directories
-# Usage: make test PKG=./polling
-# Usage: make test-unit PKG=./polling/...
-# Usage: make test PKG=./cmd/reader
-PKG ?= ./...
-
 # TDD Guard detection and setup
 TDDGUARD_AVAILABLE := $(shell command -v tdd-guard-go 2> /dev/null)
 PROJECT_ROOT := $(PWD)
 
-# Race flag setup - race detector requires CGO, so disable for cross-compilation
-ifeq ($(GOOS),)
-	# Native build - use race detection
-	RACE_FLAG = -race
-else
-	# Cross-compilation - skip race detection (requires CGO)
-	RACE_FLAG = 
-endif
-
-# Conditional test command - pipes through tdd-guard-go if available
+# Silent TDD wrapper that accepts all go test arguments
+_tdd:
 ifdef TDDGUARD_AVAILABLE
-	GOTEST_WITH_TDD = $(GOTEST) -json $(PKG) 2>&1 | tdd-guard-go -project-root $(PROJECT_ROOT)
+	@$(GOTEST) -json $(if $(ARGS),$(ARGS),./...) 2>&1 | tdd-guard-go -project-root $(PROJECT_ROOT)
 else
-	GOTEST_WITH_TDD = $(GOTEST) $(PKG)
+	@$(GOTEST) $(if $(ARGS),$(ARGS),./...)
 endif
 
 # Default target
@@ -38,7 +24,6 @@ all: lint test build
 build:
 	@echo "Building packages..."
 	$(GOBUILD) -v ./...
-
 
 # Build reader binary
 reader:
@@ -51,23 +36,13 @@ test: test-unit test-integration
 
 # Run unit tests only
 test-unit:
-	@echo "Running unit tests on $(PKG)..."
-ifdef TDDGUARD_AVAILABLE
-	@echo "TDD Guard detected - integrating test reporting..."
-	$(GOTEST) -json -v $(RACE_FLAG) -coverprofile=coverage-unit.txt -covermode=atomic $(PKG) 2>&1 | tdd-guard-go -project-root $(PROJECT_ROOT)
-else
-	$(GOTEST) -v $(RACE_FLAG) -coverprofile=coverage-unit.txt -covermode=atomic $(PKG)
-endif
+	@echo "Running unit tests..."
+	@$(MAKE) _tdd ARGS="-v -race -coverprofile=coverage-unit.txt -covermode=atomic"
 
 # Run integration tests only
 test-integration:
-	@echo "Running integration tests on $(PKG)..."
-ifdef TDDGUARD_AVAILABLE
-	@echo "TDD Guard detected - integrating test reporting..."
-	$(GOTEST) -json -v $(RACE_FLAG) -tags=integration -coverprofile=coverage-integration.txt -covermode=atomic $(PKG) 2>&1 | tdd-guard-go -project-root $(PROJECT_ROOT)
-else
-	$(GOTEST) -v $(RACE_FLAG) -tags=integration -coverprofile=coverage-integration.txt -covermode=atomic $(PKG)
-endif
+	@echo "Running integration tests..."
+	@$(MAKE) _tdd ARGS="-v -race -tags=integration -coverprofile=coverage-integration.txt -covermode=atomic"
 
 # Run unit tests with coverage report
 coverage-unit: test-unit
@@ -99,8 +74,8 @@ lint-fix:
 
 # Run benchmarks
 bench:
-	@echo "Running benchmarks on $(PKG)..."
-	$(GOTEST) -bench=. -benchmem $(PKG)
+	@echo "Running benchmarks..."
+	@$(MAKE) _tdd ARGS="-bench=. -benchmem"
 
 # Clean build artifacts
 clean:
@@ -136,15 +111,12 @@ help:
 	@echo "  check               - Run lint and test (pre-commit check)"
 	@echo "  help                - Show this help message"
 	@echo ""
-	@echo "Package targeting (PKG parameter):"
-	@echo "  PKG=./...           - Test all packages (default)"
-	@echo "  PKG=./polling       - Test specific package"
-	@echo "  PKG=./polling/...   - Test package and subpackages"
-	@echo "  PKG=./cmd/reader    - Test specific command package"
+	@echo "Custom arguments:"
+	@echo "  Use ARGS to pass custom go test arguments"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make test PKG=./polling               - Test polling package only"
-	@echo "  make test-unit PKG=./cmd/reader       - Unit tests for reader only"
-	@echo "  make bench PKG=./transport            - Benchmark transport package"
+	@echo "  make _tdd ARGS=\"./polling\"                    - Test polling package only"
+	@echo "  make _tdd ARGS=\"-v -race ./cmd/reader\"        - Unit tests for reader with race detection"
+	@echo "  make _tdd ARGS=\"-bench=. ./transport\"         - Benchmark transport package"
 	@echo ""
 	@echo "Note: Test commands automatically integrate with tdd-guard-go if available"
