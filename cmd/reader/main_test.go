@@ -1,3 +1,5 @@
+//go:build integration
+
 // go-pn532
 // Copyright (c) 2025 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: LGPL-3.0-or-later
