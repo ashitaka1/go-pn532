@@ -261,4 +261,3 @@ func (t *MIFARETag) authenticateNDEFAlternative(sector uint8, keyType byte) erro
 	}
 	return nil
 }
-

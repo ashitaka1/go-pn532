@@ -601,26 +601,6 @@ type authenticationResult struct {
 	isNDEFFormatted bool
 }
 
-func (t *MIFARETag) authenticateForNDEFContext(ctx context.Context) (*authenticationResult, error) {
-	result := &authenticationResult{}
-
-	// First try NDEF key for already-formatted tags to avoid state corruption
-	ndefKeyBytes := t.ndefKey.bytes()
-
-	// Try Key A first with context
-	err := t.AuthenticateRobustContext(ctx, 1, MIFAREKeyA, ndefKeyBytes)
-	if err == nil {
-		// SECURITY: Clear sensitive key data after use
-		for i := range ndefKeyBytes {
-			ndefKeyBytes[i] = 0
-		}
-		result.isNDEFFormatted = true
-		return result, nil
-	}
-
-	return nil, err
-}
-
 func (t *MIFARETag) authenticateForNDEF() (*authenticationResult, error) {
 	result := &authenticationResult{}
 
