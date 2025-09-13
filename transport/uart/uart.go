@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,41 @@ type Transport struct {
 	lastCommand byte // Track last command for special handling
 }
 
+// isWindows returns true if running on Windows
+func isWindows() bool {
+	return runtime.GOOS == "windows"
+}
+
+// getWindowsTimeout returns Windows-specific timeout values
+func getWindowsTimeout() time.Duration {
+	if isWindows() {
+		return 100 * time.Millisecond // Increased from 50ms for Windows
+	}
+	return 50 * time.Millisecond
+}
+
+// windowsPostWriteDelay adds Windows-specific delay after write operations
+func windowsPostWriteDelay() {
+	if isWindows() {
+		time.Sleep(15 * time.Millisecond) // Windows needs time for buffer flushing
+	}
+}
+
+// windowsPortRecovery attempts Windows-specific port recovery
+func (t *Transport) windowsPortRecovery() error {
+	if !isWindows() {
+		return nil
+	}
+
+	// Avoid nil pointer access
+	if t.port == nil {
+		return nil
+	}
+
+	// Try to flush and drain the port for Windows
+	return t.drainWithRetry("Windows recovery")
+}
+
 // New creates a new UART transport.
 func New(portName string) (*Transport, error) {
 	port, err := serial.Open(portName, &serial.Mode{
@@ -73,9 +109,10 @@ func New(portName string) (*Transport, error) {
 		return nil, fmt.Errorf("failed to open UART port %s: %w", portName, err)
 	}
 
-	// Set default timeout - 50ms to match working reference implementation
-	// This timeout has been proven to work with InListPassiveTarget
-	if err := port.SetReadTimeout(50 * time.Millisecond); err != nil {
+	// Set platform-specific timeout - increased for Windows due to driver differences
+	// 50ms proven to work on Linux/Mac, 100ms needed for Windows stability
+	timeout := getWindowsTimeout()
+	if err := port.SetReadTimeout(timeout); err != nil {
 		_ = port.Close()
 		return nil, fmt.Errorf("failed to set UART read timeout: %w", err)
 	}
