@@ -31,7 +31,7 @@ type Config struct {
 // DefaultConfig returns the default polling configuration
 func DefaultConfig() *Config {
 	return &Config{
-		PollInterval:       100 * time.Millisecond,
-		CardRemovalTimeout: 300 * time.Millisecond,
+		PollInterval:       250 * time.Millisecond,
+		CardRemovalTimeout: 600 * time.Millisecond,
 	}
 }
