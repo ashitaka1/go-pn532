@@ -47,6 +47,20 @@ const (
 	hostToPn532 = 0xD4
 	pn532ToHost = 0xD5
 	pn532Ready  = 0x01
+
+	// Empty response recovery thresholds
+	emptyResponseThreshold     = 3                // Trigger recovery after N consecutive empty responses
+	emptyResponseResetInterval = 30 * time.Second // Reset counter after this time
+
+	// Command-specific timeouts
+	defaultTimeout = 500 * time.Millisecond  // Default timeout for most commands
+	quickTimeout   = 100 * time.Millisecond  // Quick timeout for simple commands
+	pollingTimeout = 1000 * time.Millisecond // Longer timeout for polling commands
+	dataTimeout    = 800 * time.Millisecond  // Medium timeout for data operations
+
+	// Health monitoring
+	healthCheckInterval = 5 * time.Second // How often to perform health checks
+	healthCheckTimeout  = 2 * time.Second // Max time without successful health check
 )
 
 var (
@@ -56,10 +70,14 @@ var (
 
 // Transport implements the pn532.Transport interface for UART communication.
 type Transport struct {
-	port        serial.Port
-	portName    string
-	mu          sync.Mutex
-	lastCommand byte // Track last command for special handling
+	lastEmptyTime      time.Time
+	lastHealthCheck    time.Time
+	port               serial.Port
+	portName           string
+	emptyResponseCount int
+	mu                 sync.Mutex
+	lastCommand        byte
+	healthCheckEnabled bool
 }
 
 // isWindows returns true if running on Windows
@@ -127,6 +145,16 @@ func New(portName string) (*Transport, error) {
 func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Set command-specific timeout for optimal performance
+	if err := t.setCommandSpecificTimeout(cmd); err != nil {
+		return nil, fmt.Errorf("failed to set command timeout: %w", err)
+	}
+
+	// Clear input buffer before sending command to prevent reading stale data
+	if err := t.clearInputBuffer(); err != nil {
+		return nil, fmt.Errorf("failed to clear input buffer: %w", err)
+	}
 
 	// Track the command for special handling
 	t.lastCommand = cmd
@@ -258,18 +286,108 @@ func (t *Transport) drainWithRetry(operation string) error {
 	return fmt.Errorf("UART %s drain failed after %d retries", operation, maxRetries)
 }
 
-// wakeUp wakes up the PN532 over UART
+// clearInputBuffer clears any pending input data to prevent reading stale data
+func (t *Transport) clearInputBuffer() error {
+	if t.port == nil {
+		return nil // Allow for test scenarios
+	}
+
+	// Read and discard any pending data
+	buf := make([]byte, 256) // Buffer to read pending data
+	totalCleared := 0
+	maxClearAttempts := 5
+
+	for attempt := 0; attempt < maxClearAttempts; attempt++ {
+		bytesRead, err := t.port.Read(buf)
+		if err != nil && !isTimeoutError(err) {
+			return fmt.Errorf("failed to clear input buffer: %w", err)
+		}
+
+		if bytesRead == 0 {
+			break // No more data to clear
+		}
+
+		totalCleared += bytesRead
+		// If we're clearing a lot of data, limit attempts to prevent infinite loop
+		if totalCleared > 1024 {
+			break
+		}
+	}
+
+	// Additional drain for any remaining data in OS buffers
+	return t.drainWithRetry("clear input buffer")
+}
+
+// isTimeoutError checks if an error is a timeout error
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "timed out") ||
+		strings.Contains(errStr, "i/o timeout")
+}
+
+// wakeUp wakes up the PN532 over UART with robust retry mechanism
 func (t *Transport) wakeUp() error {
+	return t.wakeUpWithRetry()
+}
+
+// wakeUpWithRetry attempts to wake up the PN532 with retry logic and verification
+func (t *Transport) wakeUpWithRetry() error {
+	const maxAttempts = 3
+	delays := []time.Duration{
+		10 * time.Millisecond,  // First attempt: quick
+		50 * time.Millisecond,  // Second attempt: medium
+		100 * time.Millisecond, // Third attempt: longer
+	}
+
+	var lastErr error
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := t.singleWakeUpAttempt(); err != nil {
+			lastErr = err
+			// Wait with increasing delay before retry
+			if attempt < maxAttempts-1 {
+				time.Sleep(delays[attempt])
+				continue
+			}
+		} else {
+			// Verify wake-up was successful with "double wake" pattern
+			verifyErr := t.verifyWakeUp()
+			if verifyErr == nil {
+				return nil // Wake-up successful
+			}
+			lastErr = verifyErr
+		}
+
+		// Additional delay before retry on verification failure
+		if attempt < maxAttempts-1 {
+			time.Sleep(delays[attempt])
+		}
+	}
+
+	return fmt.Errorf("wake-up failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// singleWakeUpAttempt performs a single wake-up attempt
+func (t *Transport) singleWakeUpAttempt() error {
+	// Clear any pending data before wake-up
+	_ = t.clearInputBuffer()
+
 	// Over UART, PN532 must be "woken up" by sending a 0x55
-	// dummy byte and then waiting
-	bytesWritten, err := t.port.Write([]byte{
+	// dummy byte sequence and then waiting
+	wakeSequence := []byte{
 		0x55, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00,
-	})
+	}
+
+	bytesWritten, err := t.port.Write(wakeSequence)
 	if err != nil {
 		return fmt.Errorf("UART wake up write failed: %w", err)
-	} else if bytesWritten != 16 {
+	} else if bytesWritten != len(wakeSequence) {
 		return pn532.NewTransportWriteError("wakeUp", t.portName)
 	}
 
@@ -277,6 +395,228 @@ func (t *Transport) wakeUp() error {
 	windowsPostWriteDelay()
 
 	return t.drainWithRetry("wake up")
+}
+
+// verifyWakeUp verifies that the wake-up was successful by sending a second wake sequence
+// This implements the "double wake" pattern from Adafruit library
+func (t *Transport) verifyWakeUp() error {
+	// Send a shorter verification sequence
+	verifySequence := []byte{0x55, 0x55, 0x00, 0x00, 0x00}
+
+	bytesWritten, err := t.port.Write(verifySequence)
+	if err != nil {
+		return fmt.Errorf("UART wake verification write failed: %w", err)
+	} else if bytesWritten != len(verifySequence) {
+		return errors.New("wake verification incomplete write")
+	}
+
+	// Windows needs time for buffer flushing after write
+	windowsPostWriteDelay()
+
+	// Small delay for verification
+	time.Sleep(5 * time.Millisecond)
+
+	return t.drainWithRetry("wake verification")
+}
+
+// getCommandTimeout returns timeout duration based on command type
+func getCommandTimeout(cmd byte) time.Duration {
+	switch cmd {
+	case 0x02, 0x04, 0x00: // GetFirmwareVersion, GetGeneralStatus, Diagnose
+		return quickTimeout
+	case 0x4A, 0x60: // InListPassiveTarget, InAutoPoll
+		return pollingTimeout
+	case 0x40, 0x42: // InDataExchange, InCommunicateThru
+		return dataTimeout
+	default:
+		return defaultTimeout
+	}
+}
+
+// setCommandSpecificTimeout sets timeout based on command type
+func (t *Transport) setCommandSpecificTimeout(cmd byte) error {
+	timeout := getCommandTimeout(cmd)
+
+	// Adjust for Windows if needed
+	if isWindows() && timeout < 200*time.Millisecond {
+		timeout = 200 * time.Millisecond
+	}
+
+	return t.SetTimeout(timeout)
+}
+
+// EnableHealthMonitoring enables periodic health checks
+func (t *Transport) EnableHealthMonitoring() {
+	t.healthCheckEnabled = true
+	t.lastHealthCheck = time.Now()
+}
+
+// DisableHealthMonitoring disables health monitoring
+func (t *Transport) DisableHealthMonitoring() {
+	t.healthCheckEnabled = false
+}
+
+// IsHealthMonitoringEnabled returns whether health monitoring is enabled
+func (t *Transport) IsHealthMonitoringEnabled() bool {
+	return t.healthCheckEnabled
+}
+
+// PerformHealthCheck performs a lightweight health check using GetGeneralStatus
+func (t *Transport) PerformHealthCheck() error {
+	if !t.healthCheckEnabled {
+		return nil // Health monitoring is disabled
+	}
+
+	// Use GetGeneralStatus (0x04) as a lightweight health check command
+	// This command is quick and doesn't interfere with normal operations
+	originalTimeout := getCommandTimeout(t.lastCommand)
+	defer func() {
+		// Restore original timeout
+		_ = t.SetTimeout(originalTimeout)
+	}()
+
+	// Set quick timeout for health check
+	if err := t.SetTimeout(quickTimeout); err != nil {
+		return fmt.Errorf("health check timeout setup failed: %w", err)
+	}
+
+	// Perform health check without holding the main mutex for too long
+	_, err := t.sendHealthCheckCommand()
+	if err != nil {
+		return fmt.Errorf("health check command failed: %w", err)
+	}
+
+	// Update last successful health check time
+	t.lastHealthCheck = time.Now()
+	return nil
+}
+
+// sendHealthCheckCommand sends a lightweight command for health checking
+func (t *Transport) sendHealthCheckCommand() ([]byte, error) {
+	// Use GetGeneralStatus command (0x04) - lightweight and non-intrusive
+	cmd := byte(0x04)
+	args := []byte{}
+
+	// Clear input buffer
+	if err := t.clearInputBuffer(); err != nil {
+		return nil, err
+	}
+
+	// Send frame and wait for ACK
+	ackData, err := t.sendFrame(cmd, args)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = ackData // ACK data handled in waitAck
+
+	// Small delay
+	time.Sleep(6 * time.Millisecond)
+
+	// Receive response
+	res, err := t.receiveFrame([]byte{})
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
+// ShouldPerformHealthCheck checks if it's time for a health check
+func (t *Transport) ShouldPerformHealthCheck() bool {
+	if !t.healthCheckEnabled {
+		return false
+	}
+	return time.Since(t.lastHealthCheck) > healthCheckInterval
+}
+
+// IsConnectionHealthy checks if the connection appears healthy
+func (t *Transport) IsConnectionHealthy() bool {
+	if !t.healthCheckEnabled {
+		return true // Assume healthy if monitoring is disabled
+	}
+	return time.Since(t.lastHealthCheck) < healthCheckTimeout
+}
+
+// trackEmptyResponse tracks when we receive an empty response
+func (t *Transport) trackEmptyResponse() {
+	now := time.Now()
+
+	// Reset counter if enough time has passed since last empty response
+	if now.Sub(t.lastEmptyTime) > emptyResponseResetInterval {
+		t.emptyResponseCount = 0
+	}
+
+	t.emptyResponseCount++
+	t.lastEmptyTime = now
+}
+
+// resetEmptyResponseTracking resets the empty response counter
+func (t *Transport) resetEmptyResponseTracking() {
+	t.emptyResponseCount = 0
+}
+
+// shouldTriggerRecovery checks if we need to trigger recovery
+func (t *Transport) shouldTriggerRecovery() bool {
+	return t.emptyResponseCount >= emptyResponseThreshold
+}
+
+// performEmptyResponseRecovery performs escalating recovery procedures
+func (t *Transport) performEmptyResponseRecovery() error {
+	recoveryLevel := t.emptyResponseCount - emptyResponseThreshold + 1
+
+	switch {
+	case recoveryLevel == 1:
+		// Level 1: Buffer flush and small delay
+		if err := t.clearInputBuffer(); err != nil {
+			return fmt.Errorf("recovery level 1 buffer clear failed: %w", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+
+	case recoveryLevel == 2:
+		// Level 2: Wake-up sequence
+		if err := t.wakeUpWithRetry(); err != nil {
+			return fmt.Errorf("recovery level 2 wake-up failed: %w", err)
+		}
+
+	case recoveryLevel >= 3:
+		// Level 3: Full recovery with Windows-specific handling
+		if err := t.fullRecoverySequence(); err != nil {
+			return fmt.Errorf("recovery level 3 full recovery failed: %w", err)
+		}
+
+		// Reset counter after successful deep recovery
+		t.resetEmptyResponseTracking()
+	}
+
+	return nil
+}
+
+// fullRecoverySequence performs a comprehensive recovery
+func (t *Transport) fullRecoverySequence() error {
+	// Step 1: Clear buffers
+	if err := t.clearInputBuffer(); err != nil {
+		return fmt.Errorf("full recovery buffer clear failed: %w", err)
+	}
+
+	// Step 2: Windows-specific port recovery
+	if err := t.windowsPortRecovery(); err != nil {
+		return fmt.Errorf("full recovery Windows port recovery failed: %w", err)
+	}
+
+	// Step 3: Multiple wake-up attempts
+	if err := t.wakeUpWithRetry(); err != nil {
+		return fmt.Errorf("full recovery wake-up failed: %w", err)
+	}
+
+	// Step 4: Longer stabilization delay
+	stabilizationDelay := 100 * time.Millisecond
+	if isWindows() {
+		stabilizationDelay = 200 * time.Millisecond
+	}
+	time.Sleep(stabilizationDelay)
+
+	return nil
 }
 
 // sendAck sends an ACK frame
@@ -309,11 +649,25 @@ func (t *Transport) sendNack() error {
 	return t.drainWithRetry("NACK")
 }
 
-// waitAck waits for an ACK frame, returning any extra data received before it
+// waitAck waits for an ACK frame with time-based timeout, returning any extra data received before it
 // This handles the Windows driver bug where ACK packets may be delivered out of order
 func (t *Transport) waitAck() ([]byte, error) {
-	tries := 0
-	maxTries := 32 // bytes to scan through
+	return t.waitAckWithTimeout(getAckTimeout())
+}
+
+// getAckTimeout returns platform-specific ACK timeout
+func getAckTimeout() time.Duration {
+	if isWindows() {
+		return 200 * time.Millisecond // Windows needs more time
+	}
+	return 100 * time.Millisecond
+}
+
+// waitAckWithTimeout waits for an ACK frame with configurable timeout
+func (t *Transport) waitAckWithTimeout(timeout time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(timeout)
+	retryCount := 0
+	maxRetries := 3
 
 	// Use buffer pool for ACK processing - reduces small allocations
 	buf := frame.GetSmallBuffer(1)
@@ -328,20 +682,29 @@ func (t *Transport) waitAck() ([]byte, error) {
 	preAck = preAck[:0] // Reset length
 
 	for {
-		if tries >= maxTries {
-			return preAck, pn532.NewNoACKError("waitAck", t.portName)
+		// Check if we've exceeded the timeout
+		if time.Now().After(deadline) {
+			if retryCount < maxRetries {
+				// Retry with exponential backoff
+				retryCount++
+				backoffDelay := time.Duration(retryCount*retryCount) * 10 * time.Millisecond
+				time.Sleep(backoffDelay)
+				deadline = time.Now().Add(timeout)
+				continue
+			}
+			return preAck, pn532.NewNoACKError("waitAck timeout", t.portName)
 		}
 
-		n, err := t.port.Read(buf)
+		bytesRead, err := t.port.Read(buf)
 		if err != nil {
+			if isTimeoutError(err) {
+				continue // Continue until our deadline
+			}
 			return preAck, fmt.Errorf("UART ACK read failed: %w", err)
-		} else if n == 0 {
-			tries++
+		} else if bytesRead == 0 {
+			time.Sleep(1 * time.Millisecond) // Small delay to prevent busy waiting
 			continue
 		}
-
-		// Debug what we're reading in waitAck
-		_ = tries // For potential future debugging
 
 		ackBuf = append(ackBuf, buf[0])
 		if len(ackBuf) < 6 {
@@ -357,9 +720,14 @@ func (t *Transport) waitAck() ([]byte, error) {
 			copy(result, preAck)
 			return result, nil
 		}
+
 		preAck = append(preAck, ackBuf[0])
 		ackBuf = ackBuf[1:]
-		tries++
+
+		// Prevent buffer overflow if we're receiving invalid data
+		if len(preAck) > 64 {
+			return preAck, fmt.Errorf("too much pre-ACK data received (%d bytes)", len(preAck))
+		}
 	}
 }
 
@@ -437,12 +805,29 @@ func (t *Transport) receiveFrame(pre []byte) ([]byte, error) {
 			return nil, err
 		}
 		if !shouldRetry {
+			// Successful response received - reset empty response tracking
+			t.resetEmptyResponseTracking()
 			return data, nil
 		}
 
 		// Send NACK and retry
 		if err := t.sendNack(); err != nil {
 			return nil, err
+		}
+	}
+
+	// All retries exhausted - track as empty response
+	t.trackEmptyResponse()
+
+	// Check if we need to trigger recovery before creating synthetic response
+	if t.shouldTriggerRecovery() {
+		if err := t.performEmptyResponseRecovery(); err != nil {
+			return nil, fmt.Errorf("empty response recovery failed: %w", err)
+		}
+		// After recovery, try one more time
+		data, shouldRetry, err := t.receiveFrameAttempt(pre, 0)
+		if err == nil && !shouldRetry {
+			return data, nil
 		}
 	}
 

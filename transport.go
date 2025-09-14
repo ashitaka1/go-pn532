@@ -103,7 +103,9 @@ func NewTransportWithRetry(transport Transport, config *RetryConfig) *TransportW
 // SendCommand sends a command with retry logic
 func (t *TransportWithRetry) SendCommand(cmd byte, args []byte) ([]byte, error) {
 	var result []byte
-	err := RetryWithConfig(context.Background(), t.config, func() error {
+	// Use command-specific retry configuration for better reliability
+	retryConfig := GetRetryConfigForCommand(cmd)
+	err := RetryWithConfig(context.Background(), retryConfig, func() error {
 		var err error
 		result, err = t.transport.SendCommand(cmd, args)
 		if err != nil {
@@ -123,7 +125,9 @@ func (t *TransportWithRetry) SendCommand(cmd byte, args []byte) ([]byte, error) 
 // SendCommandWithContext sends a command with context support and retry logic
 func (t *TransportWithRetry) SendCommandWithContext(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
 	var result []byte
-	err := RetryWithConfig(ctx, t.config, func() error {
+	// Use command-specific retry configuration for better reliability
+	retryConfig := GetRetryConfigForCommand(cmd)
+	err := RetryWithConfig(ctx, retryConfig, func() error {
 		var err error
 		result, err = t.transport.SendCommandWithContext(ctx, cmd, args)
 		if err != nil {
