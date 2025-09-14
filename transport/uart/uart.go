@@ -273,6 +273,9 @@ func (t *Transport) wakeUp() error {
 		return pn532.NewTransportWriteError("wakeUp", t.portName)
 	}
 
+	// Windows needs time for buffer flushing after write
+	windowsPostWriteDelay()
+
 	return t.drainWithRetry("wake up")
 }
 
@@ -285,6 +288,9 @@ func (t *Transport) sendAck() error {
 		return pn532.NewTransportWriteError("sendAck", t.portName)
 	}
 
+	// Windows needs time for buffer flushing after write
+	windowsPostWriteDelay()
+
 	return t.drainWithRetry("ACK")
 }
 
@@ -296,6 +302,9 @@ func (t *Transport) sendNack() error {
 	} else if n != len(nackFrame) {
 		return pn532.NewTransportWriteError("sendNack", t.portName)
 	}
+
+	// Windows needs time for buffer flushing after write
+	windowsPostWriteDelay()
 
 	return t.drainWithRetry("NACK")
 }
@@ -405,6 +414,9 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 	} else if n != len(finalFrame) {
 		return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
 	}
+
+	// Windows needs time for buffer flushing after write
+	windowsPostWriteDelay()
 
 	if err := t.drainWithRetry("send frame"); err != nil {
 		return nil, err
@@ -542,22 +554,54 @@ func (t *Transport) processFrameData(buf []byte, totalLen int) (data []byte, ret
 
 // readInitialData reads the initial frame data from the port
 func (t *Transport) readInitialData(buf []byte) (int, error) {
-	// Small delay to let the PN532 start sending
-	time.Sleep(5 * time.Millisecond)
+	// Platform-specific delay to let the PN532 start sending
+	// Windows USB-serial drivers may need less initial delay
+	initialDelay := 5 * time.Millisecond
+	if isWindows() {
+		initialDelay = 2 * time.Millisecond
+	}
+	time.Sleep(initialDelay)
 
 	bytesRead, err := t.port.Read(buf)
 	if err != nil {
+		t.handleReadError()
 		return 0, fmt.Errorf("UART initial data read failed: %w", err)
 	}
 
 	// If we got 0 bytes, try one more time with a longer delay
-	// Some PN532 modules need more time for certain commands
 	if bytesRead == 0 {
-		time.Sleep(50 * time.Millisecond)
-		bytesRead, err = t.port.Read(buf)
+		bytesRead, err = t.retryInitialRead(buf)
 		if err != nil {
-			return 0, fmt.Errorf("UART initial data retry read failed: %w", err)
+			return 0, err
 		}
+	}
+
+	return bytesRead, nil
+}
+
+// handleReadError performs Windows-specific recovery on read errors
+func (t *Transport) handleReadError() {
+	// Attempt Windows-specific recovery on read errors
+	if recoveryErr := t.windowsPortRecovery(); recoveryErr != nil {
+		// Log recovery error but continue with original error
+		_ = recoveryErr
+	}
+}
+
+// retryInitialRead performs a retry read with platform-specific timing
+func (t *Transport) retryInitialRead(buf []byte) (int, error) {
+	// Some PN532 modules need more time for certain commands
+	// Windows may need different retry timing
+	retryDelay := 50 * time.Millisecond
+	if isWindows() {
+		retryDelay = 25 * time.Millisecond
+	}
+	time.Sleep(retryDelay)
+
+	bytesRead, err := t.port.Read(buf)
+	if err != nil {
+		t.handleReadError()
+		return 0, fmt.Errorf("UART initial data retry read failed: %w", err)
 	}
 
 	return bytesRead, nil
@@ -613,7 +657,13 @@ func (t *Transport) ensureCompleteFrame(buf []byte, off, frameLen, totalLen int)
 
 // readRemainingData reads the remaining frame data with timeout
 func (t *Transport) readRemainingData(buf []byte, totalLen, expectedLen int) (int, error) {
-	timeout := time.After(2 * time.Second)
+	// Use shorter timeout to prevent 30-second accumulation with retries
+	// Windows may need slightly longer timeout due to USB-serial driver delays
+	timeoutDuration := 500 * time.Millisecond
+	if isWindows() {
+		timeoutDuration = 750 * time.Millisecond
+	}
+	timeout := time.After(timeoutDuration)
 
 	for totalLen < expectedLen {
 		select {
@@ -627,6 +677,7 @@ func (t *Transport) readRemainingData(buf []byte, totalLen, expectedLen int) (in
 		default:
 			n2, err := t.port.Read(buf[totalLen:expectedLen])
 			if err != nil {
+				t.handleReadError()
 				return 0, fmt.Errorf("UART remaining data read failed: %w", err)
 			}
 			if n2 > 0 {
