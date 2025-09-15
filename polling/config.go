@@ -26,12 +26,17 @@ import "time"
 type Config struct {
 	PollInterval       time.Duration
 	CardRemovalTimeout time.Duration
+	// HardwareTimeoutRetries controls how long PN532 waits for card detection
+	// 0x00 = immediate return, 0x01-0xFE = retry count (~150ms each), 0xFF = infinite
+	// Higher values reduce LED blinking frequency but increase detection latency
+	HardwareTimeoutRetries byte
 }
 
 // DefaultConfig returns the default polling configuration
 func DefaultConfig() *Config {
 	return &Config{
-		PollInterval:       250 * time.Millisecond,
-		CardRemovalTimeout: 600 * time.Millisecond,
+		PollInterval:           250 * time.Millisecond,
+		CardRemovalTimeout:     600 * time.Millisecond,
+		HardwareTimeoutRetries: 0x20, // ~4.8s timeout (32 * 150ms) for reduced LED blinking
 	}
 }

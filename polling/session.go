@@ -396,9 +396,9 @@ func (s *Session) waitForResume(ctx context.Context) error {
 
 // performSinglePoll performs a single tag detection cycle using direct InListPassiveTarget
 func (s *Session) performSinglePoll(ctx context.Context) (*pn532.DetectedTag, error) {
-	// Use immediate polling without timeout to avoid double delay
-	// The polling interval is handled in the main loop
-	tags, err := s.device.InListPassiveTargetContext(ctx, 1, 0x00)
+	// Use configurable hardware timeout to reduce RF field activation frequency
+	// Higher HardwareTimeoutRetries values make LED blink less frequently
+	tags, err := s.device.InListPassiveTargetWithTimeoutContext(ctx, 1, 0x00, s.config.HardwareTimeoutRetries)
 	if err != nil {
 		return nil, fmt.Errorf("tag detection failed: %w", err)
 	}
