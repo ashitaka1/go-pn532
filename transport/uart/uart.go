@@ -691,7 +691,7 @@ func (t *Transport) readRemainingData(buf []byte, totalLen, expectedLen int) (in
 		case <-timeout:
 			return 0, &pn532.TransportError{
 				Op: "receiveFrame", Port: t.portName,
-				Err:       pn532.ErrTimeout,
+				Err:       pn532.ErrTransportTimeout,
 				Type:      pn532.ErrorTypeTransient,
 				Retryable: true,
 			}
@@ -757,7 +757,7 @@ func (t *Transport) receiveSpecialDiagnoseByte(_ byte) ([]byte, error) {
 			return nil, &pn532.TransportError{
 				Op:        "receiveSpecialDiagnoseByte",
 				Port:      t.portName,
-				Err:       pn532.ErrTimeout,
+				Err:       pn532.ErrTransportTimeout,
 				Type:      pn532.ErrorTypeTransient,
 				Retryable: true,
 			}
