@@ -70,14 +70,15 @@ var (
 
 // Transport implements the pn532.Transport interface for UART communication.
 type Transport struct {
-	lastEmptyTime      time.Time
-	lastHealthCheck    time.Time
-	port               serial.Port
-	portName           string
-	emptyResponseCount int
-	mu                 sync.Mutex
-	lastCommand        byte
-	healthCheckEnabled bool
+	lastEmptyTime         time.Time
+	lastHealthCheck       time.Time
+	port                  serial.Port
+	portName              string
+	emptyResponseCount    int
+	mu                    sync.Mutex
+	lastCommand           byte
+	healthCheckEnabled    bool
+	connectionEstablished bool
 }
 
 // isWindows returns true if running on Windows
@@ -152,8 +153,11 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 	}
 
 	// Clear input buffer before sending command to prevent reading stale data
-	if err := t.clearInputBuffer(); err != nil {
-		return nil, fmt.Errorf("failed to clear input buffer: %w", err)
+	// Skip for initial handshake commands to avoid discarding valid ACK/response data
+	if t.connectionEstablished {
+		if err := t.clearInputBuffer(); err != nil {
+			return nil, fmt.Errorf("failed to clear input buffer: %w", err)
+		}
 	}
 
 	// Track the command for special handling
@@ -178,6 +182,11 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 			return nil, diagErr
 		}
 
+		// Mark connection as established after first successful command
+		if !t.connectionEstablished {
+			t.connectionEstablished = true
+		}
+
 		// No ACK is sent after receiving the byte response
 		return res, nil
 	}
@@ -189,6 +198,11 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 
 	if err := t.sendAck(); err != nil {
 		return nil, err
+	}
+
+	// Mark connection as established after first successful command
+	if !t.connectionEstablished {
+		t.connectionEstablished = true
 	}
 
 	return res, nil
@@ -219,15 +233,20 @@ func (t *Transport) SendCommandWithContext(ctx context.Context, cmd byte, args [
 	return t.SendCommand(cmd, args)
 }
 
-// SetTimeout sets the read timeout for the transport
-func (t *Transport) SetTimeout(timeout time.Duration) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+// setTimeoutUnlocked sets the read timeout without acquiring the mutex (internal use)
+func (t *Transport) setTimeoutUnlocked(timeout time.Duration) error {
 	err := t.port.SetReadTimeout(timeout)
 	if err != nil {
 		return fmt.Errorf("UART set timeout failed: %w", err)
 	}
 	return nil
+}
+
+// SetTimeout sets the read timeout for the transport
+func (t *Transport) SetTimeout(timeout time.Duration) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.setTimeoutUnlocked(timeout)
 }
 
 // Close closes the transport connection
@@ -442,7 +461,7 @@ func (t *Transport) setCommandSpecificTimeout(cmd byte) error {
 		timeout = 200 * time.Millisecond
 	}
 
-	return t.SetTimeout(timeout)
+	return t.setTimeoutUnlocked(timeout)
 }
 
 // EnableHealthMonitoring enables periodic health checks
