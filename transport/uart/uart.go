@@ -774,10 +774,7 @@ func (*Transport) processAckBuffer(ackBuf, preAck *[]byte) (result []byte, found
 
 	// Not an ACK - shift the sliding window
 	*preAck = append(*preAck, (*ackBuf)[0])
-
-	// Shift bytes left in ackBuf without re-slicing to preserve buffer pool
-	copy(*ackBuf, (*ackBuf)[1:])
-	*ackBuf = (*ackBuf)[:len(*ackBuf)-1] // Reduce length by 1, keep capacity
+	*ackBuf = (*ackBuf)[1:] // Simple slice shift to 5 bytes
 
 	// Prevent buffer overflow - use half of max frame size (255/2 ≈ 128)
 	if len(*preAck) > 128 {
