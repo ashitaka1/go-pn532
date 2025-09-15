@@ -698,6 +698,10 @@ func (t *Transport) waitAckWithTimeout(timeout time.Duration) ([]byte, error) {
 		}
 
 		ackBuf = append(ackBuf, buf[0])
+		if len(ackBuf) < 6 {
+			continue
+		}
+
 		if result, found, err := t.processAckBuffer(&ackBuf, &preAck); err != nil {
 			return preAck, err
 		} else if found {
@@ -758,12 +762,8 @@ func (t *Transport) readNextByte(buf []byte) (bool, error) {
 
 // processAckBuffer processes the ACK buffer for ACK detection
 func (*Transport) processAckBuffer(ackBuf, preAck *[]byte) (result []byte, found bool, err error) {
-	if len(*ackBuf) < 6 {
-		return nil, false, nil
-	}
-
 	if bytes.Equal(*ackBuf, ackFrame) {
-		// Copy preAck data to new buffer for return since we'll release the pooled buffer
+		// Found ACK - return any pre-ACK data
 		if len(*preAck) == 0 {
 			return []byte{}, true, nil
 		}
@@ -772,11 +772,15 @@ func (*Transport) processAckBuffer(ackBuf, preAck *[]byte) (result []byte, found
 		return result, true, nil
 	}
 
+	// Not an ACK - shift the sliding window
 	*preAck = append(*preAck, (*ackBuf)[0])
-	*ackBuf = (*ackBuf)[1:]
 
-	// Prevent buffer overflow if we're receiving invalid data
-	if len(*preAck) > 64 {
+	// Shift bytes left in ackBuf without re-slicing to preserve buffer pool
+	copy(*ackBuf, (*ackBuf)[1:])
+	*ackBuf = (*ackBuf)[:len(*ackBuf)-1] // Reduce length by 1, keep capacity
+
+	// Prevent buffer overflow - use half of max frame size (255/2 ≈ 128)
+	if len(*preAck) > 128 {
 		return nil, false, fmt.Errorf("too much pre-ACK data received (%d bytes)", len(*preAck))
 	}
 
