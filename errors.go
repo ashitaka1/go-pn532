@@ -140,6 +140,21 @@ func GetErrorType(err error) ErrorType {
 	}
 }
 
+// IsRecoverable checks if an error indicates the device might be in a stuck state
+// that could potentially be recovered with a soft reset sequence
+func IsRecoverable(err error) bool {
+	// Only attempt recovery for severe transport/communication errors
+	// that suggest the device might be unresponsive
+	switch {
+	case errors.Is(err, ErrTransportTimeout),
+		errors.Is(err, ErrNoACK),
+		errors.Is(err, ErrFrameCorrupted):
+		return true
+	default:
+		return false
+	}
+}
+
 // Error constructors for consistent error creation
 
 // NewTransportError creates a standard transport error with consistent formatting

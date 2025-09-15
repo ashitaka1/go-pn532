@@ -393,6 +393,11 @@ func (t *Transport) waitAck() ([]byte, error) {
 
 // sendFrame sends a frame to the PN532
 func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
+	// Flush any stale data from the input buffer before starting
+	if t.port != nil {
+		_ = t.port.ResetInputBuffer()
+	}
+
 	// Calculate total frame size
 	dataLen := 2 + len(args) // hostToPn532 + cmd + args
 	if dataLen > 255 {
@@ -442,6 +447,9 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 	} else if n != len(finalFrame) {
 		return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
 	}
+
+	// Give Windows serial drivers time to process the write
+	windowsPostWriteDelay()
 
 	if err := t.drainWithRetry("send frame"); err != nil {
 		return nil, err

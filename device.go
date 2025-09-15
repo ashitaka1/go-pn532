@@ -408,6 +408,27 @@ func (d *Device) IsAutoPollSupported() bool {
 	return d.hasCapability(CapabilityAutoPollNative)
 }
 
+// SetPassiveActivationRetries configures the maximum number of retries for passive activation
+// to prevent infinite waiting that can cause the PN532 to lock up. A finite number like 10 (0x0A)
+// is recommended instead of 0xFF (infinite) to avoid stuck states requiring power cycling.
+func (d *Device) SetPassiveActivationRetries(maxRetries byte) error {
+	// RF Configuration item 0x05 - MaxRetries
+	// Payload: [MxRtyATR, MxRtyPSL, MxRtyPassiveActivation]
+	configPayload := []byte{
+		0x05,       // CfgItem: MaxRetries
+		0x00,       // MxRtyATR (use default)
+		0x00,       // MxRtyPSL (use default)
+		maxRetries, // MxRtyPassiveActivation
+	}
+
+	_, err := d.transport.SendCommand(cmdRFConfiguration, configPayload)
+	if err != nil {
+		return fmt.Errorf("failed to set passive activation retries: %w", err)
+	}
+
+	return nil
+}
+
 // Close closes the device connection
 func (d *Device) Close() error {
 	if d.transport != nil {

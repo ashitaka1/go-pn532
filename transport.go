@@ -109,6 +109,14 @@ func (t *TransportWithRetry) SendCommand(cmd byte, args []byte) ([]byte, error) 
 		var err error
 		result, err = t.transport.SendCommand(cmd, args)
 		if err != nil {
+			// Try recovery for recoverable errors
+			if IsRecoverable(err) && t.attemptRecovery(cmd, args) == nil {
+				// Recovery succeeded, retry once
+				if retryResult, retryErr := t.transport.SendCommand(cmd, args); retryErr == nil {
+					result = retryResult
+					return nil
+				}
+			}
 			// Wrap transport errors for better error handling
 			return &TransportError{
 				Op:        "SendCommand",
@@ -131,6 +139,14 @@ func (t *TransportWithRetry) SendCommandWithContext(ctx context.Context, cmd byt
 		var err error
 		result, err = t.transport.SendCommandWithContext(ctx, cmd, args)
 		if err != nil {
+			// Try recovery for recoverable errors
+			if IsRecoverable(err) && t.attemptRecoveryWithContext(ctx, cmd) == nil {
+				// Recovery succeeded, retry once
+				if retryResult, retryErr := t.transport.SendCommandWithContext(ctx, cmd, args); retryErr == nil {
+					result = retryResult
+					return nil
+				}
+			}
 			// Wrap transport errors for better error handling
 			return &TransportError{
 				Op:        "SendCommandWithContext",
@@ -142,6 +158,35 @@ func (t *TransportWithRetry) SendCommandWithContext(ctx context.Context, cmd byt
 		return nil
 	})
 	return result, err
+}
+
+// attemptRecovery attempts to recover from a stuck PN532 state using software reset
+func (t *TransportWithRetry) attemptRecovery(originalCmd byte, _ []byte) error {
+	return t.attemptRecoveryWithContext(context.Background(), originalCmd)
+}
+
+// attemptRecoveryWithContext attempts recovery with context support
+func (t *TransportWithRetry) attemptRecoveryWithContext(
+	ctx context.Context, originalCmd byte,
+) error {
+	// Skip recovery if the failed command was already a recovery command to avoid infinite loops
+	if originalCmd == 0x14 || originalCmd == 0x02 { // SAM Config or GetFirmwareVersion
+		return errors.New("recovery command failed, skipping nested recovery")
+	}
+
+	// Step 1: Perform SAM Configuration to reset internal state
+	_, err := t.transport.SendCommandWithContext(ctx, 0x14, []byte{0x01, 0x14, 0x01}) // Normal mode SAM config
+	if err != nil {
+		return fmt.Errorf("recovery SAM configuration failed: %w", err)
+	}
+
+	// Step 2: Test with firmware version as health check
+	_, err = t.transport.SendCommandWithContext(ctx, 0x02, nil) // GetFirmwareVersion command
+	if err != nil {
+		return fmt.Errorf("recovery health check failed: %w", err)
+	}
+
+	return nil
 }
 
 // Close closes the transport connection
