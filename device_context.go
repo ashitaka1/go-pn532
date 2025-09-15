@@ -777,55 +777,65 @@ func (d *Device) executeInListPassiveTarget(ctx context.Context, data []byte) ([
 // computeInListHostTimeout derives a host-side timeout from mxRtyATR and context deadline
 // According to PN532 docs, each retry is ~150ms. We add baseline slack and bound by context if present.
 func (d *Device) computeInListHostTimeout(ctx context.Context, data []byte) time.Duration {
-	// If a context deadline exists, we'll cap to that later.
-	// Default fallback if nothing better is known.
 	fallback := d.config.Timeout
 
 	// When mxRtyATR (3rd byte) is provided, derive a timeout from it.
 	if len(data) >= 3 {
-		mx := data[2]
-		// 0xFF means infinite retry on hardware; rely on context or cap to a safe upper bound
-		if mx == 0xFF {
-			if deadline, ok := ctx.Deadline(); ok {
-				rem := time.Until(deadline)
-				if rem > 0 {
-					return rem
-				}
-			}
-			// No deadline; choose a conservative cap
-			return 10 * time.Second
-		}
-
-		// Each retry ~150ms; add small baseline slack for host/driver overhead
-		expected := time.Duration(int(mx)) * 150 * time.Millisecond
-		// Add baseline slack (~300ms)
-		expected += 300 * time.Millisecond
-
-		// Ensure we don't go below device default
-		if expected < fallback {
-			expected = fallback
-		}
-
-		// Cap to a reasonable maximum to avoid excessive blocking when mx is large
-		if expected > 8*time.Second {
-			expected = 8 * time.Second
-		}
-
-		// Respect context deadline if sooner
-		if deadline, ok := ctx.Deadline(); ok {
-			rem := time.Until(deadline)
-			if rem > 0 && rem < expected {
-				return rem
-			}
-		}
-		return expected
+		return d.computeTimeoutFromRetryCount(ctx, data[2], fallback)
 	}
 
 	// No mxRtyATR provided; use context deadline if present or fallback
+	return d.getContextTimeoutOrFallback(ctx, fallback)
+}
+
+// computeTimeoutFromRetryCount calculates timeout based on mxRtyATR retry count
+func (d *Device) computeTimeoutFromRetryCount(ctx context.Context, mx byte, fallback time.Duration) time.Duration {
+	// 0xFF means infinite retry on hardware; rely on context or cap to a safe upper bound
+	if mx == 0xFF {
+		return d.handleInfiniteRetry(ctx)
+	}
+
+	// Each retry ~150ms; add small baseline slack for host/driver overhead
+	expected := time.Duration(int(mx))*150*time.Millisecond + 300*time.Millisecond
+
+	// Apply bounds and respect context deadline
+	return d.applyTimeoutBounds(ctx, expected, fallback)
+}
+
+// handleInfiniteRetry handles the special case of infinite retry (0xFF)
+func (*Device) handleInfiniteRetry(ctx context.Context) time.Duration {
 	if deadline, ok := ctx.Deadline(); ok {
-		rem := time.Until(deadline)
-		if rem > 0 {
+		if rem := time.Until(deadline); rem > 0 {
 			return rem
+		}
+	}
+	// No deadline; choose a conservative cap
+	return 10 * time.Second
+}
+
+// applyTimeoutBounds ensures timeout is within reasonable bounds and respects context
+func (d *Device) applyTimeoutBounds(ctx context.Context, expected, fallback time.Duration) time.Duration {
+	// Ensure we don't go below device default
+	if expected < fallback {
+		expected = fallback
+	}
+
+	// Cap to a reasonable maximum to avoid excessive blocking when mx is large
+	if expected > 8*time.Second {
+		expected = 8 * time.Second
+	}
+
+	// Respect context deadline if sooner
+	return d.getContextTimeoutOrFallback(ctx, expected)
+}
+
+// getContextTimeoutOrFallback returns context deadline if present and positive, otherwise fallback
+func (d *Device) getContextTimeoutOrFallback(ctx context.Context, fallback time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		if rem := time.Until(deadline); rem > 0 {
+			if fallback == d.config.Timeout || rem < fallback {
+				return rem
+			}
 		}
 	}
 	return fallback
