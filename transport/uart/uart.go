@@ -313,9 +313,6 @@ func (t *Transport) singleWakeUpAttempt() error {
 		return pn532.NewTransportWriteError("wakeUp", t.portName)
 	}
 
-	// Windows needs time for buffer flushing after write
-	windowsPostWriteDelay()
-
 	return t.drainWithRetry("wake up")
 }
 
@@ -328,9 +325,6 @@ func (t *Transport) sendAck() error {
 		return pn532.NewTransportWriteError("sendAck", t.portName)
 	}
 
-	// Windows needs time for buffer flushing after write
-	windowsPostWriteDelay()
-
 	return t.drainWithRetry("ACK")
 }
 
@@ -342,9 +336,6 @@ func (t *Transport) sendNack() error {
 	} else if n != len(nackFrame) {
 		return pn532.NewTransportWriteError("sendNack", t.portName)
 	}
-
-	// Windows needs time for buffer flushing after write
-	windowsPostWriteDelay()
 
 	return t.drainWithRetry("NACK")
 }
@@ -451,9 +442,6 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 	} else if n != len(finalFrame) {
 		return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
 	}
-
-	// Windows needs time for buffer flushing after write
-	windowsPostWriteDelay()
 
 	if err := t.drainWithRetry("send frame"); err != nil {
 		return nil, err
