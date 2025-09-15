@@ -827,10 +827,6 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 	// Windows needs time for buffer flushing after write
 	windowsPostWriteDelay()
 
-	if err := t.drainWithRetry("send frame"); err != nil {
-		return nil, err
-	}
-
 	return t.waitAck()
 }
 
