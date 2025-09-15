@@ -235,6 +235,9 @@ func (t *Transport) SendCommandWithContext(ctx context.Context, cmd byte, args [
 
 // setTimeoutUnlocked sets the read timeout without acquiring the mutex (internal use)
 func (t *Transport) setTimeoutUnlocked(timeout time.Duration) error {
+	if t.port == nil {
+		return nil // Allow operation when port is closed
+	}
 	err := t.port.SetReadTimeout(timeout)
 	if err != nil {
 		return fmt.Errorf("UART set timeout failed: %w", err)
@@ -253,6 +256,8 @@ func (t *Transport) SetTimeout(timeout time.Duration) error {
 func (t *Transport) Close() error {
 	if t.port != nil {
 		err := t.port.Close()
+		t.port = nil                    // Clear port reference after closing
+		t.connectionEstablished = false // Reset connection state
 		if err != nil {
 			return fmt.Errorf("UART close failed: %w", err)
 		}
@@ -333,8 +338,7 @@ func (t *Transport) clearInputBuffer() error {
 		}
 	}
 
-	// Additional drain for any remaining data in OS buffers
-	return t.drainWithRetry("clear input buffer")
+	return nil
 }
 
 // isTimeoutError checks if an error is a timeout error
@@ -365,23 +369,13 @@ func (t *Transport) wakeUpWithRetry() error {
 	var lastErr error
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if err := t.singleWakeUpAttempt(); err != nil {
-			lastErr = err
-			// Wait with increasing delay before retry
-			if attempt < maxAttempts-1 {
-				time.Sleep(delays[attempt])
-				continue
-			}
-		} else {
-			// Verify wake-up was successful with "double wake" pattern
-			verifyErr := t.verifyWakeUp()
-			if verifyErr == nil {
-				return nil // Wake-up successful
-			}
-			lastErr = verifyErr
+		err := t.singleWakeUpAttempt()
+		if err == nil {
+			return nil // Wake-up successful
 		}
 
-		// Additional delay before retry on verification failure
+		lastErr = err
+		// Wait with increasing delay before retry
 		if attempt < maxAttempts-1 {
 			time.Sleep(delays[attempt])
 		}
@@ -392,9 +386,6 @@ func (t *Transport) wakeUpWithRetry() error {
 
 // singleWakeUpAttempt performs a single wake-up attempt
 func (t *Transport) singleWakeUpAttempt() error {
-	// Clear any pending data before wake-up
-	_ = t.clearInputBuffer()
-
 	// Over UART, PN532 must be "woken up" by sending a 0x55
 	// dummy byte sequence and then waiting
 	wakeSequence := []byte{
@@ -414,28 +405,6 @@ func (t *Transport) singleWakeUpAttempt() error {
 	windowsPostWriteDelay()
 
 	return t.drainWithRetry("wake up")
-}
-
-// verifyWakeUp verifies that the wake-up was successful by sending a second wake sequence
-// This implements the "double wake" pattern from Adafruit library
-func (t *Transport) verifyWakeUp() error {
-	// Send a shorter verification sequence
-	verifySequence := []byte{0x55, 0x55, 0x00, 0x00, 0x00}
-
-	bytesWritten, err := t.port.Write(verifySequence)
-	if err != nil {
-		return fmt.Errorf("UART wake verification write failed: %w", err)
-	} else if bytesWritten != len(verifySequence) {
-		return errors.New("wake verification incomplete write")
-	}
-
-	// Windows needs time for buffer flushing after write
-	windowsPostWriteDelay()
-
-	// Small delay for verification
-	time.Sleep(5 * time.Millisecond)
-
-	return t.drainWithRetry("wake verification")
 }
 
 // getCommandTimeout returns timeout duration based on command type
