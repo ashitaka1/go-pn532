@@ -81,50 +81,6 @@ func TestWindowsPostWriteDelay(t *testing.T) {
 	}
 }
 
-// TestWindowsPortRecovery tests Windows-specific port recovery mechanism
-func TestWindowsPortRecovery(t *testing.T) {
-	t.Parallel()
-
-	// Create a transport with nil port (we're just testing the recovery logic doesn't panic)
-	transport := &Transport{
-		portName: "COM1",
-	}
-
-	// This should not panic and should handle Windows vs non-Windows gracefully
-	err := transport.windowsPortRecovery()
-
-	// On non-Windows, this should return nil immediately
-	// On Windows, it may return an error due to nil port, but shouldn't panic
-	if runtime.GOOS != "windows" && err != nil {
-		t.Errorf("windowsPortRecovery() on non-Windows should return nil, got %v", err)
-	}
-}
-
-// TestWindowsWaitAckRecovery tests that waitAck attempts Windows recovery before giving up
-func TestWindowsWaitAckRecovery(t *testing.T) {
-	t.Parallel()
-
-	// This test verifies that Windows-specific recovery is attempted in waitAck
-	// We can test the logic by checking if the recovery function exists
-	transport := &Transport{
-		portName: "COM1",
-	}
-
-	// Call the recovery function to ensure it exists and doesn't panic
-	err := transport.windowsPortRecovery()
-
-	// The function should exist and handle nil port gracefully
-	if runtime.GOOS != "windows" && err != nil {
-		t.Errorf("windowsPortRecovery should return nil on non-Windows, got %v", err)
-	}
-
-	// On Windows with nil port, should return nil (graceful handling)
-	if runtime.GOOS == "windows" && err != nil {
-		// With nil port, should handle gracefully and return nil
-		t.Logf("Windows recovery with nil port returned: %v (expected behavior)", err)
-	}
-}
-
 // TestWindowsIntegrationFunctions tests that Windows integration functions exist
 func TestWindowsIntegrationFunctions(t *testing.T) {
 	t.Parallel()
@@ -145,10 +101,4 @@ func TestWindowsIntegrationFunctions(t *testing.T) {
 
 	// Test delay function (should not panic)
 	windowsPostWriteDelay()
-
-	// Test recovery function on transport
-	transport := &Transport{portName: "test"}
-	if err := transport.windowsPortRecovery(); err != nil && runtime.GOOS != "windows" {
-		t.Errorf("Unexpected error on non-Windows: %v", err)
-	}
 }
