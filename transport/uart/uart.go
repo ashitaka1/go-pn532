@@ -71,9 +71,10 @@ func isWindows() bool {
 // getWindowsTimeout returns Windows-specific timeout values
 func getWindowsTimeout() time.Duration {
 	if isWindows() {
-		return 100 * time.Millisecond // Increased from 50ms for Windows
+		return 100 * time.Millisecond // Increased for Windows stability
 	}
-	return 50 * time.Millisecond
+	// Relax non-Windows default read timeout to improve reliability with USB-UART
+	return 100 * time.Millisecond
 }
 
 // windowsPostWriteDelay adds Windows-specific delay after write operations
@@ -589,7 +590,7 @@ func (t *Transport) processFrameData(buf []byte, totalLen int) (data []byte, ret
 func (t *Transport) readInitialData(buf []byte) (int, error) {
 	// Platform-specific delay to let the PN532 start sending
 	// Windows USB-serial drivers need more time for reliable responses
-	initialDelay := 5 * time.Millisecond
+	initialDelay := 8 * time.Millisecond
 	if isWindows() {
 		initialDelay = 10 * time.Millisecond
 	}
@@ -614,7 +615,7 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 // retryInitialRead performs a retry read with platform-specific timing
 func (t *Transport) retryInitialRead(buf []byte) (int, error) {
 	// Some PN532 modules need more time for certain commands
-	retryDelay := 50 * time.Millisecond
+	retryDelay := 80 * time.Millisecond
 	if isWindows() {
 		retryDelay = 100 * time.Millisecond
 	}
@@ -680,8 +681,12 @@ func (t *Transport) ensureCompleteFrame(buf []byte, off, frameLen, totalLen int)
 func (t *Transport) readRemainingData(buf []byte, totalLen, expectedLen int) (int, error) {
 	// Use shorter timeout to prevent 30-second accumulation with retries
 	// Windows needs longer timeout for reliable data exchange responses
-	timeoutDuration := 500 * time.Millisecond
+	timeoutDuration := 1000 * time.Millisecond
 	if isWindows() {
+		timeoutDuration = 1500 * time.Millisecond
+	}
+	// Special-case: InListPassiveTarget tends to run longer; allow more time on non-Windows
+	if !isWindows() && t.lastCommand == 0x4A {
 		timeoutDuration = 1500 * time.Millisecond
 	}
 	timeout := time.After(timeoutDuration)

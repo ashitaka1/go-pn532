@@ -758,11 +758,77 @@ func (*Device) normalizeMaxTargets(maxTg byte) byte {
 
 // executeInListPassiveTarget sends the InListPassiveTarget command
 func (d *Device) executeInListPassiveTarget(ctx context.Context, data []byte) ([]byte, error) {
+	// Dynamically adjust transport timeout based on mxRtyATR when provided
+	// mxRtyATR is the 3rd byte of the InListPassiveTarget payload
+	prevTimeout := d.config.Timeout
+	computed := d.computeInListHostTimeout(ctx, data)
+	// Best-effort set; if it fails we'll proceed with previous timeout
+	_ = d.transport.SetTimeout(computed)
+	// Restore previous timeout after the command completes
+	defer func() { _ = d.transport.SetTimeout(prevTimeout) }()
+
 	result, err := d.transport.SendCommandWithContext(ctx, cmdInListPassiveTarget, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send InListPassiveTarget command: %w", err)
 	}
 	return result, nil
+}
+
+// computeInListHostTimeout derives a host-side timeout from mxRtyATR and context deadline
+// According to PN532 docs, each retry is ~150ms. We add baseline slack and bound by context if present.
+func (d *Device) computeInListHostTimeout(ctx context.Context, data []byte) time.Duration {
+	// If a context deadline exists, we'll cap to that later.
+	// Default fallback if nothing better is known.
+	fallback := d.config.Timeout
+
+	// When mxRtyATR (3rd byte) is provided, derive a timeout from it.
+	if len(data) >= 3 {
+		mx := data[2]
+		// 0xFF means infinite retry on hardware; rely on context or cap to a safe upper bound
+		if mx == 0xFF {
+			if deadline, ok := ctx.Deadline(); ok {
+				rem := time.Until(deadline)
+				if rem > 0 {
+					return rem
+				}
+			}
+			// No deadline; choose a conservative cap
+			return 10 * time.Second
+		}
+
+		// Each retry ~150ms; add small baseline slack for host/driver overhead
+		expected := time.Duration(int(mx)) * 150 * time.Millisecond
+		// Add baseline slack (~300ms)
+		expected += 300 * time.Millisecond
+
+		// Ensure we don't go below device default
+		if expected < fallback {
+			expected = fallback
+		}
+
+		// Cap to a reasonable maximum to avoid excessive blocking when mx is large
+		if expected > 8*time.Second {
+			expected = 8 * time.Second
+		}
+
+		// Respect context deadline if sooner
+		if deadline, ok := ctx.Deadline(); ok {
+			rem := time.Until(deadline)
+			if rem > 0 && rem < expected {
+				return rem
+			}
+		}
+		return expected
+	}
+
+	// No mxRtyATR provided; use context deadline if present or fallback
+	if deadline, ok := ctx.Deadline(); ok {
+		rem := time.Until(deadline)
+		if rem > 0 {
+			return rem
+		}
+	}
+	return fallback
 }
 
 // handleInListPassiveTargetError handles command errors with clone device fallback
