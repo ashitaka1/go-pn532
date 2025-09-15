@@ -580,10 +580,10 @@ func (t *Transport) processFrameData(buf []byte, totalLen int) (data []byte, ret
 // readInitialData reads the initial frame data from the port
 func (t *Transport) readInitialData(buf []byte) (int, error) {
 	// Platform-specific delay to let the PN532 start sending
-	// Windows USB-serial drivers may need less initial delay
+	// Windows USB-serial drivers need more time for reliable responses
 	initialDelay := 5 * time.Millisecond
 	if isWindows() {
-		initialDelay = 2 * time.Millisecond
+		initialDelay = 10 * time.Millisecond
 	}
 	time.Sleep(initialDelay)
 
@@ -606,10 +606,9 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 // retryInitialRead performs a retry read with platform-specific timing
 func (t *Transport) retryInitialRead(buf []byte) (int, error) {
 	// Some PN532 modules need more time for certain commands
-	// Windows may need different retry timing
 	retryDelay := 50 * time.Millisecond
 	if isWindows() {
-		retryDelay = 25 * time.Millisecond
+		retryDelay = 100 * time.Millisecond
 	}
 	time.Sleep(retryDelay)
 
@@ -672,10 +671,10 @@ func (t *Transport) ensureCompleteFrame(buf []byte, off, frameLen, totalLen int)
 // readRemainingData reads the remaining frame data with timeout
 func (t *Transport) readRemainingData(buf []byte, totalLen, expectedLen int) (int, error) {
 	// Use shorter timeout to prevent 30-second accumulation with retries
-	// Windows may need slightly longer timeout due to USB-serial driver delays
+	// Windows needs longer timeout for reliable data exchange responses
 	timeoutDuration := 500 * time.Millisecond
 	if isWindows() {
-		timeoutDuration = 750 * time.Millisecond
+		timeoutDuration = 1500 * time.Millisecond
 	}
 	timeout := time.After(timeoutDuration)
 
