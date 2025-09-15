@@ -665,9 +665,11 @@ func getAckTimeout() time.Duration {
 
 // waitAckWithTimeout waits for an ACK frame with configurable timeout
 func (t *Transport) waitAckWithTimeout(timeout time.Duration) ([]byte, error) {
-	deadline := time.Now().Add(timeout)
-	retryCount := 0
-	maxRetries := 3
+	state := &ackWaitState{
+		deadline:   time.Now().Add(timeout),
+		maxRetries: 3,
+		timeout:    timeout,
+	}
 
 	// Use buffer pool for ACK processing - reduces small allocations
 	buf := frame.GetSmallBuffer(1)
@@ -682,53 +684,103 @@ func (t *Transport) waitAckWithTimeout(timeout time.Duration) ([]byte, error) {
 	preAck = preAck[:0] // Reset length
 
 	for {
-		// Check if we've exceeded the timeout
-		if time.Now().After(deadline) {
-			if retryCount < maxRetries {
-				// Retry with exponential backoff
-				retryCount++
-				backoffDelay := time.Duration(retryCount*retryCount) * 10 * time.Millisecond
-				time.Sleep(backoffDelay)
-				deadline = time.Now().Add(timeout)
+		if shouldRetryOrTimeout := t.handleTimeout(state, preAck); shouldRetryOrTimeout != continueWait {
+			if shouldRetryOrTimeout == retryResult {
 				continue
 			}
 			return preAck, pn532.NewNoACKError("waitAck timeout", t.portName)
 		}
 
-		bytesRead, err := t.port.Read(buf)
-		if err != nil {
-			if isTimeoutError(err) {
-				continue // Continue until our deadline
-			}
-			return preAck, fmt.Errorf("UART ACK read failed: %w", err)
-		} else if bytesRead == 0 {
-			time.Sleep(1 * time.Millisecond) // Small delay to prevent busy waiting
+		if shouldContinue, err := t.readNextByte(buf); err != nil {
+			return preAck, err
+		} else if shouldContinue {
 			continue
 		}
 
 		ackBuf = append(ackBuf, buf[0])
-		if len(ackBuf) < 6 {
-			continue
-		}
-
-		if bytes.Equal(ackBuf, ackFrame) {
-			// Copy preAck data to new buffer for return since we'll release the pooled buffer
-			if len(preAck) == 0 {
-				return []byte{}, nil
-			}
-			result := make([]byte, len(preAck))
-			copy(result, preAck)
+		if result, found, err := t.processAckBuffer(&ackBuf, &preAck); err != nil {
+			return preAck, err
+		} else if found {
 			return result, nil
 		}
-
-		preAck = append(preAck, ackBuf[0])
-		ackBuf = ackBuf[1:]
-
-		// Prevent buffer overflow if we're receiving invalid data
-		if len(preAck) > 64 {
-			return preAck, fmt.Errorf("too much pre-ACK data received (%d bytes)", len(preAck))
-		}
 	}
+}
+
+type ackWaitState struct {
+	deadline   time.Time
+	retryCount int
+	maxRetries int
+	timeout    time.Duration
+}
+
+type timeoutResult int
+
+const (
+	continueWait timeoutResult = iota
+	retryResult
+	timeoutError
+)
+
+// handleTimeout checks timeout and manages retries
+func (*Transport) handleTimeout(state *ackWaitState, _ []byte) timeoutResult {
+	if !time.Now().After(state.deadline) {
+		return continueWait
+	}
+
+	if state.retryCount < state.maxRetries {
+		state.retryCount++
+		backoffDelay := time.Duration(state.retryCount*state.retryCount) * 10 * time.Millisecond
+		time.Sleep(backoffDelay)
+		state.deadline = time.Now().Add(state.timeout)
+		return retryResult
+	}
+
+	return timeoutError
+}
+
+// readNextByte reads the next byte from the port
+func (t *Transport) readNextByte(buf []byte) (bool, error) {
+	bytesRead, err := t.port.Read(buf)
+	if err != nil {
+		if isTimeoutError(err) {
+			return true, nil // Continue until our deadline
+		}
+		return false, fmt.Errorf("UART ACK read failed: %w", err)
+	}
+
+	if bytesRead == 0 {
+		time.Sleep(1 * time.Millisecond) // Small delay to prevent busy waiting
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// processAckBuffer processes the ACK buffer for ACK detection
+func (*Transport) processAckBuffer(ackBuf, preAck *[]byte) (result []byte, found bool, err error) {
+	if len(*ackBuf) < 6 {
+		return nil, false, nil
+	}
+
+	if bytes.Equal(*ackBuf, ackFrame) {
+		// Copy preAck data to new buffer for return since we'll release the pooled buffer
+		if len(*preAck) == 0 {
+			return []byte{}, true, nil
+		}
+		result := make([]byte, len(*preAck))
+		copy(result, *preAck)
+		return result, true, nil
+	}
+
+	*preAck = append(*preAck, (*ackBuf)[0])
+	*ackBuf = (*ackBuf)[1:]
+
+	// Prevent buffer overflow if we're receiving invalid data
+	if len(*preAck) > 64 {
+		return nil, false, fmt.Errorf("too much pre-ACK data received (%d bytes)", len(*preAck))
+	}
+
+	return nil, false, nil
 }
 
 // sendFrame sends a frame to the PN532
