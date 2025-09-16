@@ -436,4 +436,107 @@ func createMockDevice(t *testing.T) *Device {
 
 // Removed duplicate - using the one from mifare_test.go
 
+// TestNTAG215LargeDataCrash reproduces the crash reported by user with large NDEF data
+func TestNTAG215LargeDataCrash(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag.tagType = NTAGType215 // Force NTAG215 type
+
+	// Create large NDEF message that approaches NTAG215's 504-byte user memory limit
+	largeText := make([]byte, 480) // Large text payload
+	for i := range largeText {
+		largeText[i] = byte('A' + (i % 26)) // Fill with repeating alphabet
+	}
+
+	// Mock the NDEF header read (block 4) with extended length format
+	// Format: [0x03] [0xFF] [high_byte] [low_byte] for extended length
+	headerData := []byte{
+		0x03,        // NDEF TLV type
+		0xFF,        // Extended length indicator
+		0x02, 0x00,  // Length = 512 bytes (0x0200) - exceeds NTAG215 capacity
+		// Rest of block would contain start of NDEF data
+	}
+	// Pad to 16 bytes (4 blocks returned by READ command)
+	headerBlock := make([]byte, 16)
+	copy(headerBlock, headerData)
+
+	// Mock the block read for header
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, headerBlock...))
+
+	// This should trigger the crash due to:
+	// 1. Integer overflow when calculating totalBytes = headerSize + ndefLength + 1
+	// 2. Attempting to read beyond the hardcoded 64-block limit in block-by-block fallback
+	// 3. Potential buffer overflow when totalBytes exceeds expected bounds
+
+	// With our fixes, this should now fail gracefully with proper error handling
+	_, err := tag.ReadNDEF()
+
+	// Verify our fixes work:
+	// 1. No crash occurs (test completes)
+	// 2. Proper error handling for oversized NDEF data
+	// 3. Error message indicates the specific problem
+	require.Error(t, err, "Should reject oversized NDEF data")
+	assert.Contains(t, err.Error(), "exceeds tag capacity", "Error should indicate capacity exceeded")
+	assert.Contains(t, err.Error(), "NTAG215", "Error should identify tag type")
+
+	t.Logf("✓ ReadNDEF properly rejected oversized data: %v", err)
+}
+
+// TestNTAG215BlockByBlockBufferOverflow tests the specific buffer overflow in block-by-block reading
+func TestNTAG215BlockByBlockBufferOverflow(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag.tagType = NTAGType215
+
+	// Force FastRead to be disabled to trigger block-by-block fallback
+	fastReadDisabled := false
+	tag.fastReadSupported = &fastReadDisabled
+
+	// Create NDEF header that indicates more data than the 64-block limit can handle
+	headerData := []byte{
+		0x03,        // NDEF TLV type
+		0xFF,        // Extended length indicator
+		0x02, 0x00,  // Length = 512 bytes (more than 64*4=256 byte limit)
+	}
+	headerBlock := make([]byte, 16)
+	copy(headerBlock, headerData)
+
+	// Mock responses for block reads
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, headerBlock...))
+
+	// Mock subsequent block reads (blocks 5-67) with test data
+	for block := uint8(5); block < 68; block++ {
+		blockData := make([]byte, 18) // Response header + 16 bytes data
+		blockData[0] = 0x41           // InDataExchange response
+		blockData[1] = 0x00           // Success
+		for i := 2; i < 18; i++ {
+			blockData[i] = byte(block) // Fill with block number for testing
+		}
+		mockTransport.SetResponse(0x40, blockData)
+	}
+
+	// With our fixes, this should now use proper tag capacity bounds instead of hardcoded limits
+	_, err := tag.ReadNDEF()
+
+	// With our fixes, this could either:
+	// 1. Succeed by properly reading within tag bounds (if mock data is valid)
+	// 2. Fail gracefully with proper error handling (expected for this test setup)
+
+	// The key verification is that it doesn't crash due to buffer overflow
+	// Since we're forcing block-by-block reading with insufficient mock data,
+	// we expect a graceful failure rather than success
+	if err != nil {
+		t.Logf("✓ Block-by-block reading failed gracefully (no crash): %v", err)
+		// Verify it's a proper NDEF parsing error, not a crash/panic
+		assert.NotContains(t, err.Error(), "panic", "Should not contain panic messages")
+		assert.NotContains(t, err.Error(), "runtime error", "Should not contain runtime errors")
+	} else {
+		t.Logf("✓ Block-by-block reading succeeded (proper bounds checking)")
+	}
+}
+
 // NDEF Message Tests

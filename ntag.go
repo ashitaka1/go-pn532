@@ -212,7 +212,14 @@ func (t *NTAGTag) ReadNDEF() (*NDEFMessage, error) {
 		return nil, err
 	}
 
+	// Calculate totalBytes with overflow protection
 	totalBytes := header.headerSize + header.ndefLength + 1
+
+	// Additional bounds checking for totalBytes calculation
+	if totalBytes < 0 || totalBytes > 1000000 { // Sanity check against unreasonable values
+		return nil, fmt.Errorf("invalid total bytes calculation: %d (header: %d, length: %d)",
+			totalBytes, header.headerSize, header.ndefLength)
+	}
 
 	_ = t.ensureTagTypeDetected() // Ignore error, use conservative approach
 
@@ -250,11 +257,59 @@ func (t *NTAGTag) readNDEFHeader() (*ndefHeader, error) {
 		header.ndefLength = int(block4[1])
 		header.headerSize = 2
 	} else {
-		header.ndefLength = int(uint16(block4[2])<<8 | uint16(block4[3]))
+		// Check that we have enough bytes for extended length format
+		if len(block4) < 4 {
+			return nil, fmt.Errorf("invalid NDEF header: insufficient data for extended length")
+		}
+
+		// Parse extended length with bounds checking
+		extendedLength := uint16(block4[2])<<8 | uint16(block4[3])
+		header.ndefLength = int(extendedLength)
 		header.headerSize = 4
 	}
 
+	// Validate NDEF length against reasonable bounds
+	if header.ndefLength < 0 || header.ndefLength > 65535 {
+		return nil, fmt.Errorf("invalid NDEF length: %d (must be 0-65535)", header.ndefLength)
+	}
+
+	// Validate against tag capacity if we know the tag type
+	if err := t.validateNDEFLengthAgainstCapacity(header.ndefLength); err != nil {
+		return nil, err
+	}
+
 	return header, nil
+}
+
+// validateNDEFLengthAgainstCapacity checks if the NDEF length is reasonable for the tag type
+func (t *NTAGTag) validateNDEFLengthAgainstCapacity(ndefLength int) error {
+	// Ensure tag type detection has been attempted
+	_ = t.ensureTagTypeDetected() // Ignore error, use conservative bounds
+
+	var maxUserBytes int
+	switch t.tagType {
+	case NTAGType213:
+		maxUserBytes = ntag213UserPages * ntagBlockSize // 36 * 4 = 144 bytes
+	case NTAGType215:
+		maxUserBytes = ntag215UserPages * ntagBlockSize // 126 * 4 = 504 bytes
+	case NTAGType216:
+		maxUserBytes = ntag216UserPages * ntagBlockSize // 222 * 4 = 888 bytes
+	case NTAGTypeUnknown:
+		// Use conservative bounds - assume smallest variant
+		maxUserBytes = ntag213UserPages * ntagBlockSize // 144 bytes
+	default:
+		maxUserBytes = ntag213UserPages * ntagBlockSize // 144 bytes
+	}
+
+	// Account for NDEF header overhead (2-4 bytes) and terminator (1 byte)
+	maxNDEFLength := maxUserBytes - 5 // Conservative estimate
+
+	if ndefLength > maxNDEFLength {
+		return fmt.Errorf("NDEF length %d exceeds tag capacity: max %d bytes for %s",
+			ndefLength, maxNDEFLength, t.getTagTypeName())
+	}
+
+	return nil
 }
 
 func (t *NTAGTag) ensureTagTypeDetected() error {
@@ -292,22 +347,50 @@ type readRange struct {
 
 func (t *NTAGTag) calculateReadRange(totalBytes int) readRange {
 	startPage := uint8(ntagUserMemStart)
+
+	// Validate totalBytes input
+	if totalBytes < 0 {
+		debugf("NTAG calculateReadRange: negative totalBytes %d, using 0", totalBytes)
+		totalBytes = 0
+	}
+	if totalBytes > 10000 { // Sanity check against unreasonable values
+		debugf("NTAG calculateReadRange: excessive totalBytes %d, capping to 10000", totalBytes)
+		totalBytes = 10000
+	}
+
 	blocksNeeded := (totalBytes + ntagBlockSize - 1) / ntagBlockSize
 
+	// Get actual tag memory bounds for validation
+	_, userEnd := t.GetUserMemoryRange()
+	maxBlocksForTag := int(userEnd - startPage + 1)
+
+	// Validate blocksNeeded against actual tag capacity
+	if blocksNeeded > maxBlocksForTag {
+		debugf("NTAG calculateReadRange: blocks needed %d exceeds tag capacity %d for %s, capping to tag capacity",
+			blocksNeeded, maxBlocksForTag, t.getTagTypeName())
+		blocksNeeded = maxBlocksForTag
+	}
+
 	if blocksNeeded > 255 {
+		debugf("NTAG calculateReadRange: blocks needed %d exceeds uint8 limit, capping to 255", blocksNeeded)
 		blocksNeeded = 255
 	}
 	if blocksNeeded < 0 {
 		blocksNeeded = 0
 	}
 
-	// Safe conversion: blocksNeeded is guaranteed to be in range [0, 255]
-	// #nosec G115 -- blocksNeeded is explicitly bounded to [0, 255] above
+	// Safe conversion: blocksNeeded is explicitly bounded above
+	// #nosec G115 -- blocksNeeded is explicitly bounded to valid range above
 	endPage := startPage + uint8(blocksNeeded) - 1
-	_, userEnd := t.GetUserMemoryRange()
+
+	// Final bounds check against user memory range
 	if endPage > userEnd {
+		debugf("NTAG calculateReadRange: endPage %d exceeds userEnd %d, adjusting", endPage, userEnd)
 		endPage = userEnd
 	}
+
+	debugf("NTAG calculateReadRange: totalBytes=%d, blocks=%d, range=%d-%d (%s)",
+		totalBytes, blocksNeeded, startPage, endPage, t.getTagTypeName())
 
 	return readRange{startPage: startPage, endPage: endPage}
 }
@@ -368,18 +451,30 @@ func (t *NTAGTag) markFastReadAsUnsupported() {
 func (t *NTAGTag) readNDEFBlockByBlock() (*NDEFMessage, error) {
 	debugf("NTAG reading NDEF data using block-by-block method (FastRead unavailable)")
 
-	// Read user memory blocks starting from block 4
-	data := make([]byte, 0, ntagMaxBlocks*ntagBlockSize)
+	// Ensure tag type is detected for proper bounds
+	_ = t.ensureTagTypeDetected()
+
+	// Get the actual user memory range for this tag type
+	userStart, userEnd := t.GetUserMemoryRange()
+	maxBlocks := int(userEnd) + 1 // +1 to include userEnd block
+
+	debugf("NTAG block-by-block reading from block %d to %d (%s)", userStart, userEnd, t.getTagTypeName())
+
+	// Allocate buffer based on actual tag capacity
+	estimatedCapacity := (maxBlocks - int(userStart)) * ntagBlockSize
+	data := make([]byte, 0, estimatedCapacity)
 	emptyBlocks := 0
 	maxEmptyBlocks := 3
 
-	for i := ntagUserMemStart; i < ntagMaxBlocks; i++ {
+	for i := int(userStart); i < maxBlocks; i++ {
 		if i > 255 {
-			break // Prevent overflow
+			break // Prevent overflow - should not happen with valid NTAG tags
 		}
+
 		// Safe conversion: i is checked to be <= 255
 		blockData, err := t.readBlockWithRetry(uint8(i)) // #nosec G115
 		if err != nil {
+			debugf("NTAG block-by-block read failed at block %d: %v", i, err)
 			break
 		}
 
@@ -387,6 +482,7 @@ func (t *NTAGTag) readNDEFBlockByBlock() (*NDEFMessage, error) {
 		if bytes.Equal(blockData, make([]byte, len(blockData))) {
 			emptyBlocks++
 			if emptyBlocks >= maxEmptyBlocks {
+				debugf("NTAG stopping block-by-block read after %d empty blocks", maxEmptyBlocks)
 				break
 			}
 		} else {
@@ -397,6 +493,7 @@ func (t *NTAGTag) readNDEFBlockByBlock() (*NDEFMessage, error) {
 
 		// Check if we've found the NDEF end marker
 		if bytes.Contains(data, ndefEnd) {
+			debugf("NTAG found NDEF end marker, stopping block-by-block read")
 			break
 		}
 	}
@@ -772,21 +869,69 @@ func (t *NTAGTag) DetectType() error {
 	version, err := t.GetVersion()
 	if err != nil {
 		// If GET_VERSION fails, we still know it's an NTAG from the CC check
-		// Use fallback detection method
-		t.tagType = NTAGType215 // Default fallback
-		return err
+		// Use fallback detection method based on capability container
+		debugf("NTAG GET_VERSION failed, using CC-based detection fallback: %v", err)
+		t.tagType = t.detectTypeFromCapabilityContainer(ccData)
+		return nil // Don't return error if CC-based detection succeeded
 	}
 
 	// Use the version information to determine the exact variant
 	t.tagType = version.GetNTAGType()
 
 	if t.tagType == NTAGTypeUnknown {
-		// Even if storage size is unknown, we know it's an NTAG from CC check
-		// Default to NTAG215 for safety
-		t.tagType = NTAGType215
+		// Even if storage size is unknown from GET_VERSION, try CC-based detection
+		debugf("NTAG GET_VERSION returned unknown type, trying CC-based detection fallback")
+		fallbackType := t.detectTypeFromCapabilityContainer(ccData)
+		if fallbackType != NTAGTypeUnknown {
+			t.tagType = fallbackType
+		} else {
+			// Final fallback to conservative choice
+			t.tagType = NTAGType213 // Use smallest variant for safety
+		}
 	}
 
 	return nil
+}
+
+// detectTypeFromCapabilityContainer attempts to detect NTAG type from the capability container
+// when GET_VERSION is not available (clone devices, PC/SC mode, etc.)
+func (*NTAGTag) detectTypeFromCapabilityContainer(ccData []byte) NTAGType {
+	if len(ccData) < 4 {
+		return NTAGTypeUnknown
+	}
+
+	// CC format: [Magic 0xE1] [Version] [Size] [Access]
+	// Size field encodes the total memory size
+	sizeField := ccData[2]
+
+	// NTAG size field encoding (approximate):
+	// NTAG213: 0x12 (180 bytes total, 18 * 8 = 144 bytes + overhead)
+	// NTAG215: 0x3E (540 bytes total, 62 * 8 = 496 bytes + overhead)
+	// NTAG216: 0x6D (924 bytes total, 109 * 8 = 872 bytes + overhead)
+
+	switch sizeField {
+	case 0x12:
+		debugf("NTAG detected as NTAG213 from CC size field: 0x%02X", sizeField)
+		return NTAGType213
+	case 0x3E:
+		debugf("NTAG detected as NTAG215 from CC size field: 0x%02X", sizeField)
+		return NTAGType215
+	case 0x6D:
+		debugf("NTAG detected as NTAG216 from CC size field: 0x%02X", sizeField)
+		return NTAGType216
+	default:
+		// Unknown size field - try to make educated guess based on range
+		if sizeField <= 0x20 {
+			debugf("NTAG unknown size 0x%02X, guessing NTAG213 (small)", sizeField)
+			return NTAGType213
+		} else if sizeField <= 0x50 {
+			debugf("NTAG unknown size 0x%02X, guessing NTAG215 (medium)", sizeField)
+			return NTAGType215
+		} else {
+			debugf("NTAG unknown size 0x%02X, guessing NTAG216 (large)", sizeField)
+			return NTAGType216
+		}
+	}
 }
 
 // canAccessPageSafely tests if a specific page can be accessed (readable) with error handling
