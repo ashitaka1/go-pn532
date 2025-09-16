@@ -38,22 +38,15 @@ func TestWindowsPlatformDetection(t *testing.T) {
 	}
 }
 
-// TestWindowsSpecificTimeout tests Windows-specific timeout values
-func TestWindowsSpecificTimeout(t *testing.T) {
+// TestUnifiedTimeout tests the unified timeout value for all platforms
+func TestUnifiedTimeout(t *testing.T) {
 	t.Parallel()
 
-	timeout := getWindowsTimeout()
+	timeout := getReadTimeout()
+	expectedTimeout := 100 * time.Millisecond
 
-	if runtime.GOOS == "windows" {
-		expectedTimeout := 100 * time.Millisecond
-		if timeout != expectedTimeout {
-			t.Errorf("getWindowsTimeout() on Windows = %v, want %v", timeout, expectedTimeout)
-		}
-	} else {
-		expectedTimeout := 50 * time.Millisecond
-		if timeout != expectedTimeout {
-			t.Errorf("getWindowsTimeout() on non-Windows = %v, want %v", timeout, expectedTimeout)
-		}
+	if timeout != expectedTimeout {
+		t.Errorf("getReadTimeout() = %v, want %v", timeout, expectedTimeout)
 	}
 }
 
@@ -94,7 +87,7 @@ func TestWindowsIntegrationFunctions(t *testing.T) {
 	}
 
 	// Test timeout function
-	timeout := getWindowsTimeout()
+	timeout := getReadTimeout()
 	if timeout <= 0 {
 		t.Errorf("Invalid timeout: %v", timeout)
 	}

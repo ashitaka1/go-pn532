@@ -68,12 +68,10 @@ func isWindows() bool {
 	return runtime.GOOS == "windows"
 }
 
-// getWindowsTimeout returns Windows-specific timeout values
-func getWindowsTimeout() time.Duration {
-	if isWindows() {
-		return 100 * time.Millisecond // Increased for Windows stability
-	}
-	// Relax non-Windows default read timeout to improve reliability with USB-UART
+// getReadTimeout returns the unified read timeout for all platforms
+// Originally Windows needed 100ms while other platforms used 50ms, but Linux users
+// reported intermittent empty data issues, so we unified to 100ms for all platforms
+func getReadTimeout() time.Duration {
 	return 100 * time.Millisecond
 }
 
@@ -96,9 +94,9 @@ func New(portName string) (*Transport, error) {
 		return nil, fmt.Errorf("failed to open UART port %s: %w", portName, err)
 	}
 
-	// Set platform-specific timeout - increased for Windows due to driver differences
-	// 50ms proven to work on Linux/Mac, 100ms needed for Windows stability
-	timeout := getWindowsTimeout()
+	// Set unified read timeout - originally 50ms on Linux/Mac and 100ms on Windows,
+	// but unified to 100ms on all platforms to resolve Linux USB-UART reliability issues
+	timeout := getReadTimeout()
 	if err := port.SetReadTimeout(timeout); err != nil {
 		_ = port.Close()
 		return nil, fmt.Errorf("failed to set UART read timeout: %w", err)
