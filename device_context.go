@@ -760,7 +760,10 @@ func (*Device) normalizeMaxTargets(maxTg byte) byte {
 func (d *Device) executeInListPassiveTarget(ctx context.Context, data []byte) ([]byte, error) {
 	// Dynamically adjust transport timeout based on mxRtyATR when provided
 	// mxRtyATR is the 3rd byte of the InListPassiveTarget payload
-	prevTimeout := d.config.Timeout
+	var prevTimeout time.Duration
+	if d.config != nil {
+		prevTimeout = d.config.Timeout
+	}
 	computed := d.computeInListHostTimeout(ctx, data)
 	// Best-effort set; if it fails we'll proceed with previous timeout
 	_ = d.transport.SetTimeout(computed)
@@ -777,7 +780,10 @@ func (d *Device) executeInListPassiveTarget(ctx context.Context, data []byte) ([
 // computeInListHostTimeout derives a host-side timeout from mxRtyATR and context deadline
 // According to PN532 docs, each retry is ~150ms. We add baseline slack and bound by context if present.
 func (d *Device) computeInListHostTimeout(ctx context.Context, data []byte) time.Duration {
-	fallback := d.config.Timeout
+	var fallback time.Duration
+	if d.config != nil {
+		fallback = d.config.Timeout
+	}
 
 	// When mxRtyATR (3rd byte) is provided, derive a timeout from it.
 	if len(data) >= 3 {
