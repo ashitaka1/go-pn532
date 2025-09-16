@@ -836,12 +836,10 @@ func (d *Device) applyTimeoutBounds(ctx context.Context, expected, fallback time
 }
 
 // getContextTimeoutOrFallback returns context deadline if present and positive, otherwise fallback
-func (d *Device) getContextTimeoutOrFallback(ctx context.Context, fallback time.Duration) time.Duration {
+func (*Device) getContextTimeoutOrFallback(ctx context.Context, fallback time.Duration) time.Duration {
 	if deadline, ok := ctx.Deadline(); ok {
-		if rem := time.Until(deadline); rem > 0 {
-			if fallback == d.config.Timeout || rem < fallback {
-				return rem
-			}
+		if rem := time.Until(deadline); rem > 0 && rem < fallback {
+			return rem
 		}
 	}
 	return fallback
