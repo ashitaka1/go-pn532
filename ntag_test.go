@@ -453,9 +453,9 @@ func TestNTAG215LargeDataCrash(t *testing.T) {
 	// Mock the NDEF header read (block 4) with extended length format
 	// Format: [0x03] [0xFF] [high_byte] [low_byte] for extended length
 	headerData := []byte{
-		0x03,        // NDEF TLV type
-		0xFF,        // Extended length indicator
-		0x02, 0x00,  // Length = 512 bytes (0x0200) - exceeds NTAG215 capacity
+		0x03,       // NDEF TLV type
+		0xFF,       // Extended length indicator
+		0x02, 0x00, // Length = 512 bytes (0x0200) - exceeds NTAG215 capacity
 		// Rest of block would contain start of NDEF data
 	}
 	// Pad to 16 bytes (4 blocks returned by READ command)
@@ -498,9 +498,9 @@ func TestNTAG215BlockByBlockBufferOverflow(t *testing.T) {
 
 	// Create NDEF header that indicates more data than the 64-block limit can handle
 	headerData := []byte{
-		0x03,        // NDEF TLV type
-		0xFF,        // Extended length indicator
-		0x02, 0x00,  // Length = 512 bytes (more than 64*4=256 byte limit)
+		0x03,       // NDEF TLV type
+		0xFF,       // Extended length indicator
+		0x02, 0x00, // Length = 512 bytes (more than 64*4=256 byte limit)
 	}
 	headerBlock := make([]byte, 16)
 	copy(headerBlock, headerData)
@@ -514,7 +514,7 @@ func TestNTAG215BlockByBlockBufferOverflow(t *testing.T) {
 		blockData[0] = 0x41           // InDataExchange response
 		blockData[1] = 0x00           // Success
 		for i := 2; i < 18; i++ {
-			blockData[i] = byte(block) // Fill with block number for testing
+			blockData[i] = block // Fill with block number for testing
 		}
 		mockTransport.SetResponse(0x40, blockData)
 	}
@@ -535,7 +535,7 @@ func TestNTAG215BlockByBlockBufferOverflow(t *testing.T) {
 		assert.NotContains(t, err.Error(), "panic", "Should not contain panic messages")
 		assert.NotContains(t, err.Error(), "runtime error", "Should not contain runtime errors")
 	} else {
-		t.Logf("✓ Block-by-block reading succeeded (proper bounds checking)")
+		t.Log("✓ Block-by-block reading succeeded (proper bounds checking)")
 	}
 }
 

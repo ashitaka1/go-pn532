@@ -259,7 +259,7 @@ func (t *NTAGTag) readNDEFHeader() (*ndefHeader, error) {
 	} else {
 		// Check that we have enough bytes for extended length format
 		if len(block4) < 4 {
-			return nil, fmt.Errorf("invalid NDEF header: insufficient data for extended length")
+			return nil, errors.New("invalid NDEF header: insufficient data for extended length")
 		}
 
 		// Parse extended length with bounds checking
@@ -921,13 +921,14 @@ func (*NTAGTag) detectTypeFromCapabilityContainer(ccData []byte) NTAGType {
 		return NTAGType216
 	default:
 		// Unknown size field - try to make educated guess based on range
-		if sizeField <= 0x20 {
+		switch {
+		case sizeField <= 0x20:
 			debugf("NTAG unknown size 0x%02X, guessing NTAG213 (small)", sizeField)
 			return NTAGType213
-		} else if sizeField <= 0x50 {
+		case sizeField <= 0x50:
 			debugf("NTAG unknown size 0x%02X, guessing NTAG215 (medium)", sizeField)
 			return NTAGType215
-		} else {
+		default:
 			debugf("NTAG unknown size 0x%02X, guessing NTAG216 (large)", sizeField)
 			return NTAGType216
 		}
