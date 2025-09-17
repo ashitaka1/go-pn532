@@ -81,14 +81,14 @@ func (t *TagOperations) ReadNDEF(_ context.Context) (*ndef.Message, error) {
 
 	switch t.tagType {
 	case TagTypeNTAG:
-		ndefMsg, err := t.ntagInstance.ReadNDEF()
+		ndefMsg, err := t.ntagInstance.ReadNDEFRobust()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read NDEF from NTAG: %w", err)
 		}
 		// Convert from pn532.NDEFMessage to ndef.Message
 		return convertNDEFMessage(ndefMsg), nil
 	case TagTypeMIFARE:
-		ndefMsg, err := t.mifareInstance.ReadNDEF()
+		ndefMsg, err := t.mifareInstance.ReadNDEFRobust()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read NDEF from MIFARE: %w", err)
 		}

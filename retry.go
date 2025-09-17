@@ -29,6 +29,20 @@ import (
 	"time"
 )
 
+// CommandRetryProfile defines retry behavior for different command types
+type CommandRetryProfile int
+
+const (
+	// ProfileDetection for commands that detect tags (higher retry count)
+	ProfileDetection CommandRetryProfile = iota
+	// ProfileDataExchange for data read/write operations
+	ProfileDataExchange
+	// ProfileStatus for status/info commands (quick retry)
+	ProfileStatus
+	// ProfileDefault for general commands
+	ProfileDefault
+)
+
 // RetryConfig configures retry behavior
 type RetryConfig struct {
 	// MaxAttempts is the maximum number of attempts (0 = no retry)
@@ -54,6 +68,66 @@ func DefaultRetryConfig() *RetryConfig {
 		BackoffMultiplier: 2.0,
 		Jitter:            0.1,
 		RetryTimeout:      5 * time.Second,
+	}
+}
+
+// GetRetryConfigForCommand returns retry configuration optimized for specific command types
+func GetRetryConfigForCommand(cmd byte) *RetryConfig {
+	profile := GetCommandRetryProfile(cmd)
+	return GetRetryConfigForProfile(profile)
+}
+
+// GetCommandRetryProfile determines the retry profile for a specific command
+func GetCommandRetryProfile(cmd byte) CommandRetryProfile {
+	switch cmd {
+	case cmdInListPassiveTarget, cmdInAutoPoll:
+		return ProfileDetection
+	case cmdInDataExchange, cmdInCommunicateThru:
+		return ProfileDataExchange
+	case cmdGetFirmwareVersion, cmdGetGeneralStatus, cmdDiagnose:
+		return ProfileStatus
+	default:
+		return ProfileDefault
+	}
+}
+
+// GetRetryConfigForProfile returns retry configuration for a specific profile
+func GetRetryConfigForProfile(profile CommandRetryProfile) *RetryConfig {
+	switch profile {
+	case ProfileDetection:
+		// Higher retry count for tag detection commands
+		return &RetryConfig{
+			MaxAttempts:       5,
+			InitialBackoff:    15 * time.Millisecond,
+			MaxBackoff:        1 * time.Second,
+			BackoffMultiplier: 2.0,
+			Jitter:            0.1,
+			RetryTimeout:      8 * time.Second,
+		}
+	case ProfileDataExchange:
+		// Standard retry for data operations
+		return &RetryConfig{
+			MaxAttempts:       3,
+			InitialBackoff:    10 * time.Millisecond,
+			MaxBackoff:        800 * time.Millisecond,
+			BackoffMultiplier: 2.0,
+			Jitter:            0.1,
+			RetryTimeout:      5 * time.Second,
+		}
+	case ProfileStatus:
+		// Quick retry for status commands
+		return &RetryConfig{
+			MaxAttempts:       2,
+			InitialBackoff:    5 * time.Millisecond,
+			MaxBackoff:        200 * time.Millisecond,
+			BackoffMultiplier: 2.0,
+			Jitter:            0.1,
+			RetryTimeout:      2 * time.Second,
+		}
+	case ProfileDefault:
+		return DefaultRetryConfig()
+	default:
+		return DefaultRetryConfig()
 	}
 }
 

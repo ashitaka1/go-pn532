@@ -42,10 +42,11 @@ var (
 	ErrChecksumMismatch    = errors.New("checksum mismatch")
 
 	// Device errors - generally not retryable
-	ErrDeviceNotFound     = errors.New("device not found")
-	ErrDeviceNotSupported = errors.New("device not supported")
-	ErrCommandFailed      = errors.New("command execution failed")
-	ErrInvalidResponse    = errors.New("invalid response format")
+	ErrDeviceNotFound      = errors.New("device not found")
+	ErrDeviceNotSupported  = errors.New("device not supported")
+	ErrCommandFailed       = errors.New("command execution failed")
+	ErrInvalidResponse     = errors.New("invalid response format")
+	ErrCommandNotSupported = errors.New("command not supported by device")
 
 	// Tag errors - generally not retryable
 	ErrTagNotFound    = errors.New("tag not found")
@@ -53,6 +54,9 @@ var (
 	ErrTagReadFailed  = errors.New("tag read failed")
 	ErrTagWriteFailed = errors.New("tag write failed")
 	ErrTagUnsupported = errors.New("tag type not supported")
+	ErrTagEmptyData   = errors.New("tag detected but returned empty data")
+	ErrTagDataCorrupt = errors.New("tag data appears corrupted")
+	ErrTagUnreliable  = errors.New("tag readings are inconsistent")
 
 	// Data errors - not retryable
 	ErrInvalidParameter = errors.New("invalid parameter")
@@ -92,6 +96,38 @@ func (e *TransportError) Unwrap() error {
 	return e.Err
 }
 
+// PN532Error wraps PN532 device errors with error code context
+type PN532Error struct {
+	Command   string
+	Context   string
+	ErrorCode byte
+}
+
+func (e *PN532Error) Error() string {
+	if e.Context != "" {
+		return fmt.Sprintf("PN532 error 0x%02X (%s): %s", e.ErrorCode, e.Command, e.Context)
+	}
+	return fmt.Sprintf("PN532 error 0x%02X: %s", e.ErrorCode, e.Command)
+}
+
+// IsCommandNotSupported returns true if the error indicates the command is not supported
+func (e *PN532Error) IsCommandNotSupported() bool {
+	// Error code 0x81 indicates "Invalid command"
+	return e.ErrorCode == 0x81
+}
+
+// IsAuthenticationError returns true if the error is authentication-related
+func (e *PN532Error) IsAuthenticationError() bool {
+	// Error code 0x14 indicates authentication failure
+	return e.ErrorCode == 0x14
+}
+
+// IsTimeoutError returns true if the error is timeout-related
+func (e *PN532Error) IsTimeoutError() bool {
+	// Error code 0x01 indicates timeout
+	return e.ErrorCode == 0x01
+}
+
 // IsRetryable returns true if the error is potentially retryable
 func IsRetryable(err error) bool {
 	if err == nil {
@@ -101,6 +137,14 @@ func IsRetryable(err error) bool {
 	var te *TransportError
 	if errors.As(err, &te) {
 		return te.Retryable
+	}
+
+	// Check for PN532 errors
+	var pe *PN532Error
+	if errors.As(err, &pe) {
+		// Timeouts and authentication errors are retryable
+		// Command not supported errors are not retryable
+		return pe.IsTimeoutError() || pe.IsAuthenticationError()
 	}
 
 	// Check for known retryable errors
@@ -140,7 +184,58 @@ func GetErrorType(err error) ErrorType {
 	}
 }
 
+// IsRecoverable checks if an error indicates the device might be in a stuck state
+// that could potentially be recovered with a soft reset sequence
+func IsRecoverable(err error) bool {
+	// Only attempt recovery for severe transport/communication errors
+	// that suggest the device might be unresponsive
+	switch {
+	case errors.Is(err, ErrTransportTimeout),
+		errors.Is(err, ErrNoACK),
+		errors.Is(err, ErrFrameCorrupted):
+		return true
+	default:
+		return false
+	}
+}
+
+// IsCommandNotSupported checks if an error indicates a command is not supported
+func IsCommandNotSupported(err error) bool {
+	var pe *PN532Error
+	if errors.As(err, &pe) {
+		return pe.IsCommandNotSupported()
+	}
+	return errors.Is(err, ErrCommandNotSupported)
+}
+
+// IsPN532AuthenticationError checks if an error is a PN532 authentication failure
+func IsPN532AuthenticationError(err error) bool {
+	var pe *PN532Error
+	if errors.As(err, &pe) {
+		return pe.IsAuthenticationError()
+	}
+	return false
+}
+
+// IsPN532TimeoutError checks if an error is a PN532 timeout
+func IsPN532TimeoutError(err error) bool {
+	var pe *PN532Error
+	if errors.As(err, &pe) {
+		return pe.IsTimeoutError()
+	}
+	return false
+}
+
 // Error constructors for consistent error creation
+
+// NewPN532Error creates a PN532 error with the specified error code and context
+func NewPN532Error(errorCode byte, command, context string) *PN532Error {
+	return &PN532Error{
+		ErrorCode: errorCode,
+		Command:   command,
+		Context:   context,
+	}
+}
 
 // NewTransportError creates a standard transport error with consistent formatting
 func NewTransportError(op, port string, err error, errType ErrorType) *TransportError {

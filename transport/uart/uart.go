@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -55,10 +56,30 @@ var (
 
 // Transport implements the pn532.Transport interface for UART communication.
 type Transport struct {
-	port        serial.Port
-	portName    string
-	mu          sync.Mutex
-	lastCommand byte // Track last command for special handling
+	port                  serial.Port
+	portName              string
+	mu                    sync.Mutex
+	lastCommand           byte
+	connectionEstablished bool
+}
+
+// isWindows returns true if running on Windows
+func isWindows() bool {
+	return runtime.GOOS == "windows"
+}
+
+// getReadTimeout returns the unified read timeout for all platforms
+// Originally Windows needed 100ms while other platforms used 50ms, but Linux users
+// reported intermittent empty data issues, so we unified to 100ms for all platforms
+func getReadTimeout() time.Duration {
+	return 100 * time.Millisecond
+}
+
+// windowsPostWriteDelay adds Windows-specific delay after write operations
+func windowsPostWriteDelay() {
+	if isWindows() {
+		time.Sleep(15 * time.Millisecond) // Windows needs time for buffer flushing
+	}
 }
 
 // New creates a new UART transport.
@@ -73,9 +94,10 @@ func New(portName string) (*Transport, error) {
 		return nil, fmt.Errorf("failed to open UART port %s: %w", portName, err)
 	}
 
-	// Set default timeout - 50ms to match working reference implementation
-	// This timeout has been proven to work with InListPassiveTarget
-	if err := port.SetReadTimeout(50 * time.Millisecond); err != nil {
+	// Set unified read timeout - originally 50ms on Linux/Mac and 100ms on Windows,
+	// but unified to 100ms on all platforms to resolve Linux USB-UART reliability issues
+	timeout := getReadTimeout()
+	if err := port.SetReadTimeout(timeout); err != nil {
 		_ = port.Close()
 		return nil, fmt.Errorf("failed to set UART read timeout: %w", err)
 	}
@@ -113,6 +135,11 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 			return nil, diagErr
 		}
 
+		// Mark connection as established after first successful command
+		if !t.connectionEstablished {
+			t.connectionEstablished = true
+		}
+
 		// No ACK is sent after receiving the byte response
 		return res, nil
 	}
@@ -124,6 +151,11 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 
 	if err := t.sendAck(); err != nil {
 		return nil, err
+	}
+
+	// Mark connection as established after first successful command
+	if !t.connectionEstablished {
+		t.connectionEstablished = true
 	}
 
 	return res, nil
@@ -154,10 +186,11 @@ func (t *Transport) SendCommandWithContext(ctx context.Context, cmd byte, args [
 	return t.SendCommand(cmd, args)
 }
 
-// SetTimeout sets the read timeout for the transport
-func (t *Transport) SetTimeout(timeout time.Duration) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+// setTimeoutUnlocked sets the read timeout without acquiring the mutex (internal use)
+func (t *Transport) setTimeoutUnlocked(timeout time.Duration) error {
+	if t.port == nil {
+		return nil // Allow operation when port is closed
+	}
 	err := t.port.SetReadTimeout(timeout)
 	if err != nil {
 		return fmt.Errorf("UART set timeout failed: %w", err)
@@ -165,10 +198,19 @@ func (t *Transport) SetTimeout(timeout time.Duration) error {
 	return nil
 }
 
+// SetTimeout sets the read timeout for the transport
+func (t *Transport) SetTimeout(timeout time.Duration) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.setTimeoutUnlocked(timeout)
+}
+
 // Close closes the transport connection
 func (t *Transport) Close() error {
 	if t.port != nil {
 		err := t.port.Close()
+		t.port = nil                    // Clear port reference after closing
+		t.connectionEstablished = false // Reset connection state
 		if err != nil {
 			return fmt.Errorf("UART close failed: %w", err)
 		}
@@ -221,18 +263,52 @@ func (t *Transport) drainWithRetry(operation string) error {
 	return fmt.Errorf("UART %s drain failed after %d retries", operation, maxRetries)
 }
 
-// wakeUp wakes up the PN532 over UART
+// wakeUp wakes up the PN532 over UART with robust retry mechanism
 func (t *Transport) wakeUp() error {
+	return t.wakeUpWithRetry()
+}
+
+// wakeUpWithRetry attempts to wake up the PN532 with retry logic and verification
+func (t *Transport) wakeUpWithRetry() error {
+	const maxAttempts = 3
+	delays := []time.Duration{
+		10 * time.Millisecond,  // First attempt: quick
+		50 * time.Millisecond,  // Second attempt: medium
+		100 * time.Millisecond, // Third attempt: longer
+	}
+
+	var lastErr error
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := t.singleWakeUpAttempt()
+		if err == nil {
+			return nil // Wake-up successful
+		}
+
+		lastErr = err
+		// Wait with increasing delay before retry
+		if attempt < maxAttempts-1 {
+			time.Sleep(delays[attempt])
+		}
+	}
+
+	return fmt.Errorf("wake-up failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// singleWakeUpAttempt performs a single wake-up attempt
+func (t *Transport) singleWakeUpAttempt() error {
 	// Over UART, PN532 must be "woken up" by sending a 0x55
-	// dummy byte and then waiting
-	bytesWritten, err := t.port.Write([]byte{
+	// dummy byte sequence and then waiting
+	wakeSequence := []byte{
 		0x55, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00,
-	})
+	}
+
+	bytesWritten, err := t.port.Write(wakeSequence)
 	if err != nil {
 		return fmt.Errorf("UART wake up write failed: %w", err)
-	} else if bytesWritten != 16 {
+	} else if bytesWritten != len(wakeSequence) {
 		return pn532.NewTransportWriteError("wakeUp", t.portName)
 	}
 
@@ -294,9 +370,6 @@ func (t *Transport) waitAck() ([]byte, error) {
 			continue
 		}
 
-		// Debug what we're reading in waitAck
-		_ = tries // For potential future debugging
-
 		ackBuf = append(ackBuf, buf[0])
 		if len(ackBuf) < 6 {
 			continue
@@ -319,6 +392,11 @@ func (t *Transport) waitAck() ([]byte, error) {
 
 // sendFrame sends a frame to the PN532
 func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
+	// Flush any stale data from the input buffer before starting
+	if t.port != nil {
+		_ = t.port.ResetInputBuffer()
+	}
+
 	// Calculate total frame size
 	dataLen := 2 + len(args) // hostToPn532 + cmd + args
 	if dataLen > 255 {
@@ -368,6 +446,9 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 	} else if n != len(finalFrame) {
 		return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
 	}
+
+	// Give Windows serial drivers time to process the write
+	windowsPostWriteDelay()
 
 	if err := t.drainWithRetry("send frame"); err != nil {
 		return nil, err
@@ -505,8 +586,13 @@ func (t *Transport) processFrameData(buf []byte, totalLen int) (data []byte, ret
 
 // readInitialData reads the initial frame data from the port
 func (t *Transport) readInitialData(buf []byte) (int, error) {
-	// Small delay to let the PN532 start sending
-	time.Sleep(5 * time.Millisecond)
+	// Platform-specific delay to let the PN532 start sending
+	// Windows USB-serial drivers need more time for reliable responses
+	initialDelay := 8 * time.Millisecond
+	if isWindows() {
+		initialDelay = 10 * time.Millisecond
+	}
+	time.Sleep(initialDelay)
 
 	bytesRead, err := t.port.Read(buf)
 	if err != nil {
@@ -514,13 +600,28 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 	}
 
 	// If we got 0 bytes, try one more time with a longer delay
-	// Some PN532 modules need more time for certain commands
 	if bytesRead == 0 {
-		time.Sleep(50 * time.Millisecond)
-		bytesRead, err = t.port.Read(buf)
+		bytesRead, err = t.retryInitialRead(buf)
 		if err != nil {
-			return 0, fmt.Errorf("UART initial data retry read failed: %w", err)
+			return 0, err
 		}
+	}
+
+	return bytesRead, nil
+}
+
+// retryInitialRead performs a retry read with platform-specific timing
+func (t *Transport) retryInitialRead(buf []byte) (int, error) {
+	// Some PN532 modules need more time for certain commands
+	retryDelay := 80 * time.Millisecond
+	if isWindows() {
+		retryDelay = 100 * time.Millisecond
+	}
+	time.Sleep(retryDelay)
+
+	bytesRead, err := t.port.Read(buf)
+	if err != nil {
+		return 0, fmt.Errorf("UART initial data retry read failed: %w", err)
 	}
 
 	return bytesRead, nil
@@ -576,14 +677,24 @@ func (t *Transport) ensureCompleteFrame(buf []byte, off, frameLen, totalLen int)
 
 // readRemainingData reads the remaining frame data with timeout
 func (t *Transport) readRemainingData(buf []byte, totalLen, expectedLen int) (int, error) {
-	timeout := time.After(2 * time.Second)
+	// Use shorter timeout to prevent 30-second accumulation with retries
+	// Windows needs longer timeout for reliable data exchange responses
+	timeoutDuration := 1000 * time.Millisecond
+	if isWindows() {
+		timeoutDuration = 1500 * time.Millisecond
+	}
+	// Special-case: InListPassiveTarget tends to run longer; allow more time on non-Windows
+	if !isWindows() && t.lastCommand == 0x4A {
+		timeoutDuration = 1500 * time.Millisecond
+	}
+	timeout := time.After(timeoutDuration)
 
 	for totalLen < expectedLen {
 		select {
 		case <-timeout:
 			return 0, &pn532.TransportError{
 				Op: "receiveFrame", Port: t.portName,
-				Err:       pn532.ErrTimeout,
+				Err:       pn532.ErrTransportTimeout,
 				Type:      pn532.ErrorTypeTransient,
 				Retryable: true,
 			}
@@ -649,7 +760,7 @@ func (t *Transport) receiveSpecialDiagnoseByte(_ byte) ([]byte, error) {
 			return nil, &pn532.TransportError{
 				Op:        "receiveSpecialDiagnoseByte",
 				Port:      t.portName,
-				Err:       pn532.ErrTimeout,
+				Err:       pn532.ErrTransportTimeout,
 				Type:      pn532.ErrorTypeTransient,
 				Retryable: true,
 			}

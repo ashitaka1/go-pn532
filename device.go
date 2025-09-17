@@ -408,6 +408,57 @@ func (d *Device) IsAutoPollSupported() bool {
 	return d.hasCapability(CapabilityAutoPollNative)
 }
 
+// SetPassiveActivationRetries configures the maximum number of retries for passive activation
+// to prevent infinite waiting that can cause the PN532 to lock up. A finite number like 10 (0x0A)
+// is recommended instead of 0xFF (infinite) to avoid stuck states requiring power cycling.
+func (d *Device) SetPassiveActivationRetries(maxRetries byte) error {
+	// RF Configuration item 0x05 - MaxRetries
+	// Payload: [MxRtyATR, MxRtyPSL, MxRtyPassiveActivation]
+	configPayload := []byte{
+		0x05,       // CfgItem: MaxRetries
+		0x00,       // MxRtyATR (use default)
+		0x00,       // MxRtyPSL (use default)
+		maxRetries, // MxRtyPassiveActivation
+	}
+
+	_, err := d.transport.SendCommand(cmdRFConfiguration, configPayload)
+	if err != nil {
+		return fmt.Errorf("failed to set passive activation retries: %w", err)
+	}
+
+	return nil
+}
+
+// SetPollingRetries configures the MxRtyATR parameter for passive target detection retries.
+// This controls how many times the PN532 will retry detecting a passive target before giving up.
+// Each retry is approximately 150ms according to the PN532 datasheet.
+//
+// Parameters:
+//   - mxRtyATR: Number of retries (0x00 = immediate, 0x01-0xFE = retry count, 0xFF = infinite)
+//
+// Common values:
+//   - 0x00: Immediate return (no retries)
+//   - 0x10: ~2.4 seconds (16 retries)
+//   - 0x20: ~4.8 seconds (32 retries)
+//   - 0xFF: Infinite retries (use with caution)
+func (d *Device) SetPollingRetries(mxRtyATR byte) error {
+	// RF Configuration item 0x05 - MaxRetries
+	// Payload: [MxRtyATR, MxRtyPSL, MxRtyPassiveActivation]
+	configPayload := []byte{
+		0x05,     // CfgItem: MaxRetries
+		mxRtyATR, // MxRtyATR (retry count for passive target detection)
+		0x01,     // MxRtyPSL (default)
+		0xFF,     // MxRtyPassiveActivation (infinite)
+	}
+
+	_, err := d.transport.SendCommand(cmdRFConfiguration, configPayload)
+	if err != nil {
+		return fmt.Errorf("failed to set polling retries: %w", err)
+	}
+
+	return nil
+}
+
 // Close closes the device connection
 func (d *Device) Close() error {
 	if d.transport != nil {

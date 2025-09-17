@@ -45,6 +45,14 @@ func (d *Device) InitContext(ctx context.Context) error {
 		}
 	}
 
+	// Configure finite passive activation retries to prevent infinite wait lockups
+	// Use 10 retries (~1 second) instead of default 0xFF (infinite)
+	if err := d.SetPassiveActivationRetries(0x0A); err != nil {
+		// Log but don't fail initialization - this is an optimization, not critical
+		// Some older firmware versions might not support this configuration
+		_ = err
+	}
+
 	// Get firmware version (if supported by transport)
 	if !skipFirmwareVersion {
 		if err := d.setupFirmwareVersion(ctx); err != nil {
@@ -370,6 +378,20 @@ func (d *Device) detectTagsWithInListPassiveTarget(
 		return nil, fmt.Errorf("transport preparation failed: %w", err)
 	}
 
+	// Release any previously selected targets to clear HALT states
+	// This addresses intermittent "empty valid tag" issues where tags get stuck
+	if err := d.InReleaseContext(ctx, 0); err != nil {
+		debugf("InRelease failed, continuing anyway: %v", err)
+		// Don't fail the operation if InRelease fails - it's an optimization
+	}
+
+	// Small delay to allow RF field and tags to stabilize after release
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(10 * time.Millisecond):
+	}
+
 	// Use InListPassiveTarget for legacy compatibility
 	return d.InListPassiveTargetContext(ctx, maxTags, baudRate)
 }
@@ -549,7 +571,7 @@ func (d *Device) SendDataExchangeContext(ctx context.Context, data []byte) ([]by
 	// Check for error frame (TFI = 0x7F)
 	if len(res) >= 2 && res[0] == 0x7F {
 		errorCode := res[1]
-		return nil, fmt.Errorf("PN532 error: 0x%02X", errorCode)
+		return nil, NewPN532Error(errorCode, "InDataExchange", "")
 	}
 
 	if len(res) < 2 || res[0] != 0x41 {
@@ -571,7 +593,7 @@ func (d *Device) SendRawCommandContext(ctx context.Context, data []byte) ([]byte
 	// Check for error frame (TFI = 0x7F)
 	if len(res) >= 2 && res[0] == 0x7F {
 		errorCode := res[1]
-		return nil, fmt.Errorf("PN532 error: 0x%02X", errorCode)
+		return nil, NewPN532Error(errorCode, "InCommunicateThru", "")
 	}
 
 	if len(res) < 2 || res[0] != 0x43 {
@@ -750,11 +772,91 @@ func (*Device) normalizeMaxTargets(maxTg byte) byte {
 
 // executeInListPassiveTarget sends the InListPassiveTarget command
 func (d *Device) executeInListPassiveTarget(ctx context.Context, data []byte) ([]byte, error) {
+	// Dynamically adjust transport timeout based on mxRtyATR when provided
+	// mxRtyATR is the 3rd byte of the InListPassiveTarget payload
+	var prevTimeout time.Duration
+	if d.config != nil {
+		prevTimeout = d.config.Timeout
+	}
+	computed := d.computeInListHostTimeout(ctx, data)
+	// Best-effort set; if it fails we'll proceed with previous timeout
+	_ = d.transport.SetTimeout(computed)
+	// Restore previous timeout after the command completes
+	defer func() { _ = d.transport.SetTimeout(prevTimeout) }()
+
 	result, err := d.transport.SendCommandWithContext(ctx, cmdInListPassiveTarget, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send InListPassiveTarget command: %w", err)
 	}
 	return result, nil
+}
+
+// computeInListHostTimeout derives a host-side timeout from mxRtyATR and context deadline
+// According to PN532 docs, each retry is ~150ms. We add baseline slack and bound by context if present.
+func (d *Device) computeInListHostTimeout(ctx context.Context, data []byte) time.Duration {
+	var fallback time.Duration
+	if d.config != nil {
+		fallback = d.config.Timeout
+	}
+
+	// When mxRtyATR (3rd byte) is provided, derive a timeout from it.
+	if len(data) >= 3 {
+		return d.computeTimeoutFromRetryCount(ctx, data[2], fallback)
+	}
+
+	// No mxRtyATR provided; use context deadline if present or fallback
+	return d.getContextTimeoutOrFallback(ctx, fallback)
+}
+
+// computeTimeoutFromRetryCount calculates timeout based on mxRtyATR retry count
+func (d *Device) computeTimeoutFromRetryCount(ctx context.Context, mx byte, fallback time.Duration) time.Duration {
+	// 0xFF means infinite retry on hardware; rely on context or cap to a safe upper bound
+	if mx == 0xFF {
+		return d.handleInfiniteRetry(ctx)
+	}
+
+	// Each retry ~150ms; add small baseline slack for host/driver overhead
+	expected := time.Duration(int(mx))*150*time.Millisecond + 300*time.Millisecond
+
+	// Apply bounds and respect context deadline
+	return d.applyTimeoutBounds(ctx, expected, fallback)
+}
+
+// handleInfiniteRetry handles the special case of infinite retry (0xFF)
+func (*Device) handleInfiniteRetry(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		if rem := time.Until(deadline); rem > 0 {
+			return rem
+		}
+	}
+	// No deadline; choose a conservative cap
+	return 10 * time.Second
+}
+
+// applyTimeoutBounds ensures timeout is within reasonable bounds and respects context
+func (d *Device) applyTimeoutBounds(ctx context.Context, expected, fallback time.Duration) time.Duration {
+	// Ensure we don't go below device default
+	if expected < fallback {
+		expected = fallback
+	}
+
+	// Cap to a reasonable maximum to avoid excessive blocking when mx is large
+	if expected > 8*time.Second {
+		expected = 8 * time.Second
+	}
+
+	// Respect context deadline if sooner
+	return d.getContextTimeoutOrFallback(ctx, expected)
+}
+
+// getContextTimeoutOrFallback returns context deadline if present and positive, otherwise fallback
+func (*Device) getContextTimeoutOrFallback(ctx context.Context, fallback time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		if rem := time.Until(deadline); rem > 0 && rem < fallback {
+			return rem
+		}
+	}
+	return fallback
 }
 
 // handleInListPassiveTargetError handles command errors with clone device fallback

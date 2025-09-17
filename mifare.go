@@ -296,7 +296,7 @@ func (t *MIFARETag) ReadBlock(block uint8) ([]byte, error) {
 	// Send read command
 	data, err := t.device.SendDataExchange([]byte{mifareCmdRead, block})
 	if err != nil {
-		return nil, fmt.Errorf("failed to read block %d: %w", block, err)
+		return nil, fmt.Errorf("%w (block %d): %w", ErrTagReadFailed, block, err)
 	}
 
 	// MIFARE Classic returns 16 bytes on read
@@ -313,10 +313,10 @@ func (t *MIFARETag) ReadBlockDirect(block uint8) ([]byte, error) {
 	data, err := t.device.SendDataExchange([]byte{mifareCmdRead, block})
 	if err != nil {
 		// If we get a timeout error, try InCommunicateThru as fallback
-		if strings.Contains(err.Error(), "data exchange error: 01") {
+		if IsPN532TimeoutError(err) {
 			return t.readBlockCommunicateThru(block)
 		}
-		return nil, fmt.Errorf("failed to read block %d: %w", block, err)
+		return nil, fmt.Errorf("%w (block %d): %w", ErrTagReadFailed, block, err)
 	}
 
 	// MIFARE Classic returns 16 bytes on read
@@ -351,7 +351,7 @@ func (t *MIFARETag) WriteBlock(block uint8, data []byte) error {
 
 	_, err := t.device.SendDataExchange(cmd)
 	if err != nil {
-		return fmt.Errorf("failed to write block %d: %w", block, err)
+		return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 	}
 
 	return nil
@@ -392,7 +392,7 @@ func (t *MIFARETag) WriteBlockDirect(block uint8, data []byte) error {
 // writeBlockDirectAlternative tries alternative methods for clone tags that don't respond to standard writes
 func (t *MIFARETag) writeBlockDirectAlternative(block uint8, data []byte, originalErr error) error {
 	// Check if the original error was a timeout (0x01)
-	if strings.Contains(originalErr.Error(), "data exchange error: 01") {
+	if IsPN532TimeoutError(originalErr) {
 		// Try using InCommunicateThru instead of InDataExchange
 		// Some clone tags might respond better to raw communication
 		err := t.writeBlockCommunicateThru(block, data)
@@ -405,7 +405,7 @@ func (t *MIFARETag) writeBlockDirectAlternative(block uint8, data []byte, origin
 	}
 
 	// For other errors, return the original error
-	return fmt.Errorf("failed to write block %d: %w", block, originalErr)
+	return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, originalErr)
 }
 
 // writeBlockCommunicateThru tries to write a block using InCommunicateThru instead of InDataExchange
@@ -452,6 +452,27 @@ func (t *MIFARETag) readBlockCommunicateThru(block uint8) ([]byte, error) {
 	return data[:mifareBlockSize], nil
 }
 
+// ReadNDEFRobust reads NDEF data with retry logic to handle intermittent empty data issues
+// This addresses the "empty valid tag" problem where tags are detected but return no data
+func (t *MIFARETag) ReadNDEFRobust() (*NDEFMessage, error) {
+	return readNDEFWithRetry(func() (*NDEFMessage, error) {
+		return t.ReadNDEF()
+	}, isMifareRetryableError, "MIFARE")
+}
+
+// isMifareRetryableError determines if a MIFARE error is worth retrying
+func isMifareRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Use the centralized retry logic from errors.go
+	// This handles authentication failures, timeouts, read failures, and communication errors
+	return IsRetryable(err) ||
+		errors.Is(err, ErrTagAuthFailed) ||
+		errors.Is(err, ErrTagReadFailed)
+}
+
 // ReadNDEF reads NDEF data from the MIFARE tag using bulk sector reads
 func (t *MIFARETag) ReadNDEF() (*NDEFMessage, error) {
 	maxSectors, initialCapacity := t.getTagCapacityParams()
@@ -460,7 +481,7 @@ func (t *MIFARETag) ReadNDEF() (*NDEFMessage, error) {
 	for sector := uint8(1); sector < maxSectors; sector++ {
 		if err := t.authenticateSector(sector); err != nil {
 			if sector == 1 {
-				return nil, fmt.Errorf("failed to read NDEF data: tag may not be NDEF formatted: %w", err)
+				return nil, fmt.Errorf("%w: tag may not be NDEF formatted: %w", ErrTagReadFailed, err)
 			}
 			break
 		}
@@ -722,7 +743,7 @@ func (t *MIFARETag) writeDataBlock(block uint8, data []byte, offset int) error {
 
 func (t *MIFARETag) writeBlockWithError(block uint8, data []byte) error {
 	if err := t.WriteBlockAuto(block, data); err != nil {
-		return fmt.Errorf("failed to write block %d: %w", block, err)
+		return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 	}
 	return nil
 }
@@ -816,7 +837,7 @@ func (t *MIFARETag) Authenticate(sector uint8, keyType byte, key []byte) error {
 		t.lastAuthSector = -1
 		t.lastAuthKeyType = 0
 		t.authMutex.Unlock()
-		return fmt.Errorf("authentication failed: %w", err)
+		return fmt.Errorf("%w: %w", ErrTagAuthFailed, err)
 	}
 
 	// SECURITY: Thread-safe state update on success
@@ -870,7 +891,7 @@ func (t *MIFARETag) AuthenticateRobust(sector uint8, keyType byte, key []byte) e
 		return nil
 	}
 
-	return fmt.Errorf("robust authentication failed after all attempts: %w", err)
+	return fmt.Errorf("%w after all attempts: %w", ErrTagAuthFailed, err)
 }
 
 // AuthenticateRobustContext performs robust authentication with context support
@@ -906,7 +927,7 @@ func (t *MIFARETag) AuthenticateRobustContext(ctx context.Context, sector uint8,
 		return nil
 	}
 
-	return fmt.Errorf("robust authentication failed after all attempts: %w", err)
+	return fmt.Errorf("%w after all attempts: %w", ErrTagAuthFailed, err)
 }
 
 // authenticateWithRetry implements progressive retry strategy
@@ -939,7 +960,7 @@ func (t *MIFARETag) authenticateWithRetry(sector uint8, keyType byte, key []byte
 		time.Sleep(delay)
 	}
 
-	return fmt.Errorf("authentication failed after %d attempts: %w", t.config.RetryConfig.MaxAttempts, lastErr)
+	return fmt.Errorf("%w after %d attempts: %w", ErrTagAuthFailed, t.config.RetryConfig.MaxAttempts, lastErr)
 }
 
 // authenticateWithRetryContext implements progressive retry strategy with context support
@@ -989,7 +1010,7 @@ func (t *MIFARETag) authenticateWithRetryContext(ctx context.Context, sector uin
 		}
 	}
 
-	return fmt.Errorf("authentication failed after %d attempts: %w", t.config.RetryConfig.MaxAttempts, lastErr)
+	return fmt.Errorf("%w after %d attempts: %w", ErrTagAuthFailed, t.config.RetryConfig.MaxAttempts, lastErr)
 }
 
 // getRetryLevel determines the retry level based on attempt number
@@ -1178,7 +1199,7 @@ func (t *MIFARETag) updateSectorKeys(sector uint8, ndefKeyBytes []byte) error {
 	// Read current sector trailer to preserve access bits
 	trailerData, err := t.ReadBlock(trailerBlock)
 	if err != nil {
-		return fmt.Errorf("failed to read sector %d trailer: %w", sector, err)
+		return fmt.Errorf("%w (sector %d trailer): %w", ErrTagReadFailed, sector, err)
 	}
 
 	// Update keys in trailer (keep access bits unchanged)
@@ -1188,7 +1209,7 @@ func (t *MIFARETag) updateSectorKeys(sector uint8, ndefKeyBytes []byte) error {
 
 	// Write updated trailer
 	if err := t.WriteBlock(trailerBlock, trailerData); err != nil {
-		return fmt.Errorf("failed to write sector %d trailer: %w", sector, err)
+		return fmt.Errorf("%w (sector %d trailer): %w", ErrTagWriteFailed, sector, err)
 	}
 
 	return nil

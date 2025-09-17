@@ -315,6 +315,12 @@ func (s *Session) WriteToTag(
 
 // continuousPolling runs continuous InAutoPoll monitoring
 func (s *Session) continuousPolling(ctx context.Context) error {
+	// Configure PN532 hardware polling retries to reduce host-side polling frequency
+	// This tells the PN532 to retry detection internally before returning to the host
+	if err := s.device.SetPollingRetries(s.config.HardwareTimeoutRetries); err != nil {
+		return fmt.Errorf("failed to configure hardware polling retries: %w", err)
+	}
+
 	ticker := time.NewTicker(s.config.PollInterval)
 	defer ticker.Stop()
 
@@ -396,8 +402,8 @@ func (s *Session) waitForResume(ctx context.Context) error {
 
 // performSinglePoll performs a single tag detection cycle using direct InListPassiveTarget
 func (s *Session) performSinglePoll(ctx context.Context) (*pn532.DetectedTag, error) {
-	// Use immediate polling without timeout to avoid double delay
-	// The polling interval is handled in the main loop
+	// Use standard InListPassiveTarget with PN532 hardware handling retries
+	// The hardware retry count was configured via SetPollingRetries() during session start
 	tags, err := s.device.InListPassiveTargetContext(ctx, 1, 0x00)
 	if err != nil {
 		return nil, fmt.Errorf("tag detection failed: %w", err)

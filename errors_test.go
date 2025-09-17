@@ -461,3 +461,247 @@ func TestNewDataTooLargeError(t *testing.T) {
 		t.Error("Retryable should be false for data too large errors")
 	}
 }
+
+// PN532Error Tests
+
+func TestNewPN532Error(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		command     string
+		context     string
+		wantMessage string
+		errorCode   byte
+	}{
+		{
+			name:        "timeout error without context",
+			errorCode:   0x01,
+			command:     "InDataExchange",
+			context:     "",
+			wantMessage: "PN532 error 0x01: InDataExchange",
+		},
+		{
+			name:        "authentication error with context",
+			errorCode:   0x14,
+			command:     "InDataExchange",
+			context:     "authentication failure",
+			wantMessage: "PN532 error 0x14 (InDataExchange): authentication failure",
+		},
+		{
+			name:        "command not supported",
+			errorCode:   0x81,
+			command:     "InCommunicateThru",
+			context:     "",
+			wantMessage: "PN532 error 0x81: InCommunicateThru",
+		},
+		{
+			name:        "error with detailed context",
+			errorCode:   0x02,
+			command:     "InListPassiveTarget",
+			context:     "no targets found in field",
+			wantMessage: "PN532 error 0x02 (InListPassiveTarget): no targets found in field",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewPN532Error(tt.errorCode, tt.command, tt.context)
+
+			if err.ErrorCode != tt.errorCode {
+				t.Errorf("ErrorCode = 0x%02X, want 0x%02X", err.ErrorCode, tt.errorCode)
+			}
+			if err.Command != tt.command {
+				t.Errorf("Command = %q, want %q", err.Command, tt.command)
+			}
+			if err.Context != tt.context {
+				t.Errorf("Context = %q, want %q", err.Context, tt.context)
+			}
+			if err.Error() != tt.wantMessage {
+				t.Errorf("Error() = %q, want %q", err.Error(), tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestPN532Error_ErrorTypeChecks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                      string
+		errorCode                 byte
+		wantIsCommandNotSupported bool
+		wantIsAuthenticationError bool
+		wantIsTimeoutError        bool
+	}{
+		{
+			name:                      "command not supported",
+			errorCode:                 0x81,
+			wantIsCommandNotSupported: true,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+		},
+		{
+			name:                      "authentication error",
+			errorCode:                 0x14,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: true,
+			wantIsTimeoutError:        false,
+		},
+		{
+			name:                      "timeout error",
+			errorCode:                 0x01,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        true,
+		},
+		{
+			name:                      "other error",
+			errorCode:                 0xFF,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewPN532Error(tt.errorCode, "TestCommand", "")
+
+			if got := err.IsCommandNotSupported(); got != tt.wantIsCommandNotSupported {
+				t.Errorf("IsCommandNotSupported() = %v, want %v", got, tt.wantIsCommandNotSupported)
+			}
+			if got := err.IsAuthenticationError(); got != tt.wantIsAuthenticationError {
+				t.Errorf("IsAuthenticationError() = %v, want %v", got, tt.wantIsAuthenticationError)
+			}
+			if got := err.IsTimeoutError(); got != tt.wantIsTimeoutError {
+				t.Errorf("IsTimeoutError() = %v, want %v", got, tt.wantIsTimeoutError)
+			}
+		})
+	}
+}
+
+func TestIsRetryable_PN532Error(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		errorCode byte
+		want      bool
+	}{
+		{name: "timeout error is retryable", errorCode: 0x01, want: true},
+		{name: "authentication error is retryable", errorCode: 0x14, want: true},
+		{name: "command not supported is not retryable", errorCode: 0x81, want: false},
+		{name: "unknown error is not retryable", errorCode: 0xFF, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewPN532Error(tt.errorCode, "TestCommand", "")
+			got := IsRetryable(err)
+			if got != tt.want {
+				t.Errorf("IsRetryable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsCommandNotSupported(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{
+			name: "PN532Error command not supported",
+			err:  NewPN532Error(0x81, "TestCommand", ""),
+			want: true,
+		},
+		{
+			name: "PN532Error timeout",
+			err:  NewPN532Error(0x01, "TestCommand", ""),
+			want: false,
+		},
+		{
+			name: "ErrCommandNotSupported",
+			err:  ErrCommandNotSupported,
+			want: true,
+		},
+		{
+			name: "wrapped ErrCommandNotSupported",
+			err:  errors.New("failed: " + ErrCommandNotSupported.Error()),
+			want: false, // errors.Is won't match wrapped string
+		},
+		{
+			name: "other error",
+			err:  errors.New("some other error"),
+			want: false,
+		},
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsCommandNotSupported(tt.err)
+			if got != tt.want {
+				t.Errorf("IsCommandNotSupported() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPN532ErrorHelperFunctions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		err                            error
+		name                           string
+		wantIsPN532AuthenticationError bool
+		wantIsPN532TimeoutError        bool
+	}{
+		{
+			name:                           "PN532Error authentication",
+			err:                            NewPN532Error(0x14, "InDataExchange", ""),
+			wantIsPN532AuthenticationError: true,
+			wantIsPN532TimeoutError:        false,
+		},
+		{
+			name:                           "PN532Error timeout",
+			err:                            NewPN532Error(0x01, "InDataExchange", ""),
+			wantIsPN532AuthenticationError: false,
+			wantIsPN532TimeoutError:        true,
+		},
+		{
+			name:                           "other error",
+			err:                            errors.New("some error"),
+			wantIsPN532AuthenticationError: false,
+			wantIsPN532TimeoutError:        false,
+		},
+		{
+			name:                           "nil error",
+			err:                            nil,
+			wantIsPN532AuthenticationError: false,
+			wantIsPN532TimeoutError:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := IsPN532AuthenticationError(tt.err); got != tt.wantIsPN532AuthenticationError {
+				t.Errorf("IsPN532AuthenticationError() = %v, want %v", got, tt.wantIsPN532AuthenticationError)
+			}
+			if got := IsPN532TimeoutError(tt.err); got != tt.wantIsPN532TimeoutError {
+				t.Errorf("IsPN532TimeoutError() = %v, want %v", got, tt.wantIsPN532TimeoutError)
+			}
+		})
+	}
+}
