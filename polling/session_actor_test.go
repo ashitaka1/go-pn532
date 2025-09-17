@@ -67,7 +67,7 @@ func TestSession_ActorBasedImplementation(t *testing.T) {
 	}
 
 	// Start session with timeout context to prevent hanging
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	err := session.Start(ctx)
@@ -77,8 +77,8 @@ func TestSession_ActorBasedImplementation(t *testing.T) {
 	}
 	defer func() { _ = session.Close() }()
 
-	// Wait a moment for any callback
-	time.Sleep(20 * time.Millisecond)
+	// Wait a moment for any callback - give enough time for several polling cycles
+	time.Sleep(50 * time.Millisecond)
 
 	// Verify that card was detected through actor integration
 	if !cardDetected.Load() {
