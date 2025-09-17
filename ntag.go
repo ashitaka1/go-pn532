@@ -168,10 +168,10 @@ func (t *NTAGTag) ReadBlock(block uint8) ([]byte, error) {
 	data, err := t.device.SendDataExchange([]byte{ntagCmdRead, block})
 	if err != nil {
 		// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
-		if strings.Contains(err.Error(), "data exchange error: 14") {
+		if IsPN532AuthenticationError(err) {
 			return t.readBlockCommunicateThru(block)
 		}
-		return nil, fmt.Errorf("failed to read block %d: %w", block, err)
+		return nil, fmt.Errorf("%w (block %d): %w", ErrTagReadFailed, block, err)
 	}
 
 	// NTAG returns 16 bytes (4 blocks) on read
@@ -199,10 +199,30 @@ func (t *NTAGTag) WriteBlock(block uint8, data []byte) error {
 
 	_, err := t.device.SendDataExchange(cmd)
 	if err != nil {
-		return fmt.Errorf("failed to write block %d: %w", block, err)
+		return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 	}
 
 	return nil
+}
+
+// ReadNDEFRobust reads NDEF data with retry logic to handle intermittent empty data issues
+// This addresses the "empty valid tag" problem where tags are detected but return no data
+func (t *NTAGTag) ReadNDEFRobust() (*NDEFMessage, error) {
+	return readNDEFWithRetry(func() (*NDEFMessage, error) {
+		return t.ReadNDEF()
+	}, isRetryableError, "NDEF")
+}
+
+// isRetryableError determines if an error is worth retrying
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Use the centralized retry logic from errors.go
+	// This handles timeouts, read failures, and communication errors including data exchange error 14
+	return IsRetryable(err) ||
+		errors.Is(err, ErrTagReadFailed)
 }
 
 // ReadNDEF reads NDEF data from the NTAG tag using FastRead for optimal performance
@@ -243,7 +263,7 @@ type ndefHeader struct {
 func (t *NTAGTag) readNDEFHeader() (*ndefHeader, error) {
 	block4, err := t.ReadBlock(ntagUserMemStart)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read NDEF header: %w", err)
+		return nil, fmt.Errorf("%w (NDEF header): %w", ErrTagReadFailed, err)
 	}
 
 	time.Sleep(5 * time.Millisecond)
@@ -433,12 +453,8 @@ func (t *NTAGTag) performMultipleFastReads(startPage, endPage, maxPagesPerRead u
 }
 
 func (*NTAGTag) isFastReadNotSupportedError(err error) bool {
-	errStr := err.Error()
-	return strings.Contains(errStr, "PN532 error: 0x81") ||
-		strings.Contains(errStr, "InCommunicateThru error: 0x01") ||
-		strings.Contains(errStr, "Invalid command") ||
-		errStr == "FAST_READ failed: PN532 error: 0x81" ||
-		errStr == "FAST_READ failed: InCommunicateThru error: 0x01"
+	// Use structured error checking for PN532 command not supported errors
+	return IsCommandNotSupported(err)
 }
 
 func (t *NTAGTag) markFastReadAsUnsupported() {
@@ -587,7 +603,7 @@ func (t *NTAGTag) writeDataToBlocks(data []byte, userStart, userEnd uint8) error
 
 		blockData := t.prepareBlockData(data, i)
 		if err := t.WriteBlock(block, blockData); err != nil {
-			return fmt.Errorf("failed to write block %d: %w", block, err)
+			return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 		}
 		block++
 	}
@@ -609,7 +625,7 @@ func (t *NTAGTag) writeDataToBlocksWithContext(ctx context.Context, data []byte,
 
 		blockData := t.prepareBlockData(data, i)
 		if err := t.WriteBlock(block, blockData); err != nil {
-			return fmt.Errorf("failed to write block %d: %w", block, err)
+			return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 		}
 		block++
 	}
@@ -856,7 +872,7 @@ func (t *NTAGTag) DetectType() error {
 	// NTAG tags should have a valid CC with NDEF magic number 0xE1 at byte 0
 	ccData, err := t.ReadBlock(ntagPageCC)
 	if err != nil {
-		return fmt.Errorf("failed to read NTAG capability container: %w", err)
+		return fmt.Errorf("%w (NTAG capability container): %w", ErrTagReadFailed, err)
 	}
 
 	// Verify this looks like an NTAG capability container
@@ -999,7 +1015,7 @@ func (t *NTAGTag) readBlockWithRetry(block uint8) ([]byte, error) {
 		data, err := t.device.SendDataExchange([]byte{ntagCmdRead, block})
 		if err != nil {
 			// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
-			if strings.Contains(err.Error(), "data exchange error: 14") {
+			if IsPN532AuthenticationError(err) {
 				return t.readBlockCommunicateThru(block)
 			}
 			if i < maxRetries-1 {
@@ -1018,7 +1034,7 @@ func (t *NTAGTag) readBlockWithRetry(block uint8) ([]byte, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("failed to read block %d after %d retries", block, maxRetries)
+	return nil, fmt.Errorf("%w (block %d after %d retries)", ErrTagReadFailed, block, maxRetries)
 }
 
 // SetPasswordProtection enables password protection on the tag
@@ -1068,7 +1084,7 @@ func (t *NTAGTag) SetPasswordProtection(password, pack []byte, auth0 uint8) erro
 	// Read current CFG0
 	cfg0, err := t.ReadBlock(cfg0Page)
 	if err != nil {
-		return fmt.Errorf("failed to read CFG0: %w", err)
+		return fmt.Errorf("%w (CFG0): %w", ErrTagReadFailed, err)
 	}
 
 	// Update AUTH0 in CFG0 (byte 3)
@@ -1115,7 +1131,7 @@ func (t *NTAGTag) LockPage(page uint8) error {
 	// Read current dynamic lock bytes
 	dynLock, err := t.ReadBlock(dynLockPage)
 	if err != nil {
-		return fmt.Errorf("failed to read dynamic lock bytes: %w", err)
+		return fmt.Errorf("%w (dynamic lock bytes): %w", ErrTagReadFailed, err)
 	}
 
 	// Calculate which bit to set based on NTAG type
@@ -1127,7 +1143,7 @@ func (t *NTAGTag) LockPage(page uint8) error {
 
 	// Write back the dynamic lock bytes
 	if err := t.WriteBlock(dynLockPage, dynLock); err != nil {
-		return fmt.Errorf("failed to write dynamic lock bytes: %w", err)
+		return fmt.Errorf("%w (dynamic lock bytes): %w", ErrTagWriteFailed, err)
 	}
 
 	return nil
@@ -1138,7 +1154,7 @@ func (t *NTAGTag) lockStaticPage(page uint8) error {
 	// Read current lock bytes
 	lockPage, err := t.ReadBlock(ntagPageStaticLock)
 	if err != nil {
-		return fmt.Errorf("failed to read static lock bytes: %w", err)
+		return fmt.Errorf("%w (static lock bytes): %w", ErrTagReadFailed, err)
 	}
 
 	// Calculate and set the lock bit
@@ -1147,7 +1163,7 @@ func (t *NTAGTag) lockStaticPage(page uint8) error {
 
 	// Write back the lock bytes
 	if err := t.WriteBlock(ntagPageStaticLock, lockPage); err != nil {
-		return fmt.Errorf("failed to write static lock bytes: %w", err)
+		return fmt.Errorf("%w (static lock bytes): %w", ErrTagWriteFailed, err)
 	}
 	return nil
 }
@@ -1208,13 +1224,13 @@ func (t *NTAGTag) SetAccessControl(config AccessControlConfig) error {
 	// Read current CFG0 (not used in this implementation, kept for future use)
 	_, err = t.ReadBlock(cfg0Page)
 	if err != nil {
-		return fmt.Errorf("failed to read CFG0: %w", err)
+		return fmt.Errorf("%w (CFG0): %w", ErrTagReadFailed, err)
 	}
 
 	// Read current CFG1
 	cfg1, err := t.ReadBlock(cfg1Page)
 	if err != nil {
-		return fmt.Errorf("failed to read CFG1: %w", err)
+		return fmt.Errorf("%w (CFG1): %w", ErrTagReadFailed, err)
 	}
 
 	// Update CFG1
@@ -1222,7 +1238,7 @@ func (t *NTAGTag) SetAccessControl(config AccessControlConfig) error {
 
 	// Write back CFG1
 	if err := t.WriteBlock(cfg1Page, cfg1); err != nil {
-		return fmt.Errorf("failed to write CFG1: %w", err)
+		return fmt.Errorf("%w (CFG1): %w", ErrTagWriteFailed, err)
 	}
 
 	return nil

@@ -121,7 +121,7 @@ func TestNTAGTag_ReadBlock(t *testing.T) {
 			},
 			block:         4,
 			expectError:   true,
-			errorContains: "failed to read block",
+			errorContains: "tag read failed",
 		},
 		{
 			name: "PN532_Error_Response",
@@ -130,7 +130,7 @@ func TestNTAGTag_ReadBlock(t *testing.T) {
 			},
 			block:         4,
 			expectError:   true,
-			errorContains: "failed to read block",
+			errorContains: "tag read failed",
 		},
 		{
 			name: "Short_Response",
@@ -192,7 +192,7 @@ func TestNTAGTag_WriteBlock(t *testing.T) {
 			block:         4,
 			data:          []byte{0x01, 0x02, 0x03, 0x04},
 			expectError:   true,
-			errorContains: "failed to write block",
+			errorContains: "tag write failed",
 		},
 		{
 			name: "PN532_Error_Response",
@@ -202,7 +202,7 @@ func TestNTAGTag_WriteBlock(t *testing.T) {
 			block:         4,
 			data:          []byte{0x01, 0x02, 0x03, 0x04},
 			expectError:   true,
-			errorContains: "failed to write block",
+			errorContains: "tag write failed",
 		},
 		{
 			name: "Data_Too_Large",

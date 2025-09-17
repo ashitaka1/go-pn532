@@ -148,7 +148,7 @@ func getMIFAREReadBlockTestCases() []struct {
 			},
 			block:         4,
 			expectError:   true,
-			errorContains: "failed to read block",
+			errorContains: "tag read failed",
 		},
 		{
 			name: "Short_Response",
@@ -359,7 +359,7 @@ func getMIFAREWriteBlockErrorCases() []struct {
 			block:         4,
 			data:          make([]byte, 16),
 			expectError:   true,
-			errorContains: "failed to write block",
+			errorContains: "tag write failed",
 		},
 	}
 }
@@ -472,7 +472,7 @@ func getMIFAREAuthenticateTestCases() []struct {
 			keyType:       0x00,
 			key:           []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // Wrong key
 			expectError:   true,
-			errorContains: "authentication failed",
+			errorContains: "tag authentication failed",
 		},
 		{
 			name: "Transport_Error",
@@ -483,7 +483,7 @@ func getMIFAREAuthenticateTestCases() []struct {
 			keyType:       0x00,
 			key:           []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
 			expectError:   true,
-			errorContains: "authentication failed",
+			errorContains: "tag authentication failed",
 		},
 	}
 }
@@ -520,8 +520,9 @@ func TestMIFARETag_ReadBlockDirect(t *testing.T) {
 		{
 			name: "Fallback_To_CommunicateThru",
 			setupMock: func(mt *MockTransport) {
-				// First call (InDataExchange) fails with error 01, second call (InCommunicateThru) succeeds
-				mt.SetError(0x40, errors.New("data exchange error: 01"))
+				// First call (InDataExchange) fails with PN532 error 01 (timeout),
+				// second call (InCommunicateThru) succeeds
+				mt.SetResponse(0x40, []byte{0x7F, 0x01})
 
 				// Setup InCommunicateThru response
 				data := make([]byte, 18) // Header + Status + 16 bytes data
@@ -545,7 +546,7 @@ func TestMIFARETag_ReadBlockDirect(t *testing.T) {
 			},
 			block:         4,
 			expectError:   true,
-			errorContains: "failed to read block",
+			errorContains: "tag read failed",
 		},
 		{
 			name: "Short_Response",
@@ -631,20 +632,21 @@ func getMIFAREWriteBlockDirectTestCases() []struct {
 		{
 			name: "Successful_Direct_Write_via_Fallback",
 			setupMock: func(mt *MockTransport) {
-				// Simulate read timeout to trigger SendRawCommand fallback
-				mt.SetError(0x40, errors.New("data exchange error: 01"))
+				// Simulate timeout errors for all InDataExchange calls to trigger fallback
+				mt.SetResponse(0x40, []byte{0x7F, 0x01})
 
-				// Setup response for readBlockCommunicateThru fallback (SendRawCommand)
+				// Setup successful response for SendRawCommand (both read and write will use this)
+				// For read: return 16 bytes of data
 				readData := make([]byte, 18)
 				readData[0] = 0x43 // InCommunicateThru response
 				readData[1] = 0x00 // Success status
 				for i := 2; i < 18; i++ {
 					readData[i] = byte(i - 2)
 				}
-				mt.SetResponse(0x42, readData) // SendRawCommand for read validation
+				mt.SetResponse(0x42, readData)
 
-				// Note: The write will also fail with timeout error and use writeBlockDirectAlternative
-				// which eventually calls writeBlockCommunicateThru via SendRawCommand
+				// For write: when SendRawCommand is called for write, return success
+				// The mock will use the same response for both read and write SendRawCommand calls
 				// This tests the full fallback chain for clone tags
 			},
 			block: 4,
@@ -727,7 +729,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				mt.SetError(0x40, errors.New("authentication failed"))
 			},
 			expectError:   true,
-			errorContains: "failed to read NDEF data",
+			errorContains: "tag read failed",
 		},
 		{
 			name: "Empty_NDEF_Data",

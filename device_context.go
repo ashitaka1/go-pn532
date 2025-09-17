@@ -378,6 +378,20 @@ func (d *Device) detectTagsWithInListPassiveTarget(
 		return nil, fmt.Errorf("transport preparation failed: %w", err)
 	}
 
+	// Release any previously selected targets to clear HALT states
+	// This addresses intermittent "empty valid tag" issues where tags get stuck
+	if err := d.InReleaseContext(ctx, 0); err != nil {
+		debugf("InRelease failed, continuing anyway: %v", err)
+		// Don't fail the operation if InRelease fails - it's an optimization
+	}
+
+	// Small delay to allow RF field and tags to stabilize after release
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(10 * time.Millisecond):
+	}
+
 	// Use InListPassiveTarget for legacy compatibility
 	return d.InListPassiveTargetContext(ctx, maxTags, baudRate)
 }
@@ -557,7 +571,7 @@ func (d *Device) SendDataExchangeContext(ctx context.Context, data []byte) ([]by
 	// Check for error frame (TFI = 0x7F)
 	if len(res) >= 2 && res[0] == 0x7F {
 		errorCode := res[1]
-		return nil, fmt.Errorf("PN532 error: 0x%02X", errorCode)
+		return nil, NewPN532Error(errorCode, "InDataExchange", "")
 	}
 
 	if len(res) < 2 || res[0] != 0x41 {
@@ -579,7 +593,7 @@ func (d *Device) SendRawCommandContext(ctx context.Context, data []byte) ([]byte
 	// Check for error frame (TFI = 0x7F)
 	if len(res) >= 2 && res[0] == 0x7F {
 		errorCode := res[1]
-		return nil, fmt.Errorf("PN532 error: 0x%02X", errorCode)
+		return nil, NewPN532Error(errorCode, "InCommunicateThru", "")
 	}
 
 	if len(res) < 2 || res[0] != 0x43 {
