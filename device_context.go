@@ -1067,3 +1067,17 @@ func (d *Device) PowerDownContext(ctx context.Context, wakeupEnable, irqEnable b
 
 	return nil
 }
+
+// ClearTransportState clears corrupted transport state to prevent firmware lockup
+// This is critical when switching between InCommunicateThru and InDataExchange
+// operations after frame reception failures
+func (d *Device) ClearTransportState() error {
+	// Check if the transport supports state clearing
+	if clearer, ok := d.transport.(interface{ ClearTransportState() error }); ok {
+		if err := clearer.ClearTransportState(); err != nil {
+			return fmt.Errorf("failed to clear transport state: %w", err)
+		}
+	}
+	// If transport doesn't support clearing, that's ok (some transports may not need it)
+	return nil
+}

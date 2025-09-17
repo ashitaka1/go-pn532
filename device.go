@@ -44,13 +44,18 @@ type DeviceConfig struct {
 	RetryConfig *RetryConfig
 	// Timeout is the default timeout for operations
 	Timeout time.Duration
+	// MaxFastReadPages limits the number of pages in a single FastRead operation
+	// Set to 0 to use platform-specific defaults (16 pages on Windows UART, unlimited elsewhere)
+	// This helps avoid PN532 firmware lockups with large InCommunicateThru payloads
+	MaxFastReadPages int
 }
 
 // DefaultDeviceConfig returns default device configuration
 func DefaultDeviceConfig() *DeviceConfig {
 	return &DeviceConfig{
-		RetryConfig: DefaultRetryConfig(),
-		Timeout:     1 * time.Second,
+		RetryConfig:      DefaultRetryConfig(),
+		Timeout:          1 * time.Second,
+		MaxFastReadPages: 0, // Use platform-specific defaults
 	}
 }
 

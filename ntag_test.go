@@ -539,4 +539,83 @@ func TestNTAG215BlockByBlockBufferOverflow(t *testing.T) {
 	}
 }
 
+// TestNTAGFastReadConfigLimits tests the FastRead configuration limits
+func TestNTAGFastReadConfigLimits(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		maxFastReadPages int
+		expectedResult   uint8
+	}{
+		{
+			name:             "Custom config normal value",
+			maxFastReadPages: 32,
+			expectedResult:   32,
+		},
+		{
+			name:             "Custom config bounds check - exceeds uint8",
+			maxFastReadPages: 300,
+			expectedResult:   255, // Capped to uint8 max
+		},
+		{
+			name:             "Custom config at uint8 boundary",
+			maxFastReadPages: 255,
+			expectedResult:   255,
+		},
+		{
+			name:             "Custom config small value",
+			maxFastReadPages: 1,
+			expectedResult:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Create device with test config
+			config := &DeviceConfig{
+				MaxFastReadPages: tt.maxFastReadPages,
+			}
+			device := &Device{
+				transport: &MockTransport{},
+				config:    config,
+			}
+
+			// Create NTAG tag
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+
+			// Test the getMaxFastReadPages method
+			maxPages := tag.getMaxFastReadPages()
+
+			// Verify the result matches expected bounds checking
+			assert.Equal(t, tt.expectedResult, maxPages,
+				"MaxFastReadPages should respect config with proper bounds checking")
+		})
+	}
+}
+
+// TestNTAGFastReadDefaultLimits tests that default limits are reasonable
+func TestNTAGFastReadDefaultLimits(t *testing.T) {
+	t.Parallel()
+	// Create device with default config (0 = use platform defaults)
+	config := &DeviceConfig{
+		MaxFastReadPages: 0,
+	}
+	device := &Device{
+		transport: &MockTransport{},
+		config:    config,
+	}
+
+	// Create NTAG tag
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+
+	// Test the getMaxFastReadPages method
+	maxPages := tag.getMaxFastReadPages()
+
+	// Verify the result is reasonable for any platform
+	// (should be either Windows UART limit of 16 or default of 60)
+	assert.True(t, maxPages == 16 || maxPages == 60,
+		"Default MaxFastReadPages should be either Windows UART limit (16) or default (60), got %d", maxPages)
+}
+
 // NDEF Message Tests
