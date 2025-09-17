@@ -74,6 +74,10 @@ const (
 	// CapabilityAutoPollNative indicates the transport supports native InAutoPoll
 	// with full command set and reliable operation (e.g., UART, I2C, SPI)
 	CapabilityAutoPollNative TransportCapability = "autopoll_native"
+
+	// CapabilityUART indicates the transport uses UART communication
+	// UART transport is prone to PN532 firmware lockups with large InCommunicateThru payloads
+	CapabilityUART TransportCapability = "uart"
 )
 
 // TransportCapabilityChecker defines an interface for querying transport capabilities

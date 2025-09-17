@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -245,6 +246,16 @@ func (t *NTAGTag) ReadNDEF() (*NDEFMessage, error) {
 
 	data, err := t.readNDEFDataWithFastRead(header, totalBytes)
 	if err != nil {
+		// CRITICAL: Clear transport state after failed InCommunicateThru operation
+		// This prevents firmware lockup when switching to InDataExchange protocol
+		fallbackReason := "FastRead failed"
+		if runtime.GOOS == "windows" && t.isUARTTransport() {
+			fallbackReason = "FastRead failed (Windows UART has size limits to prevent PN532 firmware lockup)"
+		}
+		debugf("NTAG %s, clearing transport state before fallback: %v", fallbackReason, err)
+		if clearErr := t.device.ClearTransportState(); clearErr != nil {
+			debugf("NTAG transport state clearing failed: %v", clearErr)
+		}
 		return t.readNDEFBlockByBlock()
 	}
 
@@ -339,6 +350,49 @@ func (t *NTAGTag) ensureTagTypeDetected() error {
 	return nil
 }
 
+// getMaxFastReadPages returns the maximum number of pages to read in a single FastRead operation
+// This is platform-specific to avoid PN532 firmware lockups with large InCommunicateThru payloads
+func (t *NTAGTag) getMaxFastReadPages() uint8 {
+	// Check if user has explicitly configured a limit
+	if t.device.config.MaxFastReadPages > 0 {
+		// Bounds check to prevent integer overflow and ensure reasonable limits
+		switch {
+		case t.device.config.MaxFastReadPages > 255:
+			debugf("NTAG MaxFastReadPages %d exceeds uint8 limit, capping to 255", t.device.config.MaxFastReadPages)
+			return 255
+		default:
+			// #nosec G115 - bounds checked above
+			return uint8(t.device.config.MaxFastReadPages)
+		}
+	}
+
+	// Apply platform-specific defaults
+	if runtime.GOOS == "windows" {
+		// Check if using UART transport which is most prone to the firmware lockup
+		if t.isUARTTransport() {
+			// 16 pages = 64 bytes - safe limit that avoids PN532 firmware lockups on Windows UART
+			// Based on research showing InCommunicateThru becomes unreliable beyond 64 bytes
+			debugf("NTAG applying Windows UART FastRead limit: 16 pages (64 bytes) to prevent firmware lockup")
+			debugf("NTAG tip: set config.MaxFastReadPages to override this Windows-specific safety limit")
+			return 16
+		}
+		debugf("NTAG Windows detected but non-UART transport, using default FastRead limits")
+	}
+
+	// Default: no limit (use original behavior)
+	return 60
+}
+
+// isUARTTransport checks if the current transport is UART-based
+func (t *NTAGTag) isUARTTransport() bool {
+	// Check if transport has UART capability
+	if checker, ok := t.device.transport.(TransportCapabilityChecker); ok {
+		return checker.HasCapability(CapabilityUART)
+	}
+	// Fallback: assume it might be UART to be safe
+	return true
+}
+
 func (t *NTAGTag) readNDEFDataWithFastRead(_ *ndefHeader, totalBytes int) ([]byte, error) {
 	if t.fastReadSupported != nil && !*t.fastReadSupported {
 		debugf("NTAG FastRead disabled - using block-by-block fallback")
@@ -348,7 +402,7 @@ func (t *NTAGTag) readNDEFDataWithFastRead(_ *ndefHeader, totalBytes int) ([]byt
 	debugf("NTAG attempting FastRead for NDEF data (%d bytes)", totalBytes)
 	readRange := t.calculateReadRange(totalBytes)
 
-	maxPagesPerRead := uint8(60)
+	maxPagesPerRead := t.getMaxFastReadPages()
 
 	if readRange.endPage-readRange.startPage+1 <= maxPagesPerRead {
 		debugf("NTAG using single FastRead for pages %d-%d", readRange.startPage, readRange.endPage)

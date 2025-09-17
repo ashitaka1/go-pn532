@@ -228,6 +228,27 @@ func (*Transport) Type() pn532.TransportType {
 	return pn532.TransportUART
 }
 
+// ClearTransportState resets transport state after protocol failures
+// This is critical for preventing firmware lockup when switching between
+// InCommunicateThru and InDataExchange operations after frame corruption
+func (t *Transport) ClearTransportState() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.port != nil {
+		// Reset input buffer to clear any stale/corrupted data
+		_ = t.port.ResetInputBuffer()
+
+		// Add delay for Windows USB-UART drivers to process buffer reset
+		if isWindows() {
+			time.Sleep(15 * time.Millisecond)
+		} else {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return nil
+}
+
 // isInterruptedSystemCall checks if an error is caused by an interrupted system call
 func isInterruptedSystemCall(err error) bool {
 	if err == nil {
@@ -781,6 +802,9 @@ func (*Transport) HasCapability(capability pn532.TransportCapability) bool {
 		return true
 	case pn532.CapabilityRequiresInSelect:
 		// UART requires InSelect after InListPassiveTarget for proper target selection
+		return true
+	case pn532.CapabilityUART:
+		// This is the UART transport
 		return true
 	default:
 		return false
