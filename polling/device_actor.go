@@ -94,32 +94,13 @@ func (da *DeviceActor) pollLoop() {
 		atomic.StoreInt64(&da.running, 0)
 	}()
 
+	// Perform immediate poll before entering ticker loop for responsive startup
+	da.performPoll()
+
 	for {
 		select {
 		case <-ticker.C:
-			if da.device == nil || da.callbacks.OnCardDetected == nil {
-				continue
-			}
-
-			start := time.Now()
-			detectedTags, err := da.device.InitiatorListPassiveTargets(1, pn532.TagTypeAny, nil)
-			pollDuration := time.Since(start)
-
-			// Track poll cycle
-			atomic.AddInt64(&da.pollCycles, 1)
-			atomic.StoreInt64(&da.lastPollLatency, pollDuration.Nanoseconds())
-
-			if err != nil {
-				// Track poll error
-				atomic.AddInt64(&da.pollErrors, 1)
-			}
-
-			if err == nil && len(detectedTags) > 0 {
-				// Track card detected and update timestamp
-				atomic.AddInt64(&da.cardsDetected, 1)
-				atomic.StoreInt64(&da.lastCardDetection, start.UnixNano())
-				_ = da.callbacks.OnCardDetected(detectedTags[0])
-			}
+			da.performPoll()
 
 			// Adaptive polling: adjust interval based on card presence
 			da.adjustPollInterval()
@@ -130,6 +111,33 @@ func (da *DeviceActor) pollLoop() {
 		case <-da.stopChan:
 			return
 		}
+	}
+}
+
+// performPoll executes a single polling cycle
+func (da *DeviceActor) performPoll() {
+	if da.device == nil || da.callbacks.OnCardDetected == nil {
+		return
+	}
+
+	start := time.Now()
+	detectedTags, err := da.device.InitiatorListPassiveTargets(1, pn532.TagTypeAny, nil)
+	pollDuration := time.Since(start)
+
+	// Track poll cycle
+	atomic.AddInt64(&da.pollCycles, 1)
+	atomic.StoreInt64(&da.lastPollLatency, pollDuration.Nanoseconds())
+
+	if err != nil {
+		// Track poll error
+		atomic.AddInt64(&da.pollErrors, 1)
+	}
+
+	if err == nil && len(detectedTags) > 0 {
+		// Track card detected and update timestamp
+		atomic.AddInt64(&da.cardsDetected, 1)
+		atomic.StoreInt64(&da.lastCardDetection, start.UnixNano())
+		_ = da.callbacks.OnCardDetected(detectedTags[0])
 	}
 }
 
