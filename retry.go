@@ -199,10 +199,13 @@ func checkContextCancellation(ctx context.Context, lastErr error) error {
 }
 
 func sleepWithContext(ctx context.Context, sleep time.Duration, lastErr error) error {
+	timer := time.NewTimer(sleep)
+	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return lastErr
-	case <-time.After(sleep):
+	case <-timer.C:
 		return nil
 	}
 }
