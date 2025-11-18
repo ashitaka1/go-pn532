@@ -76,6 +76,7 @@ type NDEFRecord struct {
 }
 
 // BuildNDEFMessage creates NDEF data from text
+//
 // Deprecated: Use BuildTextMessage or BuildNDEFMessageEx for more flexibility
 func BuildNDEFMessage(text string) ([]byte, error) {
 	return BuildTextMessage(text)
