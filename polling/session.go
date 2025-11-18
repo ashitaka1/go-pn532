@@ -46,6 +46,7 @@ type Session struct {
 	stateMutex     sync.RWMutex
 	writeMutex     sync.Mutex
 	isPaused       atomic.Bool
+	closed         atomic.Bool // Prevents callbacks from executing after Close()
 }
 
 // NewSession creates a new card monitoring session
@@ -121,6 +122,9 @@ func (s *Session) GetDeviceActor() *DeviceActor {
 
 // Close cleans up the monitor resources
 func (s *Session) Close() error {
+	// Mark session as closed to prevent timer callbacks from executing
+	s.closed.Store(true)
+
 	// Stop any running removal timer
 	s.stateMutex.Lock()
 	if s.state.RemovalTimer != nil {
@@ -435,6 +439,11 @@ func (s *Session) handlePollingError(err error) {
 
 // handleCardRemoval handles card removal state changes
 func (s *Session) handleCardRemoval() {
+	// Bail out if session is closed to prevent timer callbacks from executing after cleanup
+	if s.closed.Load() {
+		return
+	}
+
 	s.stateMutex.Lock()
 	wasPresent := s.state.Present
 	if wasPresent {

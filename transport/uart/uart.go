@@ -207,6 +207,9 @@ func (t *Transport) SetTimeout(timeout time.Duration) error {
 
 // Close closes the transport connection
 func (t *Transport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	if t.port != nil {
 		err := t.port.Close()
 		t.port = nil                    // Clear port reference after closing
@@ -220,6 +223,8 @@ func (t *Transport) Close() error {
 
 // IsConnected returns true if the transport is connected
 func (t *Transport) IsConnected() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.port != nil
 }
 

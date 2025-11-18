@@ -22,6 +22,7 @@ package polling
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,6 +51,7 @@ type DeviceActor struct {
 	config    *Config
 	callbacks DeviceCallbacks
 	stopChan  chan struct{}
+	wg        sync.WaitGroup // Tracks polling goroutine lifecycle
 	// Atomic counters for metrics
 	pollCycles      int64
 	cardsDetected   int64
@@ -69,7 +71,7 @@ func NewDeviceActor(device *pn532.Device, config *Config, callbacks DeviceCallba
 		device:            device,
 		config:            config,
 		callbacks:         callbacks,
-		stopChan:          make(chan struct{}),
+		stopChan:          make(chan struct{}, 1), // Buffered to prevent deadlock in Stop()
 		currentInterval:   config.PollInterval.Nanoseconds(),
 		lastCardDetection: now,
 	}
@@ -79,6 +81,8 @@ func NewDeviceActor(device *pn532.Device, config *Config, callbacks DeviceCallba
 func (da *DeviceActor) Start(_ context.Context) error {
 	// Only start if not already running
 	if atomic.CompareAndSwapInt64(&da.running, 0, 1) {
+		// Track goroutine for clean shutdown
+		da.wg.Add(1)
 		// Start continuous polling in a goroutine
 		go da.pollLoop()
 	}
@@ -87,6 +91,7 @@ func (da *DeviceActor) Start(_ context.Context) error {
 
 // pollLoop runs continuous polling until stopped
 func (da *DeviceActor) pollLoop() {
+	defer da.wg.Done() // Signal goroutine completion
 	ticker := time.NewTicker(da.config.PollInterval)
 	defer func() {
 		ticker.Stop()
@@ -169,6 +174,8 @@ func (da *DeviceActor) Stop(_ context.Context) error {
 	default:
 		// Channel might be closed or goroutine already stopped
 	}
+	// Wait for polling goroutine to fully exit
+	da.wg.Wait()
 	return nil
 }
 
