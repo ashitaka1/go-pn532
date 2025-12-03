@@ -94,57 +94,6 @@ func TestNDEFRecord_Structure(t *testing.T) {
 	}
 }
 
-func TestBuildNDEFMessage(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		text        string
-		expectError bool
-	}{
-		{
-			name:        "Valid_Text",
-			text:        "Hello, World!",
-			expectError: false,
-		},
-		{
-			name:        "Empty_Text",
-			text:        "",
-			expectError: false,
-		},
-		{
-			name:        "Long_Text",
-			text:        "This is a longer text message to test NDEF encoding with more content.",
-			expectError: false,
-		},
-		{
-			name:        "Unicode_Text",
-			text:        "Hello, Café! 🌍",
-			expectError: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			data, err := BuildNDEFMessage(tt.text)
-
-			if tt.expectError {
-				require.Error(t, err)
-				assert.Nil(t, data)
-			} else {
-				require.NoError(t, err)
-				assert.NotNil(t, data)
-				assert.NotEmpty(t, data)
-
-				// Verify the data starts with NDEF header (0x03)
-				assert.Equal(t, byte(0x03), data[0])
-			}
-		})
-	}
-}
-
 func TestBuildNDEFMessageEx(t *testing.T) {
 	t.Parallel()
 
@@ -242,7 +191,9 @@ func TestParseNDEFMessage(t *testing.T) {
 			name: "Valid_Text_Message",
 			setupData: func() []byte {
 				// Build a simple text message and return the data
-				data, err := BuildNDEFMessage("Hello, World!")
+				data, err := BuildNDEFMessageEx([]NDEFRecord{
+					{Type: NDEFTypeText, Text: "Hello, World!"},
+				})
 				require.NoError(t, err)
 				return data
 			},

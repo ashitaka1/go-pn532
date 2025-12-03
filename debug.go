@@ -58,8 +58,3 @@ func debugln(args ...any) {
 func SetDebugEnabled(enabled bool) {
 	debugEnabled = enabled
 }
-
-// IsDebugEnabled returns the current debug logging state
-func IsDebugEnabled() bool {
-	return debugEnabled
-}

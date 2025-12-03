@@ -131,6 +131,9 @@ func (*Device) getCurrentTarget() byte {
 	return 1
 }
 
+// Option is a functional option for configuring a Device
+type Option func(*Device) error
+
 // New creates a new PN532 device with the given transport
 func New(transport Transport, opts ...Option) (*Device, error) {
 	device := &Device{
