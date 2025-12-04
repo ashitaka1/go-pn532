@@ -152,9 +152,9 @@ func connectToDevice(ctx context.Context, cfg *config) (*pn532.Device, error) {
 		return nil, fmt.Errorf("failed to connect to PN532 device: %w", err)
 	}
 
-	// Show firmware version if debug enabled - use context-aware method
+	// Show firmware version if debug enabled
 	if cfg.debug {
-		if version, versionErr := device.GetFirmwareVersionContext(ctx); versionErr == nil {
+		if version, versionErr := device.GetFirmwareVersion(ctx); versionErr == nil {
 			_, _ = fmt.Printf("PN532 Firmware: %s\n", version.Version)
 		}
 	}

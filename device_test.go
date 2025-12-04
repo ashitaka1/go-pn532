@@ -174,7 +174,7 @@ func TestDevice_InitContext_Timeout(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestDevice_DetectTagsContext(t *testing.T) {
+func TestDevice_DetectTags(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -236,7 +236,7 @@ func TestDevice_DetectTagsContext(t *testing.T) {
 			require.NoError(t, err)
 
 			// Test tag detection
-			tags, err := device.DetectTagsContext(ctx, tt.maxTargets, 0)
+			tags, err := device.DetectTags(ctx, tt.maxTargets, 0)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -254,7 +254,7 @@ func TestDevice_DetectTagsContext(t *testing.T) {
 	}
 }
 
-func TestDevice_GetFirmwareVersionContext(t *testing.T) {
+func TestDevice_GetFirmwareVersion(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -304,7 +304,7 @@ func TestDevice_GetFirmwareVersionContext(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 
-			firmware, err := device.GetFirmwareVersionContext(ctx)
+			firmware, err := device.GetFirmwareVersion(ctx)
 
 			if tt.expectError {
 				require.Error(t, err)

@@ -166,7 +166,7 @@ func NewNTAGTag(device *Device, uid []byte, sak byte) *NTAGTag {
 
 // ReadBlock reads a block from the NTAG tag
 func (t *NTAGTag) ReadBlock(block uint8) ([]byte, error) {
-	data, err := t.device.SendDataExchange([]byte{ntagCmdRead, block})
+	data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, block})
 	if err != nil {
 		// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
 		if IsPN532AuthenticationError(err) {
@@ -198,7 +198,7 @@ func (t *NTAGTag) WriteBlock(block uint8, data []byte) error {
 	cmd := []byte{ntagCmdWrite, block}
 	cmd = append(cmd, data...)
 
-	_, err := t.device.SendDataExchange(cmd)
+	_, err := t.device.SendDataExchange(context.Background(), cmd)
 	if err != nil {
 		return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 	}
@@ -711,7 +711,7 @@ func (t *NTAGTag) FastRead(startAddr, endAddr uint8) ([]byte, error) {
 
 	// Use SendRawCommand for FastRead as some PN532 chips require it
 	// (SendDataExchange returns error 0x81 on some PN532 variants)
-	data, err := t.device.SendRawCommand(cmd)
+	data, err := t.device.SendRawCommand(context.Background(), cmd)
 	if err != nil {
 		debugf("NTAG FastRead failed: %v", err)
 		return nil, fmt.Errorf("FAST_READ failed: %w", err)
@@ -740,7 +740,7 @@ func (t *NTAGTag) PwdAuth(password []byte) ([]byte, error) {
 	cmd[0] = ntagCmdPwdAuth
 	copy(cmd[1:], password)
 
-	data, err := t.device.SendDataExchange(cmd)
+	data, err := t.device.SendDataExchange(context.Background(), cmd)
 	if err != nil {
 		return nil, fmt.Errorf("PWD_AUTH failed: %w", err)
 	}
@@ -760,7 +760,7 @@ func (t *NTAGTag) GetVersion() (*NTAGVersion, error) {
 	// This follows the same pattern as FastRead for better hardware compatibility
 	cmd := []byte{ntagCmdGetVersion}
 
-	data, err := t.device.SendRawCommand(cmd)
+	data, err := t.device.SendRawCommand(context.Background(), cmd)
 	if err != nil {
 		// If GET_VERSION fails (common with clone devices), fall back to default detection
 		// This maintains backward compatibility while enabling proper detection when possible
@@ -1009,7 +1009,7 @@ func (*NTAGTag) detectTypeFromCapabilityContainer(ccData []byte) NTAGType {
 // This method is more lenient to avoid disrupting normal operations
 func (t *NTAGTag) canAccessPageSafely(page uint8) bool {
 	// Try to access the page with minimal impact
-	data, err := t.device.SendDataExchange([]byte{ntagCmdRead, page})
+	data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, page})
 	if err != nil {
 		// If access fails, the page is likely beyond the boundary
 		return false
@@ -1066,7 +1066,7 @@ func (t *NTAGTag) getTagTypeName() string {
 func (t *NTAGTag) readBlockWithRetry(block uint8) ([]byte, error) {
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
-		data, err := t.device.SendDataExchange([]byte{ntagCmdRead, block})
+		data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, block})
 		if err != nil {
 			// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
 			if IsPN532AuthenticationError(err) {
@@ -1312,7 +1312,7 @@ func (t *NTAGTag) readBlockCommunicateThru(block uint8) ([]byte, error) {
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		debugf("NTAG InCommunicateThru attempt %d/%d for block %d", attempt, maxRetries, block)
-		data, err = t.device.SendRawCommand(cmd)
+		data, err = t.device.SendRawCommand(context.Background(), cmd)
 		if err == nil {
 			successAttempt = attempt
 			break
@@ -1359,7 +1359,7 @@ func (t *NTAGTag) readBlockDirectFallback(block uint8) ([]byte, error) {
 	debugf("NTAG attempting direct InDataExchange fallback for block %d", block)
 
 	// Try direct InDataExchange, ignoring the error 14 that originally triggered the fallback chain
-	data, err := t.device.SendDataExchange([]byte{ntagCmdRead, block})
+	data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, block})
 	if err != nil {
 		// If this also fails, the clone device simply doesn't support NTAG properly
 		debugf("NTAG direct InDataExchange fallback also failed: %v", err)

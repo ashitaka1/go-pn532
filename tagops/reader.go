@@ -150,7 +150,7 @@ func (t *TagOperations) tryFastRead(currentPage, chunkEnd byte) (data []byte, ne
 	}
 
 	cmd := []byte{0x3A, currentPage, chunkEnd}
-	if data, err := t.device.SendRawCommand(cmd); err == nil {
+	if data, err := t.device.SendRawCommand(context.Background(), cmd); err == nil {
 		return data, chunkEnd + 1
 	}
 
@@ -159,7 +159,7 @@ func (t *TagOperations) tryFastRead(currentPage, chunkEnd byte) (data []byte, ne
 
 func (t *TagOperations) readPagesIndividually(currentPage, chunkEnd byte) (result []byte, nextPage byte, err error) {
 	for page := currentPage; page <= chunkEnd; page++ {
-		pageData, err := t.device.SendDataExchange([]byte{0x30, page})
+		pageData, err := t.device.SendDataExchange(context.Background(), []byte{0x30, page})
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to read page %d: %w", page, err)
 		}

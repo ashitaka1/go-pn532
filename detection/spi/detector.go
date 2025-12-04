@@ -319,6 +319,6 @@ func probeSPIDevice(_ context.Context, config Config, _ detection.Mode) bool {
 	}
 
 	// Try to get firmware version
-	_, err = device.GetFirmwareVersion()
+	_, err = device.GetFirmwareVersion(context.Background())
 	return err == nil
 }

@@ -27,12 +27,6 @@ import (
 	"time"
 )
 
-// DetectTag detects a single tag in the field
-// For multiple tag detection, use DetectTags()
-func (d *Device) DetectTag() (*DetectedTag, error) {
-	return d.DetectTagContext(context.Background())
-}
-
 // WaitForTag waits for a tag to be detected with the given context.
 // This is a high-level convenience function that handles the async tag detection
 // pattern with error handling and timeout management.
@@ -84,8 +78,8 @@ func (*Device) pauseWithContext(ctx context.Context, interval time.Duration) err
 	}
 }
 
-func (d *Device) attemptDetection(_ context.Context, errorCount *int) (*DetectedTag, error) {
-	detectedTag, err := d.DetectTag()
+func (d *Device) attemptDetection(ctx context.Context, errorCount *int) (*DetectedTag, error) {
+	detectedTag, err := d.DetectTag(ctx)
 	if err != nil {
 		// ErrNoTagDetected is expected during polling, not a real error
 		if errors.Is(err, ErrNoTagDetected) {
@@ -152,7 +146,7 @@ func (d *Device) SimplePoll(ctx context.Context, interval time.Duration) (*Detec
 			return nil, ctx.Err()
 		case <-ticker.C:
 			// Try to detect tags
-			tags, err := d.InListPassiveTargetContext(ctx, 1, 0x00)
+			tags, err := d.InListPassiveTarget(ctx, 1, 0x00)
 			if err != nil {
 				// Continue polling on errors (device might be temporarily busy)
 				debugf("Polling error (continuing): %v", err)
@@ -170,24 +164,14 @@ func (d *Device) SimplePoll(ctx context.Context, interval time.Duration) (*Detec
 // selectDetectionStrategy chooses the appropriate detection strategy
 // Integrates with the polling strategy system for intelligent strategy selection
 
-// DetectTags detects multiple tags in the field
-// maxTags: maximum number of tags to detect (1-2)
-// baudRate: baud rate and modulation type:
-//   - 0x00: 106 kbps type A (ISO/IEC14443 Type A)
-//   - 0x01: 212 kbps (FeliCa polling)
-//   - 0x02: 424 kbps (FeliCa polling)
-//   - 0x03: 106 kbps type B (ISO/IEC14443-3B)
-//   - 0x04: 106 kbps Innovision Jewel tag
-func (d *Device) DetectTags(maxTags, baudRate byte) ([]*DetectedTag, error) {
-	return d.DetectTagsContext(context.Background(), maxTags, baudRate)
-}
-
 // InitiatorListPassiveTargets detects passive targets with optional filtering
 // This is a compatibility method for the PN532 InListPassiveTarget command
-func (d *Device) InitiatorListPassiveTargets(maxTags int, tagType TagType, uid []byte) ([]*DetectedTag, error) {
+func (d *Device) InitiatorListPassiveTargets(
+	ctx context.Context, maxTags int, tagType TagType, uid []byte,
+) ([]*DetectedTag, error) {
 	// Get all tags first using standard detection
 	// The baudRate is set to 0x00 for 106 kbps Type A
-	allTags, err := d.DetectTags(byte(maxTags), 0x00)
+	allTags, err := d.DetectTags(ctx, byte(maxTags), 0x00)
 	if err != nil {
 		return nil, err
 	}
@@ -383,18 +367,4 @@ func (d *Device) CreateTag(detected *DetectedTag) (Tag, error) {
 	default:
 		return nil, ErrInvalidTag
 	}
-}
-
-// InRelease releases the selected target(s)
-// targetNumber: logical number of the target to release (0x00 for all targets)
-// Based on PN532 manual section 7.3.11
-func (d *Device) InRelease(targetNumber byte) error {
-	return d.InReleaseContext(context.Background(), targetNumber)
-}
-
-// InSelect selects the specified target
-// targetNumber: logical number of the target to select
-// Based on PN532 manual section 7.3.12
-func (d *Device) InSelect(targetNumber byte) error {
-	return d.InSelectContext(context.Background(), targetNumber)
 }

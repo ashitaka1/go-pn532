@@ -21,7 +21,6 @@
 package pn532
 
 import (
-	"context"
 	"encoding/hex"
 	"time"
 )
@@ -157,13 +156,4 @@ func (a *AutoPollResult) extractUID(tagType TagType) (uidBytes []byte, uid strin
 		uidBytes := a.TargetData[:4]
 		return uidBytes, hex.EncodeToString(uidBytes)
 	}
-}
-
-// InAutoPoll polls for targets of specified types
-// pollCount: number of polling cycles (0xFF for endless)
-// pollPeriod: polling period in units of 150ms (1-15)
-// targetTypes: types of targets to poll for
-// Based on PN532 manual section 7.3.13
-func (d *Device) InAutoPoll(pollCount, pollPeriod byte, targetTypes []AutoPollTarget) ([]AutoPollResult, error) {
-	return d.InAutoPollContext(context.Background(), pollCount, pollPeriod, targetTypes)
 }

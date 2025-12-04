@@ -20,10 +20,6 @@
 
 package pn532
 
-import (
-	"context"
-)
-
 // FirmwareVersion contains PN532 firmware information
 type FirmwareVersion struct {
 	Version          string
@@ -37,16 +33,6 @@ type GeneralStatus struct {
 	LastError    byte
 	FieldPresent bool
 	Targets      byte
-}
-
-// GetFirmwareVersion returns the PN532 firmware version
-func (d *Device) GetFirmwareVersion() (*FirmwareVersion, error) {
-	return d.GetFirmwareVersionContext(context.Background())
-}
-
-// GetGeneralStatus returns the PN532 general status
-func (d *Device) GetGeneralStatus() (*GeneralStatus, error) {
-	return d.GetGeneralStatusContext(context.Background())
 }
 
 // DiagnoseResult contains the result of a diagnose test
@@ -67,8 +53,3 @@ const (
 	DiagnoseAttentionTest   = 0x06
 	DiagnoseSelfAntennaTest = 0x07
 )
-
-// Diagnose performs a self-diagnosis test
-func (d *Device) Diagnose(testNumber byte, data []byte) (*DiagnoseResult, error) {
-	return d.DiagnoseContext(context.Background(), testNumber, data)
-}

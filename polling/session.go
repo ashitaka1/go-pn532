@@ -408,7 +408,7 @@ func (s *Session) waitForResume(ctx context.Context) error {
 func (s *Session) performSinglePoll(ctx context.Context) (*pn532.DetectedTag, error) {
 	// Use standard InListPassiveTarget with PN532 hardware handling retries
 	// The hardware retry count was configured via SetPollingRetries() during session start
-	tags, err := s.device.InListPassiveTargetContext(ctx, 1, 0x00)
+	tags, err := s.device.InListPassiveTarget(ctx, 1, 0x00)
 	if err != nil {
 		return nil, fmt.Errorf("tag detection failed: %w", err)
 	}

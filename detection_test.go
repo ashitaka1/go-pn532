@@ -90,7 +90,7 @@ func TestDevice_DetectTag(t *testing.T) {
 			require.NoError(t, err)
 
 			// Test tag detection
-			tag, err := device.DetectTag()
+			tag, err := device.DetectTag(ctx)
 
 			switch {
 			case tt.expectError:
@@ -296,12 +296,12 @@ func TestDevice_DetectTags_WithFilters(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test detection with basic parameters (maxTags=1, baudRate=0)
-	tags, err := device.DetectTags(1, 0)
+	tags, err := device.DetectTags(ctx, 1, 0)
 	require.NoError(t, err)
 	assert.Len(t, tags, 1)
 
 	// Test detection with multiple targets
-	tags, err = device.DetectTags(2, 0)
+	tags, err = device.DetectTags(ctx, 2, 0)
 	require.NoError(t, err)
 	// Should still return just 1 tag since mock only provides 1
 	assert.LessOrEqual(t, len(tags), 1)
@@ -389,7 +389,7 @@ func TestFilterDetectedTags(t *testing.T) {
 }
 
 // Helper function for testing In commands (InRelease/InSelect)
-func testInCommand(t *testing.T, testName string, cmd byte, deviceFunc func(*Device, byte) error) {
+func testInCommand(t *testing.T, testName string, cmd byte, deviceFunc func(*Device, context.Context, byte) error) {
 	t.Helper()
 
 	tests := []struct {
@@ -430,7 +430,7 @@ func testInCommand(t *testing.T, testName string, cmd byte, deviceFunc func(*Dev
 			require.NoError(t, err)
 
 			// Test the command
-			err = deviceFunc(device, tt.targetID)
+			err = deviceFunc(device, context.Background(), tt.targetID)
 
 			if tt.expectError {
 				require.Error(t, err)

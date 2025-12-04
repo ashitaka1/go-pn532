@@ -24,7 +24,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	testutil "github.com/ZaparooProject/go-pn532/internal/testing"
 	"github.com/stretchr/testify/assert"
@@ -534,7 +533,7 @@ func TestDevice_SendDataExchange(t *testing.T) {
 			device, mock := setupDeviceWithMock(t, tt.setupMock)
 
 			// Test data exchange
-			result, err := device.SendDataExchange(tt.inputData)
+			result, err := device.SendDataExchange(context.Background(), tt.inputData)
 
 			if tt.expectError {
 				checkTestError(t, err, tt.errorSubstring, result)
@@ -559,7 +558,7 @@ func TestDevice_SendRawCommand(t *testing.T) {
 			device, mock := setupDeviceWithMock(t, tt.setupMock)
 
 			// Test raw command
-			result, err := device.SendRawCommand(tt.inputData)
+			result, err := device.SendRawCommand(context.Background(), tt.inputData)
 
 			if tt.expectError {
 				checkTestError(t, err, tt.errorSubstring, result)
@@ -584,194 +583,12 @@ func TestDevice_PowerDown(t *testing.T) {
 			device, mock := setupDeviceWithMock(t, tt.setupMock)
 
 			// Test power down
-			err := device.PowerDown(tt.wakeupEnable, tt.irqEnable)
+			err := device.PowerDown(context.Background(), tt.wakeupEnable, tt.irqEnable)
 
 			if tt.expectError {
 				checkPowerDownError(t, err, tt.errorSubstring)
 			} else {
 				checkPowerDownSuccess(t, err, mock, cmdPowerDown)
-			}
-		})
-	}
-}
-
-func TestDevice_SendDataExchangeContext(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		setupMock      func(*MockTransport)
-		name           string
-		errorSubstring string
-		inputData      []byte
-		expectedData   []byte
-		contextTimeout time.Duration
-		expectError    bool
-	}{
-		{
-			name: "Successful_With_Context",
-			setupMock: func(mock *MockTransport) {
-				// Response format: 0x41 (InDataExchange response), 0x00 (success status), data
-				mock.SetResponse(testutil.CmdInDataExchange, []byte{0x41, 0x00, 0xFF, 0xEE})
-			},
-			contextTimeout: time.Second,
-			inputData:      []byte{0x30, 0x04}, // READ block 1
-			expectedData:   []byte{0xFF, 0xEE},
-			expectError:    false,
-		},
-		{
-			name: "Context_With_Nil_Data",
-			setupMock: func(mock *MockTransport) {
-				// Response format: 0x41 (InDataExchange response), 0x00 (success status), no data
-				mock.SetResponse(testutil.CmdInDataExchange, []byte{0x41, 0x00})
-			},
-			contextTimeout: time.Second,
-			inputData:      nil,
-			expectedData:   []byte{},
-			expectError:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			device, _ := setupDeviceWithMock(t, tt.setupMock)
-
-			// Test with context
-			ctx, cancel := context.WithTimeout(context.Background(), tt.contextTimeout)
-			defer cancel()
-
-			result, err := device.SendDataExchangeContext(ctx, tt.inputData)
-
-			if tt.expectError {
-				checkTestError(t, err, tt.errorSubstring, result)
-			} else {
-				checkTestSuccess(t, err, result, tt.expectedData)
-			}
-		})
-	}
-}
-
-func TestDevice_SendRawCommandContext(t *testing.T) {
-	t.Parallel()
-
-	// Define the command constant for InCommunicateThru (0x42)
-	const cmdInCommunicateThru = 0x42
-
-	tests := []struct {
-		setupMock      func(*MockTransport)
-		name           string
-		errorSubstring string
-		inputData      []byte
-		expectedData   []byte
-		contextTimeout time.Duration
-		expectError    bool
-	}{
-		{
-			name: "Successful_With_Context",
-			setupMock: func(mock *MockTransport) {
-				mock.SetResponse(cmdInCommunicateThru, []byte{0x43, 0x00, 0x01, 0x02, 0x03, 0x04})
-			},
-			contextTimeout: time.Second,
-			inputData:      []byte{0x60}, // GET_VERSION
-			expectedData:   []byte{0x01, 0x02, 0x03, 0x04},
-			expectError:    false,
-		},
-		{
-			name: "Context_With_Nil_Data",
-			setupMock: func(mock *MockTransport) {
-				mock.SetResponse(cmdInCommunicateThru, []byte{0x43, 0x00})
-			},
-			contextTimeout: time.Second,
-			inputData:      nil,
-			expectedData:   []byte{},
-			expectError:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			device, _ := setupDeviceWithMock(t, tt.setupMock)
-
-			// Test with context
-			ctx, cancel := context.WithTimeout(context.Background(), tt.contextTimeout)
-			defer cancel()
-
-			result, err := device.SendRawCommandContext(ctx, tt.inputData)
-
-			if tt.expectError {
-				checkTestError(t, err, tt.errorSubstring, result)
-			} else {
-				checkTestSuccess(t, err, result, tt.expectedData)
-			}
-		})
-	}
-}
-
-func TestDevice_PowerDownContext(t *testing.T) {
-	t.Parallel()
-
-	// Define the command constant for PowerDown (0x16)
-	const cmdPowerDown = 0x16
-
-	tests := []struct {
-		setupMock      func(*MockTransport)
-		name           string
-		errorSubstring string
-		contextTimeout time.Duration
-		wakeupEnable   byte
-		irqEnable      byte
-		expectError    bool
-	}{
-		{
-			name: "Successful_With_Context",
-			setupMock: func(mock *MockTransport) {
-				mock.SetResponse(cmdPowerDown, []byte{0x17})
-			},
-			contextTimeout: time.Second,
-			wakeupEnable:   0x21, // HSU + RF wake-up
-			irqEnable:      0x01,
-			expectError:    false,
-		},
-		{
-			name: "Context_With_All_Wakeup_Sources",
-			setupMock: func(mock *MockTransport) {
-				mock.SetResponse(cmdPowerDown, []byte{0x17})
-			},
-			contextTimeout: time.Second,
-			wakeupEnable:   0xFF, // All wake-up sources
-			irqEnable:      0x01,
-			expectError:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			// Setup mock transport
-			mock := NewMockTransport()
-			tt.setupMock(mock)
-
-			// Create device
-			device, err := New(mock)
-			require.NoError(t, err)
-
-			// Test with context
-			ctx, cancel := context.WithTimeout(context.Background(), tt.contextTimeout)
-			defer cancel()
-
-			err = device.PowerDownContext(ctx, tt.wakeupEnable, tt.irqEnable)
-
-			if tt.expectError {
-				require.Error(t, err)
-				if tt.errorSubstring != "" {
-					assert.Contains(t, err.Error(), tt.errorSubstring)
-				}
-			} else {
-				assert.NoError(t, err)
 			}
 		})
 	}

@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGetFirmwareVersionContextCancellation(t *testing.T) {
+func TestGetFirmwareVersionCancellation(t *testing.T) {
 	t.Parallel()
 
 	mock := NewMockTransport()
@@ -44,7 +44,7 @@ func TestGetFirmwareVersionContextCancellation(t *testing.T) {
 	defer cancel()
 
 	// This should fail due to context cancellation before the mock delay completes
-	_, err = device.GetFirmwareVersionContext(ctx)
+	_, err = device.GetFirmwareVersion(ctx)
 
 	// Verify that context cancellation is propagated
 	require.Error(t, err)
@@ -52,7 +52,7 @@ func TestGetFirmwareVersionContextCancellation(t *testing.T) {
 		"Expected context.DeadlineExceeded, got: %v", err)
 }
 
-func TestGetGeneralStatusContextCancellation(t *testing.T) {
+func TestGetGeneralStatusCancellation(t *testing.T) {
 	t.Parallel()
 
 	mock := NewMockTransport()
@@ -64,14 +64,14 @@ func TestGetGeneralStatusContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	_, err = device.GetGeneralStatusContext(ctx)
+	_, err = device.GetGeneralStatus(ctx)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded,
 		"Expected context.DeadlineExceeded, got: %v", err)
 }
 
-func TestDiagnoseContextCancellation(t *testing.T) {
+func TestDiagnoseCancellation(t *testing.T) {
 	t.Parallel()
 
 	mock := NewMockTransport()
@@ -83,7 +83,7 @@ func TestDiagnoseContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	_, err = device.DiagnoseContext(ctx, 0x00, []byte{0x01, 0x02})
+	_, err = device.Diagnose(ctx, 0x00, []byte{0x01, 0x02})
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded,
