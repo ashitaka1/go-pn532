@@ -242,32 +242,6 @@ func finalizeCredentialData(buf *bytes.Buffer, credLenPos, credStart int) ([]byt
 	return data, nil
 }
 
-// ParseWiFiRecord parses a WiFi credential from an NDEF record
-func ParseWiFiRecord(rec *ndef.Record) (*WiFiCredential, error) {
-	// SECURITY: Validate record before processing
-	if rec == nil {
-		return nil, fmt.Errorf("%w: nil WiFi record", ErrSecurityViolation)
-	}
-
-	if rec.TNF() != ndef.MediaType || rec.Type() != mediaTypeWiFi {
-		return nil, errors.New("not a WiFi credential record")
-	}
-
-	payload, err := rec.Payload()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get WiFi record payload: %w", err)
-	}
-
-	// SECURITY: Validate payload size before processing
-	payloadData := payload.Marshal()
-	if len(payloadData) > MaxNDEFPayloadSize {
-		return nil, fmt.Errorf("%w: WiFi payload size %d exceeds maximum %d",
-			ErrSecurityViolation, len(payloadData), MaxNDEFPayloadSize)
-	}
-
-	return parseWiFiCredential(payloadData)
-}
-
 // parseWiFiCredential parses WSC format WiFi credentials
 func parseWiFiCredential(data []byte) (*WiFiCredential, error) {
 	cred := &WiFiCredential{}
@@ -459,33 +433,6 @@ func formatVCard(contact *VCardContact) string {
 	_, _ = buf.WriteString("END:VCARD\r\n")
 
 	return buf.String()
-}
-
-// ParseVCardRecord parses a vCard from an NDEF record
-func ParseVCardRecord(rec *ndef.Record) (*VCardContact, error) {
-	// SECURITY: Validate record before processing
-	if rec == nil {
-		return nil, fmt.Errorf("%w: nil vCard record", ErrSecurityViolation)
-	}
-
-	if rec.TNF() != ndef.MediaType ||
-		(rec.Type() != mediaTypeVCard && rec.Type() != "text/x-vcard") {
-		return nil, errors.New("not a vCard record")
-	}
-
-	payload, err := rec.Payload()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get vCard record payload: %w", err)
-	}
-
-	// SECURITY: Validate payload size before processing
-	payloadData := payload.Marshal()
-	if len(payloadData) > MaxNDEFPayloadSize {
-		return nil, fmt.Errorf("%w: vCard payload size %d exceeds maximum %d",
-			ErrSecurityViolation, len(payloadData), MaxNDEFPayloadSize)
-	}
-
-	return parseVCard(string(payloadData))
 }
 
 // parseVCard parses vCard format contact information

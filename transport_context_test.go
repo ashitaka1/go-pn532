@@ -39,10 +39,6 @@ func TestTransportContextInterface(t *testing.T) {
 			name:      "MockTransport",
 			transport: NewMockTransport(),
 		},
-		{
-			name:      "TransportWithRetry",
-			transport: NewTransportWithRetry(NewMockTransport(), nil),
-		},
 	}
 
 	for _, tt := range tests {
@@ -75,16 +71,6 @@ func TestAllTransportTypesImplementContext(t *testing.T) {
 			name: "MockTransport implements context interface",
 			checkFunc: func() bool {
 				var transport Transport = NewMockTransport()
-				_, ok := transport.(interface {
-					SendCommandWithContext(context.Context, byte, []byte) ([]byte, error)
-				})
-				return ok
-			},
-		},
-		{
-			name: "TransportWithRetry implements context interface",
-			checkFunc: func() bool {
-				var transport Transport = NewTransportWithRetry(NewMockTransport(), nil)
 				_, ok := transport.(interface {
 					SendCommandWithContext(context.Context, byte, []byte) ([]byte, error)
 				})
@@ -155,46 +141,6 @@ func TestMockTransportContextTimeout(t *testing.T) {
 	// Should timeout quickly, not wait for the full delay
 	if elapsed > 100*time.Millisecond {
 		t.Errorf("Operation took too long: %v, expected < 100ms", elapsed)
-	}
-}
-
-// TestTransportWithRetryContextCancellation tests that TransportWithRetry properly handles context cancellation
-func TestTransportWithRetryContextCancellation(t *testing.T) {
-	t.Parallel()
-	mock := NewMockTransport()
-	retry := NewTransportWithRetry(mock, nil) // Use default retry config
-
-	// Create a context that cancels immediately
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
-
-	cmd := byte(0x02)
-	args := []byte{}
-
-	_, err := retry.SendCommandWithContext(ctx, cmd, args)
-	if err == nil {
-		t.Error("Expected context cancellation error, got nil")
-	}
-
-	// The error might be wrapped by retry logic, so check if it contains context.Canceled
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("Expected context.Canceled error (possibly wrapped), got: %v", err)
-	}
-}
-
-// TestTransportWithRetryBackwardsCompatibility tests that TransportWithRetry still works with non-context methods
-func TestTransportWithRetryBackwardsCompatibility(t *testing.T) {
-	t.Parallel()
-	mock := NewMockTransport()
-	retry := NewTransportWithRetry(mock, nil) // Use default retry config
-
-	cmd := byte(0x02)
-	args := []byte{}
-
-	// This should work exactly as before
-	_, err := retry.SendCommand(cmd, args)
-	if err != nil {
-		t.Logf("Expected error for unimplemented command: %v", err)
 	}
 }
 
@@ -419,56 +365,4 @@ func TestContextTimeoutVsTransportTimeoutInteraction(t *testing.T) {
 			validateTimeoutInteraction(t, err, elapsed, tt)
 		})
 	}
-}
-
-// TestRetryBehaviorWithContextCancellation tests that retry logic properly
-// handles context cancellation at different stages of the retry process
-func TestRetryBehaviorWithContextCancellation(t *testing.T) {
-	t.Parallel()
-	// Test immediate context cancellation - this should work reliably
-	t.Run("Immediate context cancellation with retry", func(t *testing.T) {
-		t.Parallel()
-		mock := NewMockTransport()
-
-		// Configure persistent failure to trigger retries
-		testErr := NewTransportError("test", "mock", errors.New("simulated failure"), ErrorTypeTransient)
-		mock.SetError(0x02, testErr)
-
-		// Create retry transport with backoff
-		retryConfig := &RetryConfig{
-			MaxAttempts:       5,
-			InitialBackoff:    100 * time.Millisecond,
-			MaxBackoff:        200 * time.Millisecond,
-			BackoffMultiplier: 1.5,
-			Jitter:            0,
-		}
-		retry := NewTransportWithRetry(mock, retryConfig)
-
-		// Create context that is immediately cancelled
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // Cancel immediately
-
-		cmd := byte(0x02)
-		args := []byte{}
-
-		start := time.Now()
-		_, err := retry.SendCommandWithContext(ctx, cmd, args)
-		elapsed := time.Since(start)
-
-		// Verify error occurred
-		if err == nil {
-			t.Error("Expected context error, got nil")
-			return
-		}
-
-		// Check error type (might be wrapped by retry logic)
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("Expected context.Canceled (possibly wrapped), got: %v", err)
-		}
-
-		// Immediate cancellation should be very quick
-		if elapsed > 10*time.Millisecond {
-			t.Errorf("Immediate cancellation took too long: %v", elapsed)
-		}
-	})
 }

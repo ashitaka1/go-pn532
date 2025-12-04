@@ -162,43 +162,6 @@ func IsRetryable(err error) bool {
 	}
 }
 
-// GetErrorType categorizes an error
-func GetErrorType(err error) ErrorType {
-	if err == nil {
-		return ErrorTypePermanent
-	}
-
-	var te *TransportError
-	if errors.As(err, &te) {
-		return te.Type
-	}
-
-	// Categorize known errors
-	switch {
-	case errors.Is(err, ErrTransportTimeout):
-		return ErrorTypeTimeout
-	case IsRetryable(err):
-		return ErrorTypeTransient
-	default:
-		return ErrorTypePermanent
-	}
-}
-
-// IsRecoverable checks if an error indicates the device might be in a stuck state
-// that could potentially be recovered with a soft reset sequence
-func IsRecoverable(err error) bool {
-	// Only attempt recovery for severe transport/communication errors
-	// that suggest the device might be unresponsive
-	switch {
-	case errors.Is(err, ErrTransportTimeout),
-		errors.Is(err, ErrNoACK),
-		errors.Is(err, ErrFrameCorrupted):
-		return true
-	default:
-		return false
-	}
-}
-
 // IsCommandNotSupported checks if an error indicates a command is not supported
 func IsCommandNotSupported(err error) bool {
 	var pe *PN532Error
