@@ -175,6 +175,11 @@ type VirtualPN532 struct {
 	dropNextACK         bool
 	zombieMode          bool
 	firmwareVer         byte
+	// Power glitch simulation - truncates response after N bytes (0 = disabled)
+	powerGlitchAfterBytes int
+	// Collision mode - when enabled, InListPassiveTarget returns collision error
+	// if multiple tags are present
+	collisionMode bool
 }
 
 // NewVirtualPN532 creates a new wire-level PN532 simulator.
@@ -304,6 +309,33 @@ func (v *VirtualPN532) SetZombieMode(enabled bool) {
 	v.zombieMode = enabled
 }
 
+// SetPowerGlitch configures the simulator to simulate a power glitch by
+// truncating the next response frame after the specified number of bytes.
+// This tests recovery code when power is interrupted mid-communication.
+// Set to 0 to disable power glitch simulation.
+//
+// Example: SetPowerGlitch(3) would truncate a response like:
+//
+//	[00 00 FF 04 FC D5 03 ...] -> [00 00 FF]
+//
+// leaving an incomplete frame that the transport must handle.
+func (v *VirtualPN532) SetPowerGlitch(afterBytes int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.powerGlitchAfterBytes = afterBytes
+}
+
+// SetCollisionMode enables or disables collision simulation mode.
+// When enabled and multiple tags are present, InListPassiveTarget will
+// return a collision error (0x06) instead of detecting tags.
+// This simulates the real PN532 behavior when multiple tags are in the RF field
+// and the anti-collision algorithm fails.
+func (v *VirtualPN532) SetCollisionMode(enabled bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.collisionMode = enabled
+}
+
 // GetState returns the current simulator state.
 func (v *VirtualPN532) GetState() SimulatorState {
 	v.mu.Lock()
@@ -338,6 +370,8 @@ func (v *VirtualPN532) Reset() {
 	v.dropNextACK = false
 	v.preACKGarbage = nil
 	v.zombieMode = false
+	v.powerGlitchAfterBytes = 0
+	v.collisionMode = false
 }
 
 // processReceivedData parses frames from the receive buffer and generates responses.
@@ -603,6 +637,12 @@ func (v *VirtualPN532) sendResponse(cmd byte, data []byte) error {
 		}
 	}
 
+	// Apply power glitch simulation - truncate frame mid-transmission
+	if v.powerGlitchAfterBytes > 0 && v.powerGlitchAfterBytes < len(frame) {
+		frame = frame[:v.powerGlitchAfterBytes]
+		v.powerGlitchAfterBytes = 0 // One-shot behavior
+	}
+
 	v.lastResponse = frame
 	v.txBuffer.Write(frame)
 
@@ -719,6 +759,8 @@ func (v *VirtualPN532) handleSAMConfiguration(params []byte) ([]byte, error) {
 // handleInListPassiveTarget detects passive targets (§7.3.5)
 // Input: MaxTg + BrTy + [InitiatorData]
 // Response: NbTg + [TargetData1] + [TargetData2]
+//
+//nolint:gocognit,revive // Protocol handling requires multiple condition checks
 func (v *VirtualPN532) handleInListPassiveTarget(params []byte) ([]byte, error) {
 	if len(params) < 2 {
 		return nil, v.sendErrorFrame()
@@ -739,6 +781,23 @@ func (v *VirtualPN532) handleInListPassiveTarget(params []byte) ([]byte, error) 
 
 	// Turn on RF field (implied by this command)
 	v.state.RFFieldOn = true
+
+	// Count present tags
+	presentTagCount := 0
+	for _, tag := range v.tags {
+		if tag.Present {
+			presentTagCount++
+		}
+	}
+
+	// Collision mode: if multiple tags are present, return collision error
+	// This simulates real PN532 behavior when anti-collision fails
+	if v.collisionMode && presentTagCount > 1 {
+		// Return response with collision error status (0x06)
+		// Per §7.1 Table 13: errCollision = 0x06 (Abnormal Bit Collision)
+		// When collision occurs during anti-collision, NbTg=0 with error
+		return []byte{0x00}, nil // No tags detected due to collision
+	}
 
 	// Find matching tags
 	var targetData []byte

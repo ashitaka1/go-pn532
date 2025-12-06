@@ -18,7 +18,7 @@
 // along with go-pn532; if not, write to the Free Software Foundation,
 // Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
-//nolint:dupl,varnamelen,gocritic // Test file - duplicate structures and short vars acceptable
+//nolint:dupl,varnamelen,gocritic,funlen // Test file - duplicate structures, short vars, and long funcs acceptable
 package testing
 
 import (
@@ -1947,5 +1947,419 @@ func TestVirtualPN532_UnknownCommand(t *testing.T) {
 		cmd, data := parseResponseFrame(t, buf[:n])
 		assert.Equal(t, byte(0x41), cmd)
 		assert.Equal(t, byte(0x00), data[0]) // Unknown commands pass through with success
+	})
+}
+
+// Tests for Power Glitch Simulation (Item 10)
+func TestVirtualPN532_PowerGlitch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Power_Glitch_Truncates_Response", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Configure power glitch to occur after 3 bytes (middle of preamble/start)
+		sim.SetPowerGlitch(3)
+
+		// Send GetFirmwareVersion command
+		frame := buildCommandFrame(cmdGetFirmwareVersion, nil)
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		// Should get ACK (6 bytes) + truncated response (3 bytes) = 9 bytes total
+		assert.Equal(t, 9, n, "Expected ACK frame (6 bytes) + truncated response (3 bytes)")
+
+		// Verify we got the ACK frame intact
+		assert.True(t, bytes.HasPrefix(buf[:n], ACKFrame), "ACK frame should be complete")
+
+		// The remaining 3 bytes should be truncated response (just preamble + start codes)
+		truncatedPart := buf[6:9]
+		expectedTruncated := []byte{0x00, 0x00, 0xFF} // Preamble + start codes
+		assert.Equal(t, expectedTruncated, truncatedPart, "Response should be truncated after 3 bytes")
+	})
+
+	t.Run("Power_Glitch_Is_One_Shot", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Configure power glitch
+		sim.SetPowerGlitch(5)
+
+		// First command - should be truncated
+		frame := buildCommandFrame(cmdGetFirmwareVersion, nil)
+		_, _ = sim.Write(frame)
+		buf := make([]byte, 256)
+		n1, _ := sim.Read(buf)
+
+		// Second command - should be complete (glitch was one-shot)
+		_, _ = sim.Write(frame)
+		n2, _ := sim.Read(buf)
+
+		// First response should be shorter (truncated)
+		// Second response should be longer (complete: ACK + full response frame)
+		assert.Greater(t, n2, n1, "Second response should be longer (not truncated)")
+
+		// Verify second response has valid firmware version
+		// ACK (6 bytes) + response frame (13 bytes: preamble+start1+start2+len+lcs+tfi+cmd+4data+dcs+postamble)
+		// Frame: 1+1+1+1+1+6(data)+1+1 = 13 bytes (where data = TFI+CMD+IC+Ver+Rev+Support)
+		expectedCompleteLen := 6 + 13
+		assert.Equal(t, expectedCompleteLen, n2, "Second response should be complete")
+	})
+
+	t.Run("Power_Glitch_Zero_Disables", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Set and then disable power glitch
+		sim.SetPowerGlitch(3)
+		sim.SetPowerGlitch(0)
+
+		// Command should complete normally
+		frame := buildCommandFrame(cmdGetFirmwareVersion, nil)
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		// Should get complete response (ACK + response frame)
+		// ACK (6 bytes) + response frame (13 bytes)
+		expectedCompleteLen := 6 + 13
+		assert.Equal(t, expectedCompleteLen, n, "Response should be complete when glitch disabled")
+	})
+
+	t.Run("Power_Glitch_At_Various_Points", func(t *testing.T) {
+		t.Parallel()
+
+		testCases := []struct {
+			name          string
+			glitchAfter   int
+			expectedTotal int // ACK (6) + truncated bytes
+		}{
+			{"Glitch_After_1_Byte", 1, 7},
+			{"Glitch_After_5_Bytes", 5, 11},
+			{"Glitch_After_8_Bytes", 8, 14},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				sim := NewVirtualPN532()
+				sim.SetPowerGlitch(tc.glitchAfter)
+
+				frame := buildCommandFrame(cmdGetFirmwareVersion, nil)
+				_, _ = sim.Write(frame)
+
+				buf := make([]byte, 256)
+				n, _ := sim.Read(buf)
+
+				assert.Equal(t, tc.expectedTotal, n, "Response should be truncated at expected point")
+			})
+		}
+	})
+
+	t.Run("Power_Glitch_Reset_Clears", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		sim.SetPowerGlitch(3)
+		sim.Reset()
+
+		// After reset, power glitch should be disabled
+		frame := buildCommandFrame(cmdGetFirmwareVersion, nil)
+		_, _ = sim.Write(frame)
+
+		buf := make([]byte, 256)
+		n, _ := sim.Read(buf)
+
+		// Should get complete response
+		// ACK (6 bytes) + response frame (13 bytes)
+		expectedCompleteLen := 6 + 13
+		assert.Equal(t, expectedCompleteLen, n, "Response should be complete after reset")
+	})
+}
+
+// Tests for Multi-Tag Collision Mode (Item 11)
+func TestVirtualPN532_CollisionMode(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Collision_Mode_With_Multiple_Tags", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Add two tags
+		tag1 := NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+		tag2 := NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+		sim.AddTag(tag1)
+		sim.AddTag(tag2)
+
+		// Enable collision mode
+		sim.SetCollisionMode(true)
+
+		// Attempt to detect tags
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x01, 0x00})
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x4B), cmd, "Should be InListPassiveTarget response")
+		assert.Equal(t, byte(0x00), data[0], "NbTg should be 0 due to collision")
+	})
+
+	t.Run("Collision_Mode_With_Single_Tag", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Add single tag
+		tag := NewVirtualNTAG213(nil)
+		sim.AddTag(tag)
+
+		// Enable collision mode (should not affect single tag)
+		sim.SetCollisionMode(true)
+
+		// Detect tag - should succeed with single tag
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x01, 0x00})
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x4B), cmd, "Should be InListPassiveTarget response")
+		assert.Equal(t, byte(0x01), data[0], "NbTg should be 1 - single tag detected")
+	})
+
+	t.Run("Collision_Mode_Disabled_Detects_Multiple", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Add two tags
+		tag1 := NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+		tag2 := NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+		sim.AddTag(tag1)
+		sim.AddTag(tag2)
+
+		// Keep collision mode disabled (default)
+
+		// Request MaxTg=2 to detect both tags
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x02, 0x00})
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x4B), cmd, "Should be InListPassiveTarget response")
+		assert.Equal(t, byte(0x02), data[0], "NbTg should be 2 - both tags detected")
+	})
+
+	t.Run("Collision_Mode_Reset_Clears", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		sim.SetCollisionMode(true)
+		sim.Reset()
+
+		// Add two tags after reset
+		tag1 := NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+		tag2 := NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+		sim.AddTag(tag1)
+		sim.AddTag(tag2)
+
+		// After reset, collision mode should be disabled
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x02, 0x00})
+		_, _ = sim.Write(frame)
+
+		buf := make([]byte, 256)
+		n, _ := sim.Read(buf)
+
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x4B), cmd)
+		assert.Equal(t, byte(0x02), data[0], "Should detect 2 tags after reset (collision mode cleared)")
+	})
+}
+
+// Tests for Multi-Tag Detection (Item 11)
+func TestVirtualPN532_MultiTagDetection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("MaxTg_2_Detects_Two_Tags", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Add two NTAG213 tags with different UIDs
+		tag1 := NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+		tag2 := NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+		sim.AddTag(tag1)
+		sim.AddTag(tag2)
+
+		// Request MaxTg=2
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x02, 0x00})
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x4B), cmd, "Should be InListPassiveTarget response")
+		assert.Equal(t, byte(0x02), data[0], "NbTg should be 2")
+
+		// Parse first target data: Tg(1) + SENS_RES(2) + SEL_RES(1) + NFCIDLen(1) + UID(7)
+		offset := 1 // Skip NbTg
+		assert.Equal(t, byte(0x01), data[offset], "First tag number should be 1")
+
+		// Skip to second tag (after first tag's data)
+		// First tag: Tg(1) + SENS_RES(2) + SEL_RES(1) + NFCIDLen(1) + UID(7) = 12 bytes
+		offset += 12
+		assert.Equal(t, byte(0x02), data[offset], "Second tag number should be 2")
+	})
+
+	t.Run("MaxTg_1_Detects_First_Tag_Only", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Add two tags
+		tag1 := NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+		tag2 := NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+		sim.AddTag(tag1)
+		sim.AddTag(tag2)
+
+		// Request MaxTg=1
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x01, 0x00})
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x4B), cmd)
+		assert.Equal(t, byte(0x01), data[0], "NbTg should be 1 even though 2 tags present")
+	})
+
+	t.Run("Mixed_Tag_Types_Detection", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Add one NTAG and one MIFARE
+		ntag := NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+		mifare := NewVirtualMIFARE1K([]byte{0x12, 0x34, 0x56, 0x78})
+		sim.AddTag(ntag)
+		sim.AddTag(mifare)
+
+		// Request MaxTg=2
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x02, 0x00})
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x4B), cmd)
+		assert.Equal(t, byte(0x02), data[0], "NbTg should be 2 with mixed tag types")
+	})
+
+	t.Run("Non_Present_Tags_Not_Detected", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Add two tags, but remove one
+		tag1 := NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+		tag2 := NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+		sim.AddTag(tag1)
+		sim.AddTag(tag2)
+
+		// Remove the second tag
+		tag2.Remove()
+
+		// Request MaxTg=2
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x02, 0x00})
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x4B), cmd)
+		assert.Equal(t, byte(0x01), data[0], "NbTg should be 1 - only present tags counted")
+	})
+
+	t.Run("Three_Tags_MaxTg_2_Returns_Only_Two", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Add three tags
+		tag1 := NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+		tag2 := NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+		tag3 := NewVirtualNTAG213([]byte{0x04, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44})
+		sim.AddTag(tag1)
+		sim.AddTag(tag2)
+		sim.AddTag(tag3)
+
+		// Request MaxTg=2 (PN532 max)
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x02, 0x00})
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		buf := make([]byte, 256)
+		n, err := sim.Read(buf)
+		require.NoError(t, err)
+
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x4B), cmd)
+		assert.Equal(t, byte(0x02), data[0], "NbTg should be 2 even with 3 tags present")
+	})
+
+	t.Run("InSelect_Switches_Between_Tags", func(t *testing.T) {
+		t.Parallel()
+		sim := NewVirtualPN532()
+
+		// Add two tags
+		tag1 := NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+		tag2 := NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+		sim.AddTag(tag1)
+		sim.AddTag(tag2)
+
+		// Detect both tags
+		frame := buildCommandFrame(cmdInListPassiveTarget, []byte{0x02, 0x00})
+		_, _ = sim.Write(frame)
+		buf := make([]byte, 256)
+		_, _ = sim.Read(buf)
+
+		// Initially tag 1 is selected
+		assert.Equal(t, 1, sim.GetState().SelectedTarget)
+
+		// Select tag 2
+		frame = buildCommandFrame(cmdInSelect, []byte{0x02})
+		_, err := sim.Write(frame)
+		require.NoError(t, err)
+
+		n, _ := sim.Read(buf)
+		cmd, data := parseResponseFrame(t, buf[:n])
+		assert.Equal(t, byte(0x55), cmd, "Should be InSelect response")
+		assert.Equal(t, byte(0x00), data[0], "Status should be success")
+
+		// Verify tag 2 is now selected
+		assert.Equal(t, 2, sim.GetState().SelectedTarget)
 	})
 }

@@ -22,6 +22,7 @@
 package uart
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -1411,4 +1412,388 @@ func TestUART_RapidPolling_AggressiveJitter(t *testing.T) {
 
 	// Even with aggressive jitter, should have reasonable success
 	assert.GreaterOrEqual(t, successCount, numPolls*6/10, "At least 60% success with aggressive jitter")
+}
+
+// =============================================================================
+// Power Glitch Tests
+// =============================================================================
+// These tests verify transport recovery when power is interrupted mid-frame.
+// The simulator truncates responses to simulate power glitches.
+
+// TestUART_PowerGlitch_Basic tests that transport handles truncated frames gracefully
+func TestUART_PowerGlitch_Basic(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	// Truncate response after 5 bytes (mid-frame)
+	sim.SetPowerGlitch(5)
+
+	// Command should fail (truncated response can't be parsed)
+	_, err := transport.SendCommand(0x02, nil) // GetFirmwareVersion
+	require.Error(t, err, "Truncated frame should cause error")
+
+	// Error should be a transport error
+	var transportErr *pn532.TransportError
+	assert.ErrorAs(t, err, &transportErr, "Error should be TransportError")
+}
+
+// TestUART_PowerGlitch_Recovery tests that transport recovers after power glitch
+func TestUART_PowerGlitch_Recovery(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	// First: Cause a power glitch
+	sim.SetPowerGlitch(3)
+	_, err := transport.SendCommand(0x02, nil)
+	require.Error(t, err, "First command should fail due to glitch")
+
+	// Power glitch is one-shot, so next command should work
+	// Reset the simulator state to clear any stuck buffers
+	sim.Reset()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Reconnect transport (simulating hardware reset)
+	transport = newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	// Now command should succeed
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed after recovery")
+	require.NotNil(t, resp)
+	assert.Len(t, resp, 5, "GetFirmwareVersion should return 5 bytes")
+}
+
+// TestUART_PowerGlitch_AtVariousPoints tests glitches at different frame positions
+func TestUART_PowerGlitch_AtVariousPoints(t *testing.T) {
+	// Test glitch at various points in the response frame
+	glitchPoints := []struct {
+		name   string
+		offset int
+	}{
+		{"Glitch_At_Preamble", 1},
+		{"Glitch_At_StartCode", 3},
+		{"Glitch_At_Length", 4},
+		{"Glitch_At_Data", 7},
+	}
+
+	for _, tc := range glitchPoints {
+		t.Run(tc.name, func(t *testing.T) {
+			sim := virt.NewVirtualPN532()
+			sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+			transport := newTestTransport(sim)
+			_ = transport.SetTimeout(100 * time.Millisecond)
+
+			sim.SetPowerGlitch(tc.offset)
+
+			// Command should fail gracefully (no panic)
+			_, err := transport.SendCommand(0x02, nil)
+			require.Error(t, err, "Truncated frame at offset %d should cause error", tc.offset)
+		})
+	}
+}
+
+// TestUART_PowerGlitch_NoPanic tests that power glitch doesn't cause panic
+func TestUART_PowerGlitch_NoPanic(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(50 * time.Millisecond)
+
+	// Test multiple glitches don't cause issues
+	for i := 1; i <= 10; i++ {
+		sim.Reset()
+		sim.AddTag(tag)
+		sim.SetPowerGlitch(i)
+
+		// This should not panic
+		_, _ = transport.SendCommand(0x4A, []byte{0x01, 0x00}) // InListPassiveTarget
+	}
+
+	// If we get here without panic, test passes
+	t.Log("Completed 10 power glitch iterations without panic")
+}
+
+// =============================================================================
+// Collision Mode Tests (Item 11)
+// =============================================================================
+// These tests verify handling of tag collisions when multiple tags are present.
+
+// TestUART_CollisionMode_DetectsNoTags tests that collision returns no tags
+func TestUART_CollisionMode_DetectsNoTags(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag1 := virt.NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+	tag2 := virt.NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+	sim.AddTag(tag1)
+	sim.AddTag(tag2)
+	sim.SetCollisionMode(true)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	// InListPassiveTarget should return NbTg=0 due to collision
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err, "Collision should not cause transport error")
+	require.NotNil(t, resp)
+
+	// Response format: [0x4B, NbTg, ...]
+	assert.Equal(t, byte(0x4B), resp[0], "Response should be InListPassiveTarget response")
+	assert.Equal(t, byte(0x00), resp[1], "NbTg should be 0 due to collision")
+}
+
+// TestUART_CollisionMode_SingleTagStillWorks tests single tag detection works
+func TestUART_CollisionMode_SingleTagStillWorks(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+	sim.AddTag(tag)
+	sim.SetCollisionMode(true) // Should not affect single tag
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	// Single tag should still be detected
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	assert.Equal(t, byte(0x4B), resp[0])
+	assert.Equal(t, byte(0x01), resp[1], "NbTg should be 1 with single tag")
+}
+
+// =============================================================================
+// Multi-Tag Detection Tests
+// =============================================================================
+// These tests verify detecting and switching between multiple tags.
+
+// TestUART_MultiTag_DetectTwo tests detecting two tags at once
+func TestUART_MultiTag_DetectTwo(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag1 := virt.NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+	tag2 := virt.NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+	sim.AddTag(tag1)
+	sim.AddTag(tag2)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	// Request MaxTg=2
+	resp, err := transport.SendCommand(0x4A, []byte{0x02, 0x00})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	// Response format: [0x4B, NbTg, Tg1Data..., Tg2Data...]
+	assert.Equal(t, byte(0x4B), resp[0], "Response should be InListPassiveTarget response")
+	assert.Equal(t, byte(0x02), resp[1], "NbTg should be 2")
+
+	// First tag data starts at offset 2: Tg(1) + SENS_RES(2) + SEL_RES(1) + NFCIDLen(1) + UID(7)
+	assert.Equal(t, byte(0x01), resp[2], "First tag number should be 1")
+
+	// Second tag data starts at offset 2+12=14
+	assert.Equal(t, byte(0x02), resp[14], "Second tag number should be 2")
+}
+
+// TestUART_MultiTag_SwitchWithInSelect tests switching between tags with InSelect
+func TestUART_MultiTag_SwitchWithInSelect(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag1 := virt.NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+	tag2 := virt.NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+	sim.AddTag(tag1)
+	sim.AddTag(tag2)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	// First: Detect both tags
+	resp, err := transport.SendCommand(0x4A, []byte{0x02, 0x00})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x02), resp[1], "Should detect 2 tags")
+
+	// Tag 1 is selected by default after detection
+	assert.Equal(t, 1, sim.GetState().SelectedTarget)
+
+	// Switch to tag 2 using InSelect
+	resp, err = transport.SendCommand(0x54, []byte{0x02}) // InSelect target 2
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x55), resp[0], "Response should be InSelect response")
+	assert.Equal(t, byte(0x00), resp[1], "Status should be success")
+
+	// Verify tag 2 is now selected
+	assert.Equal(t, 2, sim.GetState().SelectedTarget)
+
+	// Read from tag 2 (should work) - note: tg=0x02 must match selected target
+	resp, err = transport.SendCommand(0x40, []byte{0x02, 0x30, 0x04}) // InDataExchange: read block 4
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x41), resp[0], "Response should be InDataExchange response")
+	assert.Equal(t, byte(0x00), resp[1], "Status should be success")
+
+	// Switch back to tag 1
+	resp, err = transport.SendCommand(0x54, []byte{0x01}) // InSelect target 1
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x00), resp[1], "InSelect to tag 1 should succeed")
+	assert.Equal(t, 1, sim.GetState().SelectedTarget)
+}
+
+// TestUART_MultiTag_MixedTypes tests detecting mixed tag types
+func TestUART_MultiTag_MixedTypes(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	ntag := virt.NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+	mifare := virt.NewVirtualMIFARE1K([]byte{0x12, 0x34, 0x56, 0x78})
+	sim.AddTag(ntag)
+	sim.AddTag(mifare)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	// Request MaxTg=2
+	resp, err := transport.SendCommand(0x4A, []byte{0x02, 0x00})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	assert.Equal(t, byte(0x02), resp[1], "Should detect 2 tags of different types")
+}
+
+// =============================================================================
+// Device-Level Integration Tests
+// =============================================================================
+// These tests exercise the full Device API using the wire simulator.
+
+// TestIntegration_DualTagWorkflow tests the complete dual-tag detection and switching workflow
+func TestIntegration_DualTagWorkflow(t *testing.T) {
+	// Setup simulator with two tags
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	tag1 := virt.NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+	tag2 := virt.NewVirtualMIFARE1K([]byte{0xAA, 0xBB, 0xCC, 0xDD})
+	sim.AddTag(tag1)
+	sim.AddTag(tag2)
+
+	// Create device using test transport
+	transport := newTestTransport(sim)
+	device, err := pn532.New(transport)
+	require.NoError(t, err)
+	defer func() { _ = device.Close() }()
+
+	ctx := context.Background()
+
+	// Step 1: Detect both tags
+	tags, err := device.DetectTags(ctx, 2, 0x00)
+	require.NoError(t, err)
+	require.Len(t, tags, 2, "Should detect 2 tags")
+
+	// Verify tag UIDs
+	assert.Equal(t, "04112233445566", tags[0].UID)
+	assert.Equal(t, "aabbccdd", tags[1].UID)
+
+	// Step 2: First tag should be selected by default
+	assert.Equal(t, byte(1), tags[0].TargetNumber)
+	assert.Equal(t, byte(2), tags[1].TargetNumber)
+
+	// Step 3: Switch to second tag using SelectTag
+	err = device.SelectTag(ctx, tags[1])
+	require.NoError(t, err)
+
+	// Verify simulator state
+	assert.Equal(t, 2, sim.GetState().SelectedTarget)
+
+	// Step 4: Switch back to first tag
+	err = device.SelectTag(ctx, tags[0])
+	require.NoError(t, err)
+	assert.Equal(t, 1, sim.GetState().SelectedTarget)
+}
+
+// TestIntegration_CollisionPreventsDetection tests that collision mode prevents tag detection
+func TestIntegration_CollisionPreventsDetection(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	tag1 := virt.NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+	tag2 := virt.NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+	sim.AddTag(tag1)
+	sim.AddTag(tag2)
+	sim.SetCollisionMode(true) // Enable collision simulation
+
+	transport := newTestTransport(sim)
+	device, err := pn532.New(transport)
+	require.NoError(t, err)
+	defer func() { _ = device.Close() }()
+
+	ctx := context.Background()
+
+	// With collision mode enabled, should detect no tags
+	tags, err := device.DetectTags(ctx, 2, 0x00)
+	require.NoError(t, err)
+	assert.Empty(t, tags, "Collision should prevent detection")
+
+	// Disable collision mode
+	sim.SetCollisionMode(false)
+
+	// Now should detect both tags
+	tags, err = device.DetectTags(ctx, 2, 0x00)
+	require.NoError(t, err)
+	assert.Len(t, tags, 2, "Should detect 2 tags after collision cleared")
+}
+
+// TestIntegration_TagRemovalDuringSwitch tests switching to a tag that was removed
+func TestIntegration_TagRemovalDuringSwitch(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	tag1 := virt.NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+	tag2 := virt.NewVirtualNTAG213([]byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+	sim.AddTag(tag1)
+	sim.AddTag(tag2)
+
+	transport := newTestTransport(sim)
+	device, err := pn532.New(transport)
+	require.NoError(t, err)
+	defer func() { _ = device.Close() }()
+
+	ctx := context.Background()
+
+	// Detect both tags
+	tags, err := device.DetectTags(ctx, 2, 0x00)
+	require.NoError(t, err)
+	require.Len(t, tags, 2)
+
+	// "Remove" tag 2 from field
+	tag2.Present = false
+
+	// Try to switch to tag 2 - should fail
+	err = device.SelectTag(ctx, tags[1])
+	require.Error(t, err, "Should fail to select removed tag")
+
+	// Tag 1 should still be accessible
+	err = device.SelectTag(ctx, tags[0])
+	assert.NoError(t, err, "Tag 1 should still be selectable")
+}
+
+// Note: Timeout/zombie behavior is tested at the transport level (TestUART_ZombieMode_*)
+// because the mock serial port doesn't simulate blocking I/O. Device-level timeout
+// testing would require a mock that properly blocks on reads until timeout.
+
+// TestIntegration_SingleTagWithMaxTgTwo tests requesting 2 tags when only 1 is present
+func TestIntegration_SingleTagWithMaxTgTwo(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66})
+	sim.AddTag(tag)
+
+	transport := newTestTransport(sim)
+	device, err := pn532.New(transport)
+	require.NoError(t, err)
+	defer func() { _ = device.Close() }()
+
+	ctx := context.Background()
+
+	// Request 2 tags but only 1 is present
+	tags, err := device.DetectTags(ctx, 2, 0x00)
+	require.NoError(t, err)
+	assert.Len(t, tags, 1, "Should return 1 tag when only 1 present")
+	assert.Equal(t, "04112233445566", tags[0].UID)
 }

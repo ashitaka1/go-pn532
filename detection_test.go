@@ -452,3 +452,39 @@ func TestDevice_InSelect(t *testing.T) {
 	t.Parallel()
 	testInCommand(t, "Select", testutil.CmdInSelect, (*Device).InSelect)
 }
+
+func TestDevice_SelectTag(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+		mock := NewMockTransport()
+		defer func() { _ = mock.Close() }()
+
+		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+		mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00}) // Success
+		mock.SelectTarget()                                        // Simulate a tag was detected
+
+		device, err := New(mock)
+		require.NoError(t, err)
+
+		tag := &DetectedTag{TargetNumber: 1}
+		err = device.SelectTag(context.Background(), tag)
+		assert.NoError(t, err)
+	})
+
+	t.Run("NilTag", func(t *testing.T) {
+		t.Parallel()
+		mock := NewMockTransport()
+		defer func() { _ = mock.Close() }()
+
+		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+
+		device, err := New(mock)
+		require.NoError(t, err)
+
+		err = device.SelectTag(context.Background(), nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "nil")
+	})
+}

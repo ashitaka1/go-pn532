@@ -646,6 +646,15 @@ func (d *Device) InSelect(ctx context.Context, targetNumber byte) error {
 	return nil
 }
 
+// SelectTag selects the specified detected tag for communication.
+// This is a convenience wrapper around InSelect that uses the tag's stored target number.
+func (d *Device) SelectTag(ctx context.Context, tag *DetectedTag) error {
+	if tag == nil {
+		return errors.New("tag cannot be nil")
+	}
+	return d.InSelect(ctx, tag.TargetNumber)
+}
+
 // InAutoPoll polls for targets with context support
 func (d *Device) InAutoPoll(
 	ctx context.Context, pollCount, pollPeriod byte, targetTypes []AutoPollTarget,
