@@ -610,7 +610,15 @@ func (t *Transport) processFrameData(buf []byte, totalLen int) (data []byte, ret
 	return t.extractFrameData(buf, off, frameLen, totalLen)
 }
 
-// readInitialData reads the initial frame data from the port
+// minFrameHeaderBytes is the minimum bytes needed to validate a frame header.
+// Frame structure: preamble (0-2 bytes), 0xFF (start), LEN, LCS
+// With typical 2-byte preamble: 00 00 FF LEN LCS = 5 bytes minimum
+const minFrameHeaderBytes = 5
+
+// readInitialData reads the initial frame data from the port.
+// It accumulates data until we have at least minFrameHeaderBytes or timeout.
+//
+//nolint:gocognit,revive // Accumulation loop with timeout requires multiple conditions
 func (t *Transport) readInitialData(buf []byte) (int, error) {
 	// Platform-specific delay to let the PN532 start sending
 	// Windows USB-serial drivers need more time for reliable responses
@@ -620,20 +628,40 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 	}
 	time.Sleep(initialDelay)
 
-	bytesRead, err := t.port.Read(buf)
-	if err != nil {
-		return 0, fmt.Errorf("UART initial data read failed: %w", err)
-	}
+	totalRead := 0
+	timeout := time.After(500 * time.Millisecond)
 
-	// If we got 0 bytes, try one more time with a longer delay
-	if bytesRead == 0 {
-		bytesRead, err = t.retryInitialRead(buf)
-		if err != nil {
-			return 0, err
+	// Accumulate data until we have enough for frame header validation
+	for totalRead < minFrameHeaderBytes {
+		select {
+		case <-timeout:
+			if totalRead == 0 {
+				// No data at all - try one more time with longer delay
+				return t.retryInitialRead(buf)
+			}
+			// Got some data but not enough - return what we have
+			// This will likely cause a retry at a higher level
+			return totalRead, nil
+		default:
+			bytesRead, err := t.port.Read(buf[totalRead:])
+			if err != nil {
+				return 0, fmt.Errorf("UART initial data read failed: %w", err)
+			}
+			totalRead += bytesRead
+
+			// If we have enough bytes, we can stop
+			if totalRead >= minFrameHeaderBytes {
+				break
+			}
+
+			// Small delay between reads to avoid tight loop
+			if bytesRead == 0 {
+				time.Sleep(time.Millisecond)
+			}
 		}
 	}
 
-	return bytesRead, nil
+	return totalRead, nil
 }
 
 // retryInitialRead performs a retry read with platform-specific timing

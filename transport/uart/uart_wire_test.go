@@ -119,12 +119,106 @@ func (*MockSerialPort) Break(_ time.Duration) error {
 // Verify interface implementation
 var _ serial.Port = (*MockSerialPort)(nil)
 
+// JitteryMockSerialPort wraps VirtualPN532 with jitter simulation
+// to test protocol handling under realistic UART conditions
+type JitteryMockSerialPort struct {
+	jittery     *virt.BufferedJitteryConnection
+	readTimeout time.Duration
+	closed      bool
+}
+
+// NewJitteryMockSerialPort creates a mock serial port with jitter simulation
+func NewJitteryMockSerialPort(sim *virt.VirtualPN532, config virt.JitterConfig) *JitteryMockSerialPort {
+	return &JitteryMockSerialPort{
+		jittery:     virt.NewBufferedJitteryConnection(sim, config),
+		readTimeout: 100 * time.Millisecond,
+	}
+}
+
+func (*JitteryMockSerialPort) SetMode(_ *serial.Mode) error {
+	return nil
+}
+
+func (m *JitteryMockSerialPort) Read(p []byte) (n int, err error) {
+	if m.closed {
+		return 0, errPortClosed
+	}
+	n, err = m.jittery.Read(p)
+	if err != nil {
+		return n, fmt.Errorf("jittery mock read: %w", err)
+	}
+	return n, nil
+}
+
+func (m *JitteryMockSerialPort) Write(p []byte) (n int, err error) {
+	if m.closed {
+		return 0, errPortClosed
+	}
+	n, err = m.jittery.Write(p)
+	if err != nil {
+		return n, fmt.Errorf("jittery mock write: %w", err)
+	}
+	return n, nil
+}
+
+func (*JitteryMockSerialPort) Drain() error {
+	return nil
+}
+
+func (m *JitteryMockSerialPort) ResetInputBuffer() error {
+	m.jittery.ClearBuffer()
+	m.jittery.ResetStallState()
+	return nil
+}
+
+func (*JitteryMockSerialPort) ResetOutputBuffer() error {
+	return nil
+}
+
+func (*JitteryMockSerialPort) SetDTR(_ bool) error {
+	return nil
+}
+
+func (*JitteryMockSerialPort) SetRTS(_ bool) error {
+	return nil
+}
+
+func (*JitteryMockSerialPort) GetModemStatusBits() (*serial.ModemStatusBits, error) {
+	return &serial.ModemStatusBits{}, nil
+}
+
+func (m *JitteryMockSerialPort) SetReadTimeout(t time.Duration) error {
+	m.readTimeout = t
+	return nil
+}
+
+func (m *JitteryMockSerialPort) Close() error {
+	m.closed = true
+	return nil
+}
+
+func (*JitteryMockSerialPort) Break(_ time.Duration) error {
+	return nil
+}
+
+// Verify interface implementation
+var _ serial.Port = (*JitteryMockSerialPort)(nil)
+
 // newTestTransport creates a Transport with a mock serial port for testing
 func newTestTransport(sim *virt.VirtualPN532) *Transport {
 	mockPort := NewMockSerialPort(sim)
 	return &Transport{
 		port:     mockPort,
 		portName: "mock://test",
+	}
+}
+
+// newJitteryTestTransport creates a Transport with jitter simulation for stress testing
+func newJitteryTestTransport(sim *virt.VirtualPN532, config virt.JitterConfig) *Transport {
+	mockPort := NewJitteryMockSerialPort(sim, config)
+	return &Transport{
+		port:     mockPort,
+		portName: "mock://jittery-test",
 	}
 }
 
@@ -548,4 +642,239 @@ func TestUART_ErrorScenarios(t *testing.T) {
 		_ = resp
 		_ = err
 	})
+}
+
+// =============================================================================
+// Jittery Transport Tests - Stress test protocol parsing with fragmented reads
+// =============================================================================
+
+// defaultJitterConfig returns a jitter config suitable for stress testing
+func defaultJitterConfig() virt.JitterConfig {
+	return virt.JitterConfig{
+		MaxLatencyMs:     0, // No latency for faster tests
+		FragmentReads:    true,
+		FragmentMinBytes: 1, // Fragment down to single bytes
+		Seed:             12345,
+	}
+}
+
+// TestUART_Jittery_GetFirmwareVersion tests firmware version with fragmented reads
+func TestUART_Jittery_GetFirmwareVersion(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	transport := newJitteryTestTransport(sim, defaultJitterConfig())
+
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	assert.Len(t, resp, 5)
+	assert.Equal(t, byte(0x03), resp[0], "Response code should be 0x03")
+	assert.Equal(t, byte(0x32), resp[1], "IC should be 0x32")
+	assert.Equal(t, byte(0x01), resp[2], "Version should be 0x01")
+	assert.Equal(t, byte(0x06), resp[3], "Revision should be 0x06")
+}
+
+// TestUART_Jittery_SAMConfiguration tests SAM config with fragmented reads
+func TestUART_Jittery_SAMConfiguration(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	transport := newJitteryTestTransport(sim, defaultJitterConfig())
+
+	resp, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	state := sim.GetState()
+	assert.True(t, state.SAMConfigured, "SAM should be configured")
+}
+
+// TestUART_Jittery_TagDetection tests tag detection with fragmented reads
+func TestUART_Jittery_TagDetection(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	transport := newJitteryTestTransport(sim, defaultJitterConfig())
+
+	// Configure SAM
+	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+
+	// Detect tag
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 7)
+	assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
+	assert.Equal(t, byte(0x01), resp[1], "NbTg should be 1")
+}
+
+// TestUART_Jittery_ReadWriteCycle tests read/write with fragmented transport
+func TestUART_Jittery_ReadWriteCycle(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	transport := newJitteryTestTransport(sim, defaultJitterConfig())
+
+	// Configure SAM
+	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+
+	// Detect tag
+	_, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+
+	// Write data
+	resp, err := transport.SendCommand(0x40, []byte{0x01, 0xA2, 0x04, 0xAA, 0xBB, 0xCC, 0xDD})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 2)
+	assert.Equal(t, byte(0x00), resp[1], "Write should succeed")
+
+	// Read it back
+	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 6)
+	assert.Equal(t, byte(0xAA), resp[2])
+	assert.Equal(t, byte(0xBB), resp[3])
+	assert.Equal(t, byte(0xCC), resp[4])
+	assert.Equal(t, byte(0xDD), resp[5])
+}
+
+// TestUART_Jittery_MIFAREAuth tests MIFARE auth with fragmented transport
+func TestUART_Jittery_MIFAREAuth(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualMIFARE1K([]byte{0x01, 0x02, 0x03, 0x04})
+	sim.AddTag(tag)
+	transport := newJitteryTestTransport(sim, defaultJitterConfig())
+
+	// Configure SAM
+	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+
+	// Detect tag
+	_, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+
+	// Authenticate
+	authCmd := []byte{
+		0x01, 0x60, 0x04,
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+		0x01, 0x02, 0x03, 0x04,
+	}
+	resp, err := transport.SendCommand(0x40, authCmd)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 2)
+	assert.Equal(t, byte(0x00), resp[1], "Auth should succeed")
+}
+
+// TestUART_Jittery_MultipleCommands tests rapid command sequence with jitter
+func TestUART_Jittery_MultipleCommands(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	transport := newJitteryTestTransport(sim, defaultJitterConfig())
+
+	// Run 20 command cycles
+	for i := range 20 {
+		// Configure SAM
+		_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+		require.NoError(t, err, "SAM config failed on iteration %d", i)
+
+		// Get firmware version
+		resp, err := transport.SendCommand(0x02, nil)
+		require.NoError(t, err, "GetFirmwareVersion failed on iteration %d", i)
+		assert.Len(t, resp, 5)
+
+		// Detect tag
+		resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		require.NoError(t, err, "InListPassiveTarget failed on iteration %d", i)
+		assert.Equal(t, byte(0x01), resp[1], "Should detect tag on iteration %d", i)
+
+		// Release tag
+		_, err = transport.SendCommand(0x52, []byte{0x01})
+		require.NoError(t, err, "InRelease failed on iteration %d", i)
+	}
+}
+
+// TestUART_Jittery_USBBoundaryStress tests with USB 64-byte boundary fragmentation
+func TestUART_Jittery_USBBoundaryStress(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	config := virt.JitterConfig{
+		MaxLatencyMs:      0,
+		FragmentReads:     false, // Don't randomly fragment
+		USBBoundaryStress: true,  // Fragment at 64-byte boundaries instead
+		Seed:              54321,
+	}
+	transport := newJitteryTestTransport(sim, config)
+
+	// Configure SAM
+	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+
+	// Detect tag
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x01), resp[1], "Should detect tag")
+
+	// Read data
+	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x00), resp[1], "Read should succeed")
+}
+
+// TestUART_Jittery_StallAfterHeader tests stall between header and body
+func TestUART_Jittery_StallAfterHeader(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	config := virt.JitterConfig{
+		MaxLatencyMs:    0,
+		FragmentReads:   false,
+		StallAfterBytes: 6, // Stall after ACK frame (6 bytes)
+		StallDuration:   10 * time.Millisecond,
+		Seed:            99999,
+	}
+	transport := newJitteryTestTransport(sim, config)
+
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Len(t, resp, 5)
+	assert.Equal(t, byte(0x32), resp[1], "IC should be 0x32")
+}
+
+// TestUART_Jittery_AggressiveFragmentation tests with single-byte fragmentation
+func TestUART_Jittery_AggressiveFragmentation(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	// Most aggressive: single-byte fragments
+	config := virt.JitterConfig{
+		MaxLatencyMs:     0,
+		FragmentReads:    true,
+		FragmentMinBytes: 1,
+		Seed:             11111,
+	}
+	transport := newJitteryTestTransport(sim, config)
+
+	// Configure SAM
+	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+
+	// Get firmware
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	assert.Len(t, resp, 5)
+
+	// Detect tag
+	resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x01), resp[1])
+
+	// Read from tag
+	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x00), resp[1])
 }

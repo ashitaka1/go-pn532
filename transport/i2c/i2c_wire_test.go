@@ -394,3 +394,289 @@ func TestI2C_Close(t *testing.T) {
 	err := transport.Close()
 	require.NoError(t, err)
 }
+
+// --- Jittery Transport Tests ---
+// These tests verify I2C robustness under simulated real-world conditions
+// like USB-I2C bridges (FT232H, MCP2221) with unpredictable timing.
+
+// JitteryMockI2CBus wraps a VirtualPN532 with jittery read behavior.
+type JitteryMockI2CBus struct {
+	jittery   *virt.BufferedJitteryConnection
+	sim       *virt.VirtualPN532
+	closed    bool
+	lastReady byte
+}
+
+// NewJitteryMockI2CBus creates a jittery I2C bus for stress testing.
+func NewJitteryMockI2CBus(sim *virt.VirtualPN532, config virt.JitterConfig) *JitteryMockI2CBus {
+	return &JitteryMockI2CBus{
+		jittery:   virt.NewBufferedJitteryConnection(sim, config),
+		sim:       sim,
+		lastReady: 0x00,
+	}
+}
+
+// Tx implements i2c.Bus.Tx with jittery read behavior.
+//
+//nolint:gocognit,gocyclo,revive,cyclop,varnamelen // Mock implementation requires complex logic
+func (m *JitteryMockI2CBus) Tx(_ uint16, w, r []byte) error {
+	if m.closed {
+		return errBusClosed
+	}
+
+	// Handle ready status check (read-only with single byte)
+	if len(w) == 0 && len(r) == 1 {
+		if m.sim.HasPendingResponse() {
+			r[0] = pn532Ready
+		} else {
+			r[0] = 0x00
+		}
+		return nil
+	}
+
+	// Handle write operation
+	if len(w) > 0 && len(r) == 0 {
+		_, err := m.jittery.Write(w)
+		if err != nil {
+			return fmt.Errorf("jittery i2c write: %w", err)
+		}
+		return nil
+	}
+
+	// Handle read operation with jittery behavior
+	if len(w) == 0 && len(r) > 0 {
+		totalRead := 0
+		for totalRead < len(r) {
+			n, err := m.jittery.Read(r[totalRead:])
+			if err != nil {
+				return fmt.Errorf("jittery i2c read: %w", err)
+			}
+			if n == 0 {
+				break // No more data
+			}
+			totalRead += n
+		}
+		// Clear remaining bytes
+		for i := totalRead; i < len(r); i++ {
+			r[i] = 0x00
+		}
+		return nil
+	}
+
+	// Handle combined write-read
+	if len(w) > 0 && len(r) > 0 {
+		_, err := m.jittery.Write(w)
+		if err != nil {
+			return fmt.Errorf("jittery i2c write: %w", err)
+		}
+		totalRead := 0
+		for totalRead < len(r) {
+			n, err := m.jittery.Read(r[totalRead:])
+			if err != nil {
+				return fmt.Errorf("jittery i2c read: %w", err)
+			}
+			if n == 0 {
+				break
+			}
+			totalRead += n
+		}
+		for i := totalRead; i < len(r); i++ {
+			r[i] = 0x00
+		}
+		return nil
+	}
+
+	return nil
+}
+
+func (*JitteryMockI2CBus) SetSpeed(_ physic.Frequency) error { return nil }
+func (m *JitteryMockI2CBus) Close() error                    { m.closed = true; return nil }
+func (*JitteryMockI2CBus) String() string                    { return "mock://jittery-i2c" }
+
+var _ i2c.Bus = (*JitteryMockI2CBus)(nil)
+
+// newJitteryTestI2CTransport creates a Transport with jittery I2C bus.
+func newJitteryTestI2CTransport(sim *virt.VirtualPN532, config virt.JitterConfig) *Transport {
+	mockBus := NewJitteryMockI2CBus(sim, config)
+	dev := &i2c.Dev{Addr: pn532WriteAddr, Bus: mockBus}
+	return &Transport{
+		dev:     dev,
+		busName: "mock://jittery-i2c",
+		timeout: 500 * time.Millisecond,
+	}
+}
+
+// defaultI2CJitterConfig returns a jitter config for I2C stress testing.
+func defaultI2CJitterConfig() virt.JitterConfig {
+	return virt.JitterConfig{
+		MaxLatencyMs:     0,
+		FragmentReads:    true,
+		FragmentMinBytes: 1,
+		Seed:             12345,
+	}
+}
+
+func TestI2C_Jittery_GetFirmwareVersion(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
+
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	assert.Len(t, resp, 5)
+	assert.Equal(t, byte(0x03), resp[0])
+	assert.Equal(t, byte(0x32), resp[1])
+}
+
+func TestI2C_Jittery_SAMConfiguration(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
+
+	resp, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	state := sim.GetState()
+	assert.True(t, state.SAMConfigured)
+}
+
+func TestI2C_Jittery_TagDetection(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
+
+	// Detect tag
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 7)
+	assert.Equal(t, byte(0x4B), resp[0])
+	assert.Equal(t, byte(0x01), resp[1])
+}
+
+func TestI2C_Jittery_ReadWriteCycle(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
+
+	// Detect tag
+	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+
+	// Write data
+	resp, err := transport.SendCommand(0x40, []byte{0x01, 0xA2, 0x04, 0xAA, 0xBB, 0xCC, 0xDD})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 2)
+	assert.Equal(t, byte(0x00), resp[1])
+
+	// Read it back
+	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 6)
+	assert.Equal(t, byte(0xAA), resp[2])
+	assert.Equal(t, byte(0xBB), resp[3])
+	assert.Equal(t, byte(0xCC), resp[4])
+	assert.Equal(t, byte(0xDD), resp[5])
+}
+
+func TestI2C_Jittery_MIFAREAuth(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualMIFARE1K([]byte{0x01, 0x02, 0x03, 0x04})
+	sim.AddTag(tag)
+	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
+
+	// Detect tag
+	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+
+	// Authenticate
+	authCmd := []byte{
+		0x01, 0x60, 0x04,
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+		0x01, 0x02, 0x03, 0x04,
+	}
+	resp, err := transport.SendCommand(0x40, authCmd)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 2)
+	assert.Equal(t, byte(0x00), resp[1])
+}
+
+func TestI2C_Jittery_MultipleCommands(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
+
+	// Run 10 command cycles
+	for i := range 10 {
+		// Get firmware version
+		resp, err := transport.SendCommand(0x02, nil)
+		require.NoError(t, err, "GetFirmwareVersion failed on iteration %d", i)
+		assert.Len(t, resp, 5)
+
+		// Detect tag
+		resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		require.NoError(t, err, "InListPassiveTarget failed on iteration %d", i)
+		assert.Equal(t, byte(0x01), resp[1])
+
+		// Release tag
+		_, err = transport.SendCommand(0x52, []byte{0x01})
+		require.NoError(t, err, "InRelease failed on iteration %d", i)
+	}
+}
+
+func TestI2C_Jittery_USBBoundaryStress(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	config := virt.JitterConfig{
+		MaxLatencyMs:      0,
+		FragmentReads:     false,
+		USBBoundaryStress: true,
+		Seed:              54321,
+	}
+	transport := newJitteryTestI2CTransport(sim, config)
+
+	// Detect tag
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x01), resp[1])
+
+	// Read data
+	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x00), resp[1])
+}
+
+func TestI2C_Jittery_AggressiveFragmentation(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	config := virt.JitterConfig{
+		MaxLatencyMs:     0,
+		FragmentReads:    true,
+		FragmentMinBytes: 1,
+		Seed:             11111,
+	}
+	transport := newJitteryTestI2CTransport(sim, config)
+
+	// Get firmware
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	assert.Len(t, resp, 5)
+
+	// Detect tag
+	resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x01), resp[1])
+
+	// Read from tag
+	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x00), resp[1])
+}

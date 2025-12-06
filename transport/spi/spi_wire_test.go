@@ -157,36 +157,43 @@ func (m *MockSPIConn) readFromSimulator(readBuf []byte) (ackHandled bool, err er
 	return false, nil
 }
 
-// fillResponseBuffer fills the response buffer based on current read phase.
-func (m *MockSPIConn) fillResponseBuffer(readBuf []byte) {
+// fillSPIResponseBuffer is a shared helper for filling SPI response buffers.
+// It handles the two-phase read protocol: header read then data read.
+// Returns updated headerRead and responseFrame values.
+//
+//nolint:revive // headerRead is state, not a control flag - it determines read phase
+func fillSPIResponseBuffer(readBuf, responseFrame []byte, headerRead bool) (newHeaderRead bool, newResponseFrame []byte) {
 	dataLen := len(readBuf) - 1
 
-	if !m.headerRead {
+	if !headerRead {
 		// Header read: return from beginning of response frame
-		m.headerRead = true
-		for i := 0; i < dataLen && i < len(m.responseFrame); i++ {
-			readBuf[i+1] = mockReverseBit(m.responseFrame[i])
+		for i := 0; i < dataLen && i < len(responseFrame); i++ {
+			readBuf[i+1] = mockReverseBit(responseFrame[i])
 		}
 		// Zero out remaining
-		for i := len(m.responseFrame) + 1; i < len(readBuf); i++ {
+		for i := len(responseFrame) + 1; i < len(readBuf); i++ {
 			readBuf[i] = 0
 		}
-	} else {
-		// Data read: return from TFI position (index 5 in frame)
-		// Frame: [00][00][FF][len][lcs][TFI][cmd][data...][DCS][00]
-		const tfiPos = 5
-		for i := 0; i < dataLen && tfiPos+i < len(m.responseFrame); i++ {
-			readBuf[i+1] = mockReverseBit(m.responseFrame[tfiPos+i])
-		}
-		// Zero out remaining
-		remaining := len(m.responseFrame) - tfiPos + 1
-		for i := remaining; i < len(readBuf); i++ {
-			readBuf[i] = 0
-		}
-		// Reset for next command
-		m.responseFrame = nil
-		m.headerRead = false
+		return true, responseFrame // headerRead = true, keep responseFrame
 	}
+
+	// Data read: return from TFI position (index 5 in frame)
+	// Frame: [00][00][FF][len][lcs][TFI][cmd][data...][DCS][00]
+	const tfiPos = 5
+	for i := 0; i < dataLen && tfiPos+i < len(responseFrame); i++ {
+		readBuf[i+1] = mockReverseBit(responseFrame[tfiPos+i])
+	}
+	// Zero out remaining
+	remaining := len(responseFrame) - tfiPos + 1
+	for i := remaining; i < len(readBuf); i++ {
+		readBuf[i] = 0
+	}
+	return false, nil // Reset: headerRead = false, responseFrame = nil
+}
+
+// fillResponseBuffer fills the response buffer based on current read phase.
+func (m *MockSPIConn) fillResponseBuffer(readBuf []byte) {
+	m.headerRead, m.responseFrame = fillSPIResponseBuffer(readBuf, m.responseFrame, m.headerRead)
 }
 
 // Tx implements spi.Conn.Tx - performs SPI transaction.
@@ -556,4 +563,385 @@ func TestSPI_Close(t *testing.T) {
 
 	err := transport.Close()
 	require.NoError(t, err)
+}
+
+// --- Jittery Transport Tests ---
+// These tests verify SPI robustness under simulated real-world conditions
+// like USB-SPI bridges (FT232H, CH341) with unpredictable timing.
+
+// JitteryMockSPIConn wraps MockSPIConn with jittery read behavior.
+type JitteryMockSPIConn struct {
+	jittery       *virt.BufferedJitteryConnection
+	sim           *virt.VirtualPN532
+	responseFrame []byte
+	readPos       int
+	closed        bool
+	headerRead    bool
+}
+
+// NewJitteryMockSPIConn creates a jittery SPI connection for stress testing.
+func NewJitteryMockSPIConn(sim *virt.VirtualPN532, config virt.JitterConfig) *JitteryMockSPIConn {
+	return &JitteryMockSPIConn{
+		jittery: virt.NewBufferedJitteryConnection(sim, config),
+		sim:     sim,
+	}
+}
+
+// jitteryHandleStatusRead handles SPI status read command.
+func (m *JitteryMockSPIConn) jitteryHandleStatusRead(readBuf []byte) {
+	if len(readBuf) < 2 {
+		return
+	}
+	readBuf[0] = 0
+	if m.sim.HasPendingResponse() || len(m.responseFrame) > 0 {
+		readBuf[1] = mockReverseBit(spiReady)
+	} else {
+		readBuf[1] = 0x00
+	}
+}
+
+// jitteryHandleDataWrite handles SPI data write command.
+func (m *JitteryMockSPIConn) jitteryHandleDataWrite(w []byte) error {
+	if len(w) <= 1 {
+		return nil
+	}
+	dataToWrite := mockReverseBytes(w[1:])
+	_, err := m.jittery.Write(dataToWrite)
+	if err != nil {
+		return fmt.Errorf("jittery spi write: %w", err)
+	}
+	m.responseFrame = nil
+	m.readPos = 0
+	m.headerRead = false
+	return nil
+}
+
+// jitteryHandleDataRead handles SPI data read command with jittery behavior.
+func (m *JitteryMockSPIConn) jitteryHandleDataRead(readBuf []byte) error {
+	if len(readBuf) <= 1 {
+		return nil
+	}
+
+	readBuf[0] = 0
+
+	if m.responseFrame == nil {
+		ackHandled, err := m.jitteryReadFromSimulator(readBuf)
+		if err != nil {
+			return err
+		}
+		if ackHandled {
+			return nil
+		}
+	}
+
+	if len(m.responseFrame) == 0 {
+		return nil
+	}
+
+	m.jitteryFillResponseBuffer(readBuf)
+	return nil
+}
+
+// jitteryReadFromSimulator reads data with jitter simulation.
+func (m *JitteryMockSPIConn) jitteryReadFromSimulator(readBuf []byte) (ackHandled bool, err error) {
+	tempBuf := make([]byte, 256)
+
+	// Read with jitter - accumulate all available data
+	// SPI needs the full response, not just fragments
+	totalRead := 0
+	emptyReads := 0
+	maxEmptyReads := 50 // Limit retries to avoid infinite loop
+
+	for totalRead < len(tempBuf) && emptyReads < maxEmptyReads {
+		bytesRead, err := m.jittery.Read(tempBuf[totalRead:])
+		if err != nil {
+			return false, fmt.Errorf("jittery spi read: %w", err)
+		}
+		if bytesRead == 0 {
+			emptyReads++
+			continue
+		}
+		emptyReads = 0 // Reset counter on successful read
+		totalRead += bytesRead
+	}
+
+	if totalRead == 0 {
+		return false, nil
+	}
+
+	if isACKFrame(tempBuf, totalRead) {
+		ackLen := 6
+		for i := 0; i < len(readBuf)-1 && i < ackLen; i++ {
+			readBuf[i+1] = mockReverseBit(tempBuf[i])
+		}
+		if totalRead > ackLen {
+			m.responseFrame = make([]byte, totalRead-ackLen)
+			copy(m.responseFrame, tempBuf[ackLen:totalRead])
+		}
+		m.readPos = 0
+		m.headerRead = false
+		return true, nil
+	}
+
+	m.responseFrame = make([]byte, totalRead)
+	copy(m.responseFrame, tempBuf[:totalRead])
+	m.readPos = 0
+	m.headerRead = false
+	return false, nil
+}
+
+// jitteryFillResponseBuffer fills the response buffer using the shared helper.
+func (m *JitteryMockSPIConn) jitteryFillResponseBuffer(readBuf []byte) {
+	m.headerRead, m.responseFrame = fillSPIResponseBuffer(readBuf, m.responseFrame, m.headerRead)
+}
+
+// Tx implements spi.Conn.Tx with jittery behavior.
+//
+//nolint:varnamelen // Interface compliance
+func (m *JitteryMockSPIConn) Tx(w, r []byte) error {
+	if m.closed {
+		return errPortClosed
+	}
+
+	if len(w) == 0 {
+		return nil
+	}
+
+	cmdByte := mockReverseBit(w[0])
+
+	switch cmdByte {
+	case spiStatRead:
+		m.jitteryHandleStatusRead(r)
+		return nil
+	case spiDataWrite:
+		return m.jitteryHandleDataWrite(w)
+	case spiDataRead:
+		return m.jitteryHandleDataRead(r)
+	}
+
+	return nil
+}
+
+func (*JitteryMockSPIConn) Duplex() conn.Duplex { return conn.Full }
+func (*JitteryMockSPIConn) String() string      { return "mock://jittery-spi" }
+func (m *JitteryMockSPIConn) TxPackets(p []spi.Packet) error {
+	for _, pkt := range p {
+		if err := m.Tx(pkt.W, pkt.R); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var _ spi.Conn = (*JitteryMockSPIConn)(nil)
+
+// JitteryMockSPIPort wraps a jittery SPI connection.
+type JitteryMockSPIPort struct {
+	conn   *JitteryMockSPIConn
+	closed bool
+}
+
+func NewJitteryMockSPIPort(sim *virt.VirtualPN532, config virt.JitterConfig) *JitteryMockSPIPort {
+	return &JitteryMockSPIPort{
+		conn: NewJitteryMockSPIConn(sim, config),
+	}
+}
+
+func (p *JitteryMockSPIPort) Connect(_ physic.Frequency, _ spi.Mode, _ int) (spi.Conn, error) {
+	return p.conn, nil
+}
+
+func (p *JitteryMockSPIPort) Close() error {
+	p.closed = true
+	p.conn.closed = true
+	return nil
+}
+func (*JitteryMockSPIPort) String() string                      { return "mock://jittery-spi" }
+func (*JitteryMockSPIPort) LimitSpeed(_ physic.Frequency) error { return nil }
+
+var _ spi.PortCloser = (*JitteryMockSPIPort)(nil)
+
+// newJitteryTestSPITransport creates a Transport with jittery SPI.
+func newJitteryTestSPITransport(sim *virt.VirtualPN532, config virt.JitterConfig) *Transport {
+	mockPort := NewJitteryMockSPIPort(sim, config)
+	spiConn, _ := mockPort.Connect(defaultFreq, mode, 8)
+	return &Transport{
+		port:     mockPort,
+		conn:     spiConn,
+		portName: "mock://jittery-spi",
+		timeout:  500 * time.Millisecond,
+	}
+}
+
+// defaultSPIJitterConfig returns a jitter config for SPI stress testing.
+func defaultSPIJitterConfig() virt.JitterConfig {
+	return virt.JitterConfig{
+		MaxLatencyMs:     0,
+		FragmentReads:    true,
+		FragmentMinBytes: 1,
+		Seed:             12345,
+	}
+}
+
+func TestSPI_Jittery_GetFirmwareVersion(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
+
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	assert.GreaterOrEqual(t, len(resp), 4)
+	assert.Equal(t, byte(0x32), resp[0])
+	assert.Equal(t, byte(0x01), resp[1])
+}
+
+func TestSPI_Jittery_SAMConfiguration(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
+
+	resp, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+	assert.Empty(t, resp)
+
+	state := sim.GetState()
+	assert.True(t, state.SAMConfigured)
+}
+
+func TestSPI_Jittery_TagDetection(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
+
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 7)
+	assert.Equal(t, byte(0x01), resp[0], "NbTg should be 1")
+}
+
+func TestSPI_Jittery_ReadWriteCycle(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
+
+	// Detect tag
+	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+
+	// Write data
+	resp, err := transport.SendCommand(0x40, []byte{0x01, 0xA2, 0x04, 0xAA, 0xBB, 0xCC, 0xDD})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 1)
+	assert.Equal(t, byte(0x00), resp[0])
+
+	// Read it back
+	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 5)
+	assert.Equal(t, byte(0xAA), resp[1])
+	assert.Equal(t, byte(0xBB), resp[2])
+	assert.Equal(t, byte(0xCC), resp[3])
+	assert.Equal(t, byte(0xDD), resp[4])
+}
+
+func TestSPI_Jittery_MIFAREAuth(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualMIFARE1K([]byte{0x01, 0x02, 0x03, 0x04})
+	sim.AddTag(tag)
+	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
+
+	// Detect tag
+	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+
+	// Authenticate
+	authCmd := []byte{
+		0x01, 0x60, 0x04,
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+		0x01, 0x02, 0x03, 0x04,
+	}
+	resp, err := transport.SendCommand(0x40, authCmd)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp), 1)
+	assert.Equal(t, byte(0x00), resp[0])
+}
+
+func TestSPI_Jittery_MultipleCommands(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
+
+	// Run 10 command cycles
+	for i := range 10 {
+		// Get firmware version
+		resp, err := transport.SendCommand(0x02, nil)
+		require.NoError(t, err, "GetFirmwareVersion failed on iteration %d", i)
+		assert.GreaterOrEqual(t, len(resp), 4)
+
+		// Detect tag
+		resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		require.NoError(t, err, "InListPassiveTarget failed on iteration %d", i)
+		assert.Equal(t, byte(0x01), resp[0])
+
+		// Release tag
+		_, err = transport.SendCommand(0x52, []byte{0x01})
+		require.NoError(t, err, "InRelease failed on iteration %d", i)
+	}
+}
+
+func TestSPI_Jittery_USBBoundaryStress(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	config := virt.JitterConfig{
+		MaxLatencyMs:      0,
+		FragmentReads:     false,
+		USBBoundaryStress: true,
+		Seed:              54321,
+	}
+	transport := newJitteryTestSPITransport(sim, config)
+
+	// Detect tag
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x01), resp[0])
+
+	// Read data
+	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x00), resp[0])
+}
+
+func TestSPI_Jittery_AggressiveFragmentation(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	config := virt.JitterConfig{
+		MaxLatencyMs:     0,
+		FragmentReads:    true,
+		FragmentMinBytes: 1,
+		Seed:             11111,
+	}
+	transport := newJitteryTestSPITransport(sim, config)
+
+	// Get firmware
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(resp), 4)
+
+	// Detect tag
+	resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x01), resp[0])
+
+	// Read from tag
+	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x00), resp[0])
 }
