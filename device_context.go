@@ -65,6 +65,25 @@ func (d *Device) InitContext(ctx context.Context) error {
 	return nil
 }
 
+// Reset reinitializes the device connection after a power loss, sleep/wake cycle,
+// or communication failure. This clears internal state and re-runs the initialization
+// sequence (GetFirmwareVersion + SAMConfiguration).
+//
+// Use this when:
+//   - Host device wakes from sleep
+//   - PN532 module was power cycled
+//   - Communication becomes unreliable
+//
+// If Reset fails, consider closing and reopening the transport entirely.
+func (d *Device) Reset(ctx context.Context) error {
+	// Clear internal state
+	d.currentTarget = 0
+	d.firmwareVersion = nil
+
+	// Reinitialize the device
+	return d.InitContext(ctx)
+}
+
 // shouldSkipFirmwareVersion checks if transport supports firmware version retrieval
 func (*Device) shouldSkipFirmwareVersion() bool {
 	// All transports now support firmware version retrieval

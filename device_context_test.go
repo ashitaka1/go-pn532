@@ -214,3 +214,31 @@ func TestDetectTagsWithInListPassiveTarget_Timing(t *testing.T) {
 	assert.GreaterOrEqual(t, elapsed, 5*time.Millisecond,
 		"Should have a delay of at least 5ms for RF field stabilization")
 }
+
+func TestDevice_Reset(t *testing.T) {
+	t.Parallel()
+
+	mock := NewMockTransport()
+	defer func() { _ = mock.Close() }()
+
+	// Set up responses for initialization
+	mock.SetResponse(0x02, []byte{0x03, 0x32, 0x01, 0x06, 0x07}) // GetFirmwareVersion
+	mock.SetResponse(0x14, []byte{0x15})                         // SAMConfiguration
+	mock.SetResponse(0x32, []byte{0x33})                         // RFConfiguration
+
+	device, err := New(mock)
+	require.NoError(t, err)
+
+	// Simulate some state
+	device.currentTarget = 1
+
+	// Reset should clear state and reinitialize
+	err = device.Reset(context.Background())
+	require.NoError(t, err)
+
+	// Verify state was cleared
+	assert.Equal(t, byte(0), device.currentTarget, "currentTarget should be cleared")
+
+	// Verify firmware version was fetched (at least 2 calls - init + reset)
+	assert.GreaterOrEqual(t, mock.GetCallCount(0x02), 2, "GetFirmwareVersion should be called during reset")
+}
