@@ -37,29 +37,14 @@ var (
 	ErrAuthFailed = errors.New("authentication failed with all known keys")
 )
 
-// TagType represents the type of NFC tag
-type TagType int
-
-const (
-	// TagTypeUnknown represents an unknown or unsupported tag type
-	TagTypeUnknown TagType = iota
-	// TagTypeNTAG represents an NTAG2xx series tag
-	TagTypeNTAG
-	// TagTypeMIFARE represents a MIFARE Classic tag
-	TagTypeMIFARE
-)
-
 // TagOperations provides unified high-level tag operations
 type TagOperations struct {
-	// Core fields - group pointers together
 	device         *pn532.Device
 	tag            *pn532.DetectedTag
 	ntagInstance   *pn532.NTAGTag
 	mifareInstance *pn532.MIFARETag
-
-	// Enum and int fields - group together for better alignment
-	tagType    TagType
-	totalPages int
+	tagType        pn532.TagType
+	totalPages     int
 }
 
 // New creates a new TagOperations instance
@@ -85,12 +70,12 @@ func (t *TagOperations) DetectTag(ctx context.Context) error {
 }
 
 // GetTagType returns the detected tag type
-func (t *TagOperations) GetTagType() TagType {
+func (t *TagOperations) GetTagType() pn532.TagType {
 	return t.tagType
 }
 
 // TagType returns the detected tag type (alias for GetTagType)
-func (t *TagOperations) TagType() TagType {
+func (t *TagOperations) TagType() pn532.TagType {
 	return t.tagType
 }
 
@@ -111,7 +96,7 @@ func (t *TagOperations) detectAndInitializeTag() error {
 	// Try NTAG detection first
 	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK)
 	if err := ntag.DetectType(); err == nil {
-		t.tagType = TagTypeNTAG
+		t.tagType = pn532.TagTypeNTAG
 		t.ntagInstance = ntag
 		t.totalPages = int(ntag.GetTotalPages())
 		return nil
@@ -121,7 +106,7 @@ func (t *TagOperations) detectAndInitializeTag() error {
 	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
 	// Try to authenticate with common keys to verify it's MIFARE
 	if t.tryMIFAREAuth(mifare) {
-		t.tagType = TagTypeMIFARE
+		t.tagType = pn532.TagTypeMIFARE
 		t.mifareInstance = mifare
 		return nil
 	}

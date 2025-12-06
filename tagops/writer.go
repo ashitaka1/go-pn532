@@ -26,7 +26,6 @@ import (
 	"fmt"
 
 	"github.com/ZaparooProject/go-pn532"
-	"github.com/hsanjuan/go-ndef"
 )
 
 // WriteBlocks writes data to the tag starting at the specified block.
@@ -39,41 +38,37 @@ func (t *TagOperations) WriteBlocks(ctx context.Context, startBlock byte, data [
 	}
 
 	switch t.tagType {
-	case TagTypeNTAG:
+	case pn532.TagTypeNTAG:
 		return t.writeNTAGBlocks(ctx, startBlock, data)
-	case TagTypeMIFARE:
+	case pn532.TagTypeMIFARE:
 		return t.writeMIFAREBlocks(ctx, startBlock, data)
-	case TagTypeUnknown:
-		return ErrUnsupportedTag
-	default:
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return ErrUnsupportedTag
 	}
+	return ErrUnsupportedTag
 }
 
 // WriteNDEF writes an NDEF message to the tag
-func (t *TagOperations) WriteNDEF(_ context.Context, msg *ndef.Message) error {
+func (t *TagOperations) WriteNDEF(_ context.Context, msg *pn532.NDEFMessage) error {
 	if t.tag == nil {
 		return ErrNoTag
 	}
 
 	switch t.tagType {
-	case TagTypeNTAG:
-		pn532Msg := convertToPN532Message(msg)
-		if err := t.ntagInstance.WriteNDEF(pn532Msg); err != nil {
+	case pn532.TagTypeNTAG:
+		if err := t.ntagInstance.WriteNDEF(msg); err != nil {
 			return fmt.Errorf("failed to write NDEF to NTAG: %w", err)
 		}
 		return nil
-	case TagTypeMIFARE:
-		pn532Msg := convertToPN532Message(msg)
-		if err := t.mifareInstance.WriteNDEF(pn532Msg); err != nil {
+	case pn532.TagTypeMIFARE:
+		if err := t.mifareInstance.WriteNDEF(msg); err != nil {
 			return fmt.Errorf("failed to write NDEF to MIFARE: %w", err)
 		}
 		return nil
-	case TagTypeUnknown:
-		return ErrUnsupportedTag
-	default:
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return ErrUnsupportedTag
 	}
+	return ErrUnsupportedTag
 }
 
 // writeNTAGBlocks writes blocks to NTAG
@@ -95,7 +90,7 @@ func (t *TagOperations) writeNTAGBlocks(_ context.Context, startBlock byte, data
 	}
 
 	// Write page by page (NTAG doesn't support multi-page write)
-	for i := 0; i < numPages; i++ {
+	for i := range numPages {
 		page := startPage + byte(i)
 
 		// Get 4 bytes for this page (pad with zeros if necessary)
@@ -133,7 +128,7 @@ func (t *TagOperations) writeMIFAREBlocks(_ context.Context, startBlock byte, da
 	numBlocks := (len(data) + 15) / 16 // Round up to nearest block
 
 	// Write block by block
-	for i := 0; i < numBlocks; i++ {
+	for i := range numBlocks {
 		block := startBlock + byte(i)
 
 		// Skip trailer blocks (every 4th block in each sector)
@@ -165,7 +160,7 @@ func (t *TagOperations) EraseBlocks(ctx context.Context, startBlock, endBlock by
 	numBlocks := int(endBlock - startBlock + 1)
 	blockSize := 16 // MIFARE block size, NTAG pages are smaller but we'll use max
 
-	if t.tagType == TagTypeNTAG {
+	if t.tagType == pn532.TagTypeNTAG {
 		blockSize = 4
 	}
 
@@ -179,100 +174,24 @@ func (t *TagOperations) Format(ctx context.Context) error {
 		return ErrNoTag
 	}
 
+	// Create an empty NDEF message for formatting
+	emptyNDEF := &pn532.NDEFMessage{
+		Records: []pn532.NDEFRecord{},
+	}
+
 	switch t.tagType {
-	case TagTypeNTAG:
+	case pn532.TagTypeNTAG:
 		// NTAG tags don't need explicit formatting
 		// Just write an empty NDEF message
-		emptyNDEF := ndef.NewMessage(ndef.Empty, "", "", nil)
 		return t.WriteNDEF(ctx, emptyNDEF)
 
-	case TagTypeMIFARE:
+	case pn532.TagTypeMIFARE:
 		// For MIFARE, formatting means writing an empty NDEF message
 		// The WriteNDEF method handles formatting if needed
-		emptyNDEF := ndef.NewMessage(ndef.Empty, "", "", nil)
 		return t.WriteNDEF(ctx, emptyNDEF)
 
-	case TagTypeUnknown:
-		return ErrUnsupportedTag
-
-	default:
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return ErrUnsupportedTag
 	}
-}
-
-// convertToPN532Message converts from ndef.Message to pn532.NDEFMessage
-func convertToPN532Message(ndefMsg *ndef.Message) *pn532.NDEFMessage {
-	if ndefMsg == nil {
-		return nil
-	}
-
-	pn532Msg := &pn532.NDEFMessage{
-		Records: make([]pn532.NDEFRecord, 0, len(ndefMsg.Records)),
-	}
-
-	for _, rec := range ndefMsg.Records {
-		pn532Rec := convertRecord(*rec)
-		pn532Msg.Records = append(pn532Msg.Records, pn532Rec)
-	}
-
-	return pn532Msg
-}
-
-// convertRecord converts a single ndef.Record to pn532.NDEFRecord
-func convertRecord(rec ndef.Record) pn532.NDEFRecord {
-	pn532Rec := pn532.NDEFRecord{}
-
-	// Determine type from TNF and type field
-	tnf := rec.TNF()
-	typeField := rec.Type()
-
-	if tnf == ndef.NFCForumWellKnownType {
-		if typeField != "" && typeField[0] == 'T' {
-			convertTextRecord(rec, &pn532Rec)
-		} else if typeField != "" && typeField[0] == 'U' {
-			convertURIRecord(rec, &pn532Rec)
-		}
-	}
-
-	// Always store raw payload
-	setRawPayload(rec, &pn532Rec)
-
-	return pn532Rec
-}
-
-// convertTextRecord handles text record conversion
-func convertTextRecord(rec ndef.Record, pn532Rec *pn532.NDEFRecord) {
-	pn532Rec.Type = pn532.NDEFTypeText
-	payload, err := rec.Payload()
-	if err == nil && payload != nil {
-		extractTextFromPayload(payload.Marshal(), pn532Rec)
-	}
-}
-
-// extractTextFromPayload extracts text content from text record payload
-func extractTextFromPayload(payloadBytes []byte, pn532Rec *pn532.NDEFRecord) {
-	if len(payloadBytes) > 3 {
-		// Skip encoding and language code
-		langLen := int(payloadBytes[0] & 0x3F)
-		if len(payloadBytes) > langLen+1 {
-			pn532Rec.Text = string(payloadBytes[langLen+1:])
-		}
-	}
-}
-
-// convertURIRecord handles URI record conversion
-func convertURIRecord(rec ndef.Record, pn532Rec *pn532.NDEFRecord) {
-	pn532Rec.Type = pn532.NDEFTypeURI
-	payload, err := rec.Payload()
-	if err == nil && payload != nil {
-		pn532Rec.URI = string(payload.Marshal())
-	}
-}
-
-// setRawPayload sets the raw payload data
-func setRawPayload(rec ndef.Record, pn532Rec *pn532.NDEFRecord) {
-	payload, err := rec.Payload()
-	if err == nil && payload != nil {
-		pn532Rec.Payload = payload.Marshal()
-	}
+	return ErrUnsupportedTag
 }

@@ -195,6 +195,17 @@ func GetSmallBuffer(size int) []byte {
 // Returns the frame data, whether a retry is needed (NACK should be sent), and any error
 // This consolidates the extractFrameData logic from UART and I2C transports
 func ExtractFrameData(buf []byte, off, frameLen int, tfiExpected byte) (data []byte, retry bool, err error) {
+	// Validate inputs to prevent panics from malformed hardware data
+	// frameLen must be > 0 since we compute dataLen = frameLen - 1
+	if off < 0 || frameLen <= 0 {
+		return nil, false, &pn532.TransportError{
+			Op:        "extractFrameData",
+			Err:       pn532.ErrFrameCorrupted,
+			Type:      pn532.ErrorTypeTransient,
+			Retryable: true,
+		}
+	}
+
 	// Move to TFI position (skip length and length checksum)
 	off += 2
 

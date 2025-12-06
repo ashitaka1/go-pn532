@@ -85,7 +85,7 @@ func executeWithRetry(ctx context.Context, config *RetryConfig, retryFunc Retrya
 	var lastErr error
 	backoff := config.InitialBackoff
 
-	for attempt := 0; attempt < config.MaxAttempts; attempt++ {
+	for attempt := range config.MaxAttempts {
 		if err := checkContextCancellation(ctx, lastErr); err != nil {
 			return err
 		}

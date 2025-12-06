@@ -1,0 +1,715 @@
+// go-pn532
+// Copyright (c) 2025 The Zaparoo Project Contributors.
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// This file is part of go-pn532.
+//
+// go-pn532 is free software; you can redistribute it and/or
+// modify it under the terms of the GNU Lesser General Public
+// License as published by the Free Software Foundation; either
+// version 3 of the License, or (at your option) any later version.
+//
+// go-pn532 is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with go-pn532; if not, write to the Free Software Foundation,
+// Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+package pn532
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// Test FeliCa tag UIDs for consistent testing
+var (
+	testFeliCaIDm = []byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF}
+	testFeliCaPMm = []byte{0x00, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+)
+
+// buildFeliCaPollingResponse builds a valid FeliCa polling response for testing
+func buildFeliCaPollingResponse(idm, pmm []byte, systemCode uint16) []byte {
+	response := make([]byte, 19)
+	response[0] = 0x01 // Polling response code
+	copy(response[1:9], idm)
+	copy(response[9:17], pmm)
+	response[17] = byte((systemCode >> 8) & 0xFF)
+	response[18] = byte(systemCode & 0xFF)
+	return response
+}
+
+// buildFeliCaReadResponse builds a FeliCa read response wrapped in DataExchange format
+// Response: 0x41 (DataExchange response) + 0x00 (success) + FeliCa data
+func buildFeliCaReadResponse(idm, blockData []byte) []byte {
+	// FeliCa read response: ResponseCode(0x07) + IDm(8) + StatusFlag1 + StatusFlag2 + BlockData
+	feliCaResponse := make([]byte, 11+len(blockData))
+	feliCaResponse[0] = 0x07 // Read response code
+	copy(feliCaResponse[1:9], idm)
+	feliCaResponse[9] = 0x00  // Status Flag 1 (success)
+	feliCaResponse[10] = 0x00 // Status Flag 2 (success)
+	copy(feliCaResponse[11:], blockData)
+
+	// Wrap in DataExchange response format
+	return append([]byte{0x41, 0x00}, feliCaResponse...)
+}
+
+// buildFeliCaWriteSuccessResponse builds a successful FeliCa write response wrapped in DataExchange format
+func buildFeliCaWriteSuccessResponse(idm []byte) []byte {
+	// FeliCa write response: ResponseCode(0x09) + IDm(8) + StatusFlag1 + StatusFlag2
+	feliCaResponse := make([]byte, 11)
+	feliCaResponse[0] = 0x09 // Write response code
+	copy(feliCaResponse[1:9], idm)
+	feliCaResponse[9] = 0x00  // Status Flag 1 (success)
+	feliCaResponse[10] = 0x00 // Status Flag 2 (success)
+	return append([]byte{0x41, 0x00}, feliCaResponse...)
+}
+
+// buildFeliCaWriteErrorResponse builds an error FeliCa write response wrapped in DataExchange format
+func buildFeliCaWriteErrorResponse(idm []byte) []byte {
+	// FeliCa write response: ResponseCode(0x09) + IDm(8) + StatusFlag1 + StatusFlag2
+	feliCaResponse := make([]byte, 11)
+	feliCaResponse[0] = 0x09 // Write response code
+	copy(feliCaResponse[1:9], idm)
+	feliCaResponse[9] = 0x01  // Status Flag 1 (error)
+	feliCaResponse[10] = 0x02 // Status Flag 2 (error)
+	return append([]byte{0x41, 0x00}, feliCaResponse...)
+}
+
+// buildFeliCaRequestServiceResponse builds a RequestService response wrapped in DataExchange format
+func buildFeliCaRequestServiceResponse(idm []byte, nodeCount int) []byte {
+	// FeliCa RequestService response: ResponseCode(0x03) + IDm(8) + NodeCount + NodeKeyVersions
+	feliCaResponse := make([]byte, 10+nodeCount*2)
+	feliCaResponse[0] = 0x03 // Request Service response code
+	copy(feliCaResponse[1:9], idm)
+	feliCaResponse[9] = byte(nodeCount)
+	// Node key versions (2 bytes each) - fill with zeros
+
+	return append([]byte{0x41, 0x00}, feliCaResponse...)
+}
+
+func TestNewFeliCaTag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		errorContains   string
+		targetData      []byte
+		expectedIDm     []byte
+		expectedPMm     []byte
+		expectedSysCode uint16
+		expectError     bool
+	}{
+		{
+			name:            "valid_polling_response_with_system_code",
+			targetData:      buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC),
+			expectError:     false,
+			expectedIDm:     testFeliCaIDm,
+			expectedPMm:     testFeliCaPMm,
+			expectedSysCode: 0x12FC,
+		},
+		{
+			name:            "valid_polling_response_minimal",
+			targetData:      buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0xFFFF)[:18],
+			expectError:     false,
+			expectedIDm:     testFeliCaIDm,
+			expectedPMm:     testFeliCaPMm,
+			expectedSysCode: 0xFFFF, // Default wildcard when no system code in response
+		},
+		{
+			name:          "target_data_too_short",
+			targetData:    []byte{0x01, 0x02, 0x03},
+			expectError:   true,
+			errorContains: "too short",
+		},
+		{
+			name:          "empty_target_data",
+			targetData:    []byte{},
+			expectError:   true,
+			errorContains: "too short",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device := createMockDevice(t)
+
+			tag, err := NewFeliCaTag(device, tt.targetData)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+				assert.Nil(t, tag)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, tag)
+
+				assert.Equal(t, TagTypeFeliCa, tag.Type())
+				assert.Equal(t, tt.expectedIDm, tag.GetIDm())
+				assert.Equal(t, tt.expectedPMm, tag.GetPMm())
+				assert.Equal(t, tt.expectedSysCode, tag.GetSystemCode())
+				assert.Equal(t, tt.expectedIDm, tag.UIDBytes()) // IDm is used as UID
+			}
+		})
+	}
+}
+
+func TestFeliCaTag_Accessors(t *testing.T) {
+	t.Parallel()
+
+	device := createMockDevice(t)
+	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+
+	tag, err := NewFeliCaTag(device, targetData)
+	require.NoError(t, err)
+
+	t.Run("GetIDm", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, testFeliCaIDm, tag.GetIDm())
+	})
+
+	t.Run("GetPMm", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, testFeliCaPMm, tag.GetPMm())
+	})
+
+	t.Run("GetSetSystemCode", func(t *testing.T) {
+		t.Parallel()
+		// Create a separate tag for this test to avoid race conditions
+		tag2, _ := NewFeliCaTag(device, targetData)
+
+		assert.Equal(t, uint16(0x12FC), tag2.GetSystemCode())
+		tag2.SetSystemCode(0xFFFF)
+		assert.Equal(t, uint16(0xFFFF), tag2.GetSystemCode())
+	})
+
+	t.Run("GetSetServiceCode", func(t *testing.T) {
+		t.Parallel()
+		// Create a separate tag for this test to avoid race conditions
+		tag3, _ := NewFeliCaTag(device, targetData)
+
+		assert.Equal(t, uint16(feliCaServiceCodeNDEFRead), tag3.GetServiceCode())
+		tag3.SetServiceCode(0x0009)
+		assert.Equal(t, uint16(0x0009), tag3.GetServiceCode())
+	})
+}
+
+func TestFeliCaTag_ReadBlockExtended(t *testing.T) {
+	t.Parallel()
+
+	// Standard 16-byte block data for testing
+	testBlockData := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		expectedData  []byte
+		block         uint16
+		expectError   bool
+	}{
+		{
+			name: "successful_read",
+			setupMock: func(mock *MockTransport) {
+				mock.SetResponse(0x40, buildFeliCaReadResponse(testFeliCaIDm, testBlockData))
+			},
+			block:        0,
+			expectError:  false,
+			expectedData: testBlockData,
+		},
+		{
+			name: "read_error_status",
+			setupMock: func(mock *MockTransport) {
+				// Build response with error status flags
+				feliCaResponse := make([]byte, 27)
+				feliCaResponse[0] = 0x07 // Read response code
+				copy(feliCaResponse[1:9], testFeliCaIDm)
+				feliCaResponse[9] = 0x01  // Status Flag 1 (error)
+				feliCaResponse[10] = 0x02 // Status Flag 2 (error)
+				mock.SetResponse(0x40, append([]byte{0x41, 0x00}, feliCaResponse...))
+			},
+			block:         0,
+			expectError:   true,
+			errorContains: "failed with status",
+		},
+		{
+			name: "invalid_response_code",
+			setupMock: func(mock *MockTransport) {
+				feliCaResponse := make([]byte, 27)
+				feliCaResponse[0] = 0x99 // Invalid response code
+				mock.SetResponse(0x40, append([]byte{0x41, 0x00}, feliCaResponse...))
+			},
+			block:         0,
+			expectError:   true,
+			errorContains: "invalid FeliCa read response code",
+		},
+		{
+			name: "response_too_short",
+			setupMock: func(mock *MockTransport) {
+				// Short FeliCa response (only 5 bytes instead of minimum 12)
+				mock.SetResponse(0x40, []byte{0x41, 0x00, 0x07, 0x01, 0x02})
+			},
+			block:         0,
+			expectError:   true,
+			errorContains: "too short",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, mockTransport := createMockDeviceWithTransport(t)
+			tt.setupMock(mockTransport)
+
+			targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+			tag, err := NewFeliCaTag(device, targetData)
+			require.NoError(t, err)
+
+			data, err := tag.ReadBlockExtended(tt.block)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedData, data)
+			}
+		})
+	}
+}
+
+func TestFeliCaTag_WriteBlockExtended(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		data          []byte
+		block         uint16
+		expectError   bool
+	}{
+		{
+			name: "successful_write",
+			setupMock: func(mock *MockTransport) {
+				mock.SetResponse(0x40, buildFeliCaWriteSuccessResponse(testFeliCaIDm))
+			},
+			block:       1,
+			data:        make([]byte, 16),
+			expectError: false,
+		},
+		{
+			name: "write_error_status",
+			setupMock: func(mock *MockTransport) {
+				mock.SetResponse(0x40, buildFeliCaWriteErrorResponse(testFeliCaIDm))
+			},
+			block:         1,
+			data:          make([]byte, 16),
+			expectError:   true,
+			errorContains: "failed with status",
+		},
+		{
+			name:          "invalid_data_length_short",
+			setupMock:     func(*MockTransport) {},
+			block:         1,
+			data:          []byte{0x01, 0x02, 0x03}, // Too short
+			expectError:   true,
+			errorContains: "must be exactly 16 bytes",
+		},
+		{
+			name:          "invalid_data_length_long",
+			setupMock:     func(*MockTransport) {},
+			block:         1,
+			data:          make([]byte, 32), // Too long
+			expectError:   true,
+			errorContains: "must be exactly 16 bytes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, mockTransport := createMockDeviceWithTransport(t)
+			tt.setupMock(mockTransport)
+
+			targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+			tag, err := NewFeliCaTag(device, targetData)
+			require.NoError(t, err)
+
+			err = tag.WriteBlockExtended(tt.block, tt.data)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestFeliCaTag_RequestService(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		serviceCodes  []uint16
+		expectError   bool
+	}{
+		{
+			name: "successful_request_single_service",
+			setupMock: func(mock *MockTransport) {
+				mock.SetResponse(0x40, buildFeliCaRequestServiceResponse(testFeliCaIDm, 1))
+			},
+			serviceCodes: []uint16{0x000B},
+			expectError:  false,
+		},
+		{
+			name: "successful_request_multiple_services",
+			setupMock: func(mock *MockTransport) {
+				mock.SetResponse(0x40, buildFeliCaRequestServiceResponse(testFeliCaIDm, 2))
+			},
+			serviceCodes: []uint16{0x000B, 0x0009},
+			expectError:  false,
+		},
+		{
+			name:          "empty_service_codes",
+			setupMock:     func(*MockTransport) {},
+			serviceCodes:  []uint16{},
+			expectError:   true,
+			errorContains: "invalid service code count",
+		},
+		{
+			name:          "too_many_service_codes",
+			setupMock:     func(*MockTransport) {},
+			serviceCodes:  make([]uint16, 33), // Max is 32
+			expectError:   true,
+			errorContains: "invalid service code count",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, mockTransport := createMockDeviceWithTransport(t)
+			tt.setupMock(mockTransport)
+
+			targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+			tag, err := NewFeliCaTag(device, targetData)
+			require.NoError(t, err)
+
+			_, err = tag.RequestService(tt.serviceCodes)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestFeliCaTag_ValidateAIB(t *testing.T) {
+	t.Parallel()
+
+	device := createMockDevice(t)
+	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+	tag, err := NewFeliCaTag(device, targetData)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		aib      []byte
+		expected bool
+	}{
+		{
+			name: "valid_aib",
+			aib: func() []byte {
+				aib := make([]byte, 16)
+				aib[0] = 0x10 // Version
+				// Calculate checksum
+				var sum uint16
+				for i := range 14 {
+					sum += uint16(aib[i])
+				}
+				aib[14] = byte((sum >> 8) & 0xFF)
+				aib[15] = byte(sum & 0xFF)
+				return aib
+			}(),
+			expected: true,
+		},
+		{
+			name: "invalid_checksum",
+			aib: func() []byte {
+				aib := make([]byte, 16)
+				aib[0] = 0x10
+				aib[14] = 0xFF // Wrong checksum
+				aib[15] = 0xFF
+				return aib
+			}(),
+			expected: false,
+		},
+		{
+			name:     "aib_too_short",
+			aib:      []byte{0x10, 0x00, 0x00},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := tag.validateAIB(tt.aib)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestFeliCaTag_UpdateAIBWithLength(t *testing.T) {
+	t.Parallel()
+
+	device := createMockDevice(t)
+	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+	tag, err := NewFeliCaTag(device, targetData)
+	require.NoError(t, err)
+
+	// Create a valid AIB
+	originalAIB := make([]byte, 16)
+	originalAIB[0] = 0x10 // Version
+
+	tests := []struct {
+		name          string
+		expectedBytes []byte
+		ndefLength    uint32
+	}{
+		{
+			name:          "zero_length",
+			ndefLength:    0,
+			expectedBytes: []byte{0x00, 0x00, 0x00},
+		},
+		{
+			name:          "small_length",
+			ndefLength:    0x123,
+			expectedBytes: []byte{0x00, 0x01, 0x23},
+		},
+		{
+			name:          "large_length",
+			ndefLength:    0xABCDEF,
+			expectedBytes: []byte{0xAB, 0xCD, 0xEF},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			newAIB := tag.updateAIBWithLength(originalAIB, tt.ndefLength)
+
+			// Check NDEF length bytes
+			assert.Equal(t, tt.expectedBytes[0], newAIB[11])
+			assert.Equal(t, tt.expectedBytes[1], newAIB[12])
+			assert.Equal(t, tt.expectedBytes[2], newAIB[13])
+
+			// Verify checksum is valid
+			assert.True(t, tag.validateAIB(newAIB), "AIB checksum should be valid")
+		})
+	}
+}
+
+func TestFeliCaTag_ValidateWritePermissions(t *testing.T) {
+	t.Parallel()
+
+	device := createMockDevice(t)
+	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+	tag, err := NewFeliCaTag(device, targetData)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name          string
+		errorContains string
+		aib           []byte
+		expectError   bool
+	}{
+		{
+			name: "writable",
+			aib: func() []byte {
+				aib := make([]byte, 16)
+				aib[9] = 0x00  // Write flag (writable)
+				aib[10] = 0x00 // RW flag (read-write)
+				return aib
+			}(),
+			expectError: false,
+		},
+		{
+			name: "write_protected",
+			aib: func() []byte {
+				aib := make([]byte, 16)
+				aib[9] = 0x0F // Write flag (write-protected)
+				aib[10] = 0x00
+				return aib
+			}(),
+			expectError:   true,
+			errorContains: "write-protected",
+		},
+		{
+			name: "read_only",
+			aib: func() []byte {
+				aib := make([]byte, 16)
+				aib[9] = 0x00
+				aib[10] = 0x01 // RW flag (read-only)
+				return aib
+			}(),
+			expectError:   true,
+			errorContains: "read-only",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tag.validateWritePermissions(tt.aib)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestFeliCaTag_ValidateDataSize(t *testing.T) {
+	t.Parallel()
+
+	device := createMockDevice(t)
+	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+	tag, err := NewFeliCaTag(device, targetData)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		data        []byte
+		maxBytes    uint32
+		expectError bool
+	}{
+		{
+			name:        "within_capacity",
+			data:        make([]byte, 100),
+			maxBytes:    1000,
+			expectError: false,
+		},
+		{
+			name:        "at_capacity",
+			data:        make([]byte, 1000),
+			maxBytes:    1000,
+			expectError: false,
+		},
+		{
+			name:        "exceeds_capacity",
+			data:        make([]byte, 1001),
+			maxBytes:    1000,
+			expectError: true,
+		},
+		{
+			name:        "empty_data",
+			data:        []byte{},
+			maxBytes:    1000,
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tag.validateDataSize(tt.data, tt.maxBytes)
+
+			if tt.expectError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestFeliCaTag_ReadBlock_UsesReadBlockExtended(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	testBlockData := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	mockTransport.SetResponse(0x40, buildFeliCaReadResponse(testFeliCaIDm, testBlockData))
+
+	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+	tag, err := NewFeliCaTag(device, targetData)
+	require.NoError(t, err)
+
+	// ReadBlock should delegate to ReadBlockExtended
+	data, err := tag.ReadBlock(5)
+	require.NoError(t, err)
+	assert.Len(t, data, 16)
+}
+
+func TestFeliCaTag_WriteBlock_UsesWriteBlockExtended(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	mockTransport.SetResponse(0x40, buildFeliCaWriteSuccessResponse(testFeliCaIDm))
+
+	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
+	tag, err := NewFeliCaTag(device, targetData)
+	require.NoError(t, err)
+
+	// WriteBlock should delegate to WriteBlockExtended
+	err = tag.WriteBlock(5, make([]byte, 16))
+	require.NoError(t, err)
+}
+
+func TestFeliCaTag_Constants(t *testing.T) {
+	t.Parallel()
+
+	// Verify FeliCa constants match JIS X 6319-4 specification
+	assert.Equal(t, byte(0x00), byte(feliCaCmdPolling))
+	assert.Equal(t, byte(0x02), byte(feliCaCmdRequestService))
+	assert.Equal(t, byte(0x04), byte(feliCaCmdRequestResponse))
+	assert.Equal(t, byte(0x06), byte(feliCaCmdReadWithoutEncryption))
+	assert.Equal(t, byte(0x08), byte(feliCaCmdWriteWithoutEncryption))
+	assert.Equal(t, byte(0x0A), byte(feliCaCmdAuthentication))
+
+	assert.Equal(t, uint16(0x12FC), uint16(feliCaSystemCodeNDEF))
+	assert.Equal(t, uint16(0xFFFF), uint16(feliCaSystemCodeCommon))
+
+	assert.Equal(t, uint16(0x000B), uint16(feliCaServiceCodeNDEFRead))
+	assert.Equal(t, uint16(0x0009), uint16(feliCaServiceCodeNDEFWrite))
+
+	assert.Equal(t, 16, feliCaBlockSize)
+	assert.Equal(t, 8, feliCaIDmLength)
+	assert.Equal(t, 8, feliCaPMmLength)
+}

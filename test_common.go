@@ -28,10 +28,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// createMockDeviceWithTransport creates a device with a mock transport for testing
+// createMockDeviceWithTransport creates a device with a mock transport for testing.
+// By default, it simulates that a target has been selected (as if InListPassiveTarget succeeded).
+// This is appropriate for tag operation tests (read/write/auth).
+// Tests that specifically need to test polling/selection behavior should call
+// mockTransport.DeselectTarget() after setup.
 func createMockDeviceWithTransport(t *testing.T) (*Device, *MockTransport) {
 	mockTransport := NewMockTransport()
 	device, err := New(mockTransport)
 	require.NoError(t, err)
+	// Select target by default - most tests are for tag operations
+	mockTransport.SelectTarget()
 	return device, mockTransport
 }

@@ -65,6 +65,25 @@ func (d *Device) InitContext(ctx context.Context) error {
 	return nil
 }
 
+// Reset reinitializes the device connection after a power loss, sleep/wake cycle,
+// or communication failure. This clears internal state and re-runs the initialization
+// sequence (GetFirmwareVersion + SAMConfiguration).
+//
+// Use this when:
+//   - Host device wakes from sleep
+//   - PN532 module was power cycled
+//   - Communication becomes unreliable
+//
+// If Reset fails, consider closing and reopening the transport entirely.
+func (d *Device) Reset(ctx context.Context) error {
+	// Clear internal state
+	d.currentTarget = 0
+	d.firmwareVersion = nil
+
+	// Reinitialize the device
+	return d.InitContext(ctx)
+}
+
 // shouldSkipFirmwareVersion checks if transport supports firmware version retrieval
 func (*Device) shouldSkipFirmwareVersion() bool {
 	// All transports now support firmware version retrieval
@@ -646,6 +665,15 @@ func (d *Device) InSelect(ctx context.Context, targetNumber byte) error {
 	return nil
 }
 
+// SelectTag selects the specified detected tag for communication.
+// This is a convenience wrapper around InSelect that uses the tag's stored target number.
+func (d *Device) SelectTag(ctx context.Context, tag *DetectedTag) error {
+	if tag == nil {
+		return errors.New("tag cannot be nil")
+	}
+	return d.InSelect(ctx, tag.TargetNumber)
+}
+
 // InAutoPoll polls for targets with context support
 func (d *Device) InAutoPoll(
 	ctx context.Context, pollCount, pollPeriod byte, targetTypes []AutoPollTarget,
@@ -682,7 +710,7 @@ func (d *Device) InAutoPoll(
 	results := []AutoPollResult{}
 	offset := 2
 
-	for i := 0; i < int(numTargets); i++ {
+	for i := range numTargets {
 		if offset+2 > len(res) {
 			return nil, fmt.Errorf("%w: response truncated when expecting target %d header", ErrInvalidResponse, i+1)
 		}
@@ -910,8 +938,8 @@ func (d *Device) parseInListPassiveTargetResponse(res []byte) ([]*DetectedTag, e
 	tags := make([]*DetectedTag, 0, int(numTargets))
 	offset := 2
 
-	for i := 0; i < int(numTargets); i++ {
-		tag, newOffset, err := d.parseTargetAtOffset(res, offset, i+1)
+	for i := range numTargets {
+		tag, newOffset, err := d.parseTargetAtOffset(res, offset, int(i)+1)
 		if err != nil {
 			return nil, err
 		}

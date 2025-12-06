@@ -24,11 +24,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ZaparooProject/go-pn532"
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 )
 
 // Session handles continuous card monitoring with state machine
@@ -43,8 +43,8 @@ type Session struct {
 	ackChan        chan struct{}
 	actor          *DeviceActor
 	state          CardState
-	stateMutex     sync.RWMutex
-	writeMutex     sync.Mutex
+	stateMutex     syncutil.RWMutex
+	writeMutex     syncutil.Mutex
 	isPaused       atomic.Bool
 	closed         atomic.Bool // Prevents callbacks from executing after Close()
 }
@@ -71,19 +71,28 @@ func NewActorBasedSession(device *pn532.Device, config *Config) *Session {
 	// Create DeviceActor with callbacks that delegate to session callbacks
 	callbacks := DeviceCallbacks{
 		OnCardDetected: func(tag *pn532.DetectedTag) error {
-			if session.OnCardDetected != nil {
-				return session.OnCardDetected(tag)
+			session.stateMutex.RLock()
+			cb := session.OnCardDetected
+			session.stateMutex.RUnlock()
+			if cb != nil {
+				return cb(tag)
 			}
 			return nil
 		},
 		OnCardRemoved: func() {
-			if session.OnCardRemoved != nil {
-				session.OnCardRemoved()
+			session.stateMutex.RLock()
+			cb := session.OnCardRemoved
+			session.stateMutex.RUnlock()
+			if cb != nil {
+				cb()
 			}
 		},
 		OnCardChanged: func(tag *pn532.DetectedTag) error {
-			if session.OnCardChanged != nil {
-				return session.OnCardChanged(tag)
+			session.stateMutex.RLock()
+			cb := session.OnCardChanged
+			session.stateMutex.RUnlock()
+			if cb != nil {
+				return cb(tag)
 			}
 			return nil
 		},
@@ -118,6 +127,27 @@ func (s *Session) GetDevice() *pn532.Device {
 // GetDeviceActor returns the underlying DeviceActor for actor-based sessions
 func (s *Session) GetDeviceActor() *DeviceActor {
 	return s.actor
+}
+
+// SetOnCardDetected sets the callback for when a card is detected.
+func (s *Session) SetOnCardDetected(callback func(*pn532.DetectedTag) error) {
+	s.stateMutex.Lock()
+	defer s.stateMutex.Unlock()
+	s.OnCardDetected = callback
+}
+
+// SetOnCardRemoved sets the callback for when a card is removed.
+func (s *Session) SetOnCardRemoved(callback func()) {
+	s.stateMutex.Lock()
+	defer s.stateMutex.Unlock()
+	s.OnCardRemoved = callback
+}
+
+// SetOnCardChanged sets the callback for when the card changes.
+func (s *Session) SetOnCardChanged(callback func(*pn532.DetectedTag) error) {
+	s.stateMutex.Lock()
+	defer s.stateMutex.Unlock()
+	s.OnCardChanged = callback
 }
 
 // Close cleans up the monitor resources
@@ -449,11 +479,12 @@ func (s *Session) handleCardRemoval() {
 	if wasPresent {
 		s.state.TransitionToIdle()
 	}
+	onRemoved := s.OnCardRemoved
 	s.stateMutex.Unlock()
 
 	// Call callback outside the lock to avoid potential deadlocks
-	if wasPresent && s.OnCardRemoved != nil {
-		s.OnCardRemoved()
+	if wasPresent && onRemoved != nil {
+		onRemoved()
 	}
 }
 
@@ -513,19 +544,21 @@ func (s *Session) updateCardState(detectedTag *pn532.DetectedTag) (bool, error) 
 	currentUID := detectedTag.UID
 	cardType := string(detectedTag.Type)
 
-	// Check state and determine what callbacks to call without holding lock
+	// Capture state and callbacks under lock to avoid races
 	s.stateMutex.RLock()
 	wasPresent := s.state.Present
 	wasChanged := wasPresent && s.state.LastUID != currentUID
+	onDetected := s.OnCardDetected
+	onChanged := s.OnCardChanged
 	s.stateMutex.RUnlock()
 
-	// Call callbacks outside of any locks with panic recovery
-	if !wasPresent && s.OnCardDetected != nil {
-		if err := s.safeCallCallback(s.OnCardDetected, detectedTag, "OnCardDetected"); err != nil {
+	// Call callbacks outside of lock with panic recovery
+	if !wasPresent && onDetected != nil {
+		if err := s.safeCallCallback(onDetected, detectedTag, "OnCardDetected"); err != nil {
 			return false, err
 		}
-	} else if wasChanged && s.OnCardChanged != nil {
-		if err := s.safeCallCallback(s.OnCardChanged, detectedTag, "OnCardChanged"); err != nil {
+	} else if wasChanged && onChanged != nil {
+		if err := s.safeCallCallback(onChanged, detectedTag, "OnCardChanged"); err != nil {
 			return false, err
 		}
 	}

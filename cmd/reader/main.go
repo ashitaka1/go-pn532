@@ -37,6 +37,7 @@ import (
 	_ "github.com/ZaparooProject/go-pn532/detection/spi"
 	_ "github.com/ZaparooProject/go-pn532/detection/uart"
 	"github.com/ZaparooProject/go-pn532/polling"
+	"github.com/ZaparooProject/go-pn532/tagops"
 	"github.com/ZaparooProject/go-pn532/transport/i2c"
 	"github.com/ZaparooProject/go-pn532/transport/spi"
 	"github.com/ZaparooProject/go-pn532/transport/uart"
@@ -173,6 +174,74 @@ func connectToDevice(ctx context.Context, cfg *config) (*pn532.Device, error) {
 	return device, nil
 }
 
+// printTagInfo prints detailed information about a detected tag
+func printTagInfo(info *tagops.TagInfo) {
+	switch info.Type {
+	case pn532.TagTypeNTAG:
+		_, _ = fmt.Printf("  NTAG variant: %s\n", info.NTAGType)
+		_, _ = fmt.Printf("  Total pages: %d, User memory: %d bytes\n", info.TotalPages, info.UserMemory)
+	case pn532.TagTypeMIFARE:
+		_, _ = fmt.Printf("  MIFARE variant: %s\n", info.MIFAREType)
+		_, _ = fmt.Printf("  Sectors: %d, Total memory: %d bytes\n", info.Sectors, info.TotalMemory)
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
+		// No additional details for these types
+	}
+}
+
+// printNDEFRecord prints a single NDEF record
+func printNDEFRecord(i int, record *pn532.NDEFRecord) {
+	switch {
+	case record.Text != "":
+		_, _ = fmt.Printf("    [%d] Text: %q\n", i, record.Text)
+	case record.URI != "":
+		_, _ = fmt.Printf("    [%d] URI: %s\n", i, record.URI)
+	default:
+		_, _ = fmt.Printf("    [%d] Type: %s\n", i, record.Type)
+	}
+}
+
+// printNDEFMessage prints NDEF message contents
+func printNDEFMessage(ndefMsg *pn532.NDEFMessage, err error) {
+	switch {
+	case err != nil:
+		_, _ = fmt.Printf("  NDEF: not readable (%v)\n", err)
+	case ndefMsg != nil && len(ndefMsg.Records) > 0:
+		_, _ = fmt.Printf("  NDEF records: %d\n", len(ndefMsg.Records))
+		for i := range ndefMsg.Records {
+			printNDEFRecord(i, &ndefMsg.Records[i])
+		}
+	default:
+		_, _ = fmt.Println("  NDEF: empty or not formatted")
+	}
+}
+
+// handleTagDetected processes a detected tag using tagops
+func handleTagDetected(ctx context.Context, ops *tagops.TagOperations, detectedTag *pn532.DetectedTag) error {
+	// Print basic tag information with human-readable type name
+	typeName := tagops.TagTypeDisplayName(detectedTag.Type)
+	_, _ = fmt.Printf("\nTag detected: UID=%s Type=%s\n", detectedTag.UID, typeName)
+
+	// Use tagops to detect and get detailed tag info
+	if err := ops.DetectTag(ctx); err != nil {
+		_, _ = fmt.Printf("  Tag type detection: %v\n", err)
+		return nil // Continue monitoring
+	}
+
+	// Get and print detailed tag information
+	info, err := ops.GetTagInfo()
+	if err != nil {
+		_, _ = fmt.Printf("  Failed to get tag info: %v\n", err)
+		return nil
+	}
+	printTagInfo(info)
+
+	// Try to read NDEF data using tagops (returns *pn532.NDEFMessage directly)
+	ndefMsg, ndefErr := ops.ReadNDEF(ctx)
+	printNDEFMessage(ndefMsg, ndefErr)
+
+	return nil
+}
+
 func runReadMode(ctx context.Context, device *pn532.Device, _ *config) error {
 	// Create session with default configuration
 	sessionConfig := polling.DefaultConfig()
@@ -187,26 +256,18 @@ func runReadMode(ctx context.Context, device *pn532.Device, _ *config) error {
 
 	_, _ = fmt.Println("Starting continuous tag monitoring. Press Ctrl+C to stop...")
 
-	// Set up tag detection callback
-	session.OnCardDetected = func(detectedTag *pn532.DetectedTag) error {
-		// Create tag interface to get detailed information
-		tag, err := device.CreateTag(detectedTag)
-		if err != nil {
-			_, _ = fmt.Printf("Failed to create tag interface: %v\n", err)
-			return nil // Continue monitoring
-		}
+	// Use tagops for high-level tag operations
+	ops := tagops.New(device)
 
-		// Print tag information
-		_, _ = fmt.Printf("Tag detected: UID=%s Type=%s\n", detectedTag.UID, detectedTag.Type)
-		_, _ = fmt.Print(tag.DebugInfo())
+	// Set up tag detection callback using the setter method
+	session.SetOnCardDetected(func(detectedTag *pn532.DetectedTag) error {
+		return handleTagDetected(ctx, ops, detectedTag)
+	})
 
-		return nil
-	}
-
-	// Set up tag removal callback
-	session.OnCardRemoved = func() {
+	// Set up tag removal callback using the setter method
+	session.SetOnCardRemoved(func() {
 		_, _ = fmt.Println("Tag removed - ready for next tag...")
-	}
+	})
 
 	// Start the session in a goroutine to allow for immediate cancellation
 	done := make(chan error, 1)
@@ -291,6 +352,104 @@ func runWriteMode(ctx context.Context, device *pn532.Device, cfg *config) error 
 	return nil
 }
 
+func diagnoseFirmware(ctx context.Context, device *pn532.Device) {
+	version, err := device.GetFirmwareVersion(ctx)
+	if err != nil {
+		_, _ = fmt.Printf("[✗] Firmware: %v\n", err)
+		return
+	}
+	var protocols []string
+	if version.SupportIso14443a {
+		protocols = append(protocols, "ISO14443A")
+	}
+	if version.SupportIso14443b {
+		protocols = append(protocols, "ISO14443B")
+	}
+	if version.SupportIso18092 {
+		protocols = append(protocols, "ISO18092")
+	}
+	_, _ = fmt.Printf("[✓] Firmware: v%s (%s)\n", version.Version, strings.Join(protocols, ", "))
+}
+
+func diagnoseRTT(ctx context.Context, device *pn532.Device) {
+	const samples = 10
+	var rtts []time.Duration
+	for range samples {
+		start := time.Now()
+		_, err := device.GetFirmwareVersion(ctx)
+		if err == nil {
+			rtts = append(rtts, time.Since(start))
+		}
+	}
+	if len(rtts) == 0 {
+		_, _ = fmt.Println("[✗] Communication: Failed to measure RTT")
+		return
+	}
+	minRTT, maxRTT, sumRTT := rtts[0], rtts[0], time.Duration(0)
+	for _, rtt := range rtts {
+		sumRTT += rtt
+		if rtt < minRTT {
+			minRTT = rtt
+		}
+		if rtt > maxRTT {
+			maxRTT = rtt
+		}
+	}
+	avgRTT := sumRTT / time.Duration(len(rtts))
+	_, _ = fmt.Printf("[✓] Communication: RTT min=%s avg=%s max=%s (%d samples)\n",
+		minRTT.Round(time.Millisecond), avgRTT.Round(time.Millisecond), maxRTT.Round(time.Millisecond), len(rtts))
+}
+
+func diagnoseTest(ctx context.Context, device *pn532.Device, testNum byte, name string) {
+	result, err := device.Diagnose(ctx, testNum, nil)
+	switch {
+	case err != nil:
+		_, _ = fmt.Printf("[✗] %s: %v\n", name, err)
+	case result.Success:
+		_, _ = fmt.Printf("[✓] %s: OK\n", name)
+	default:
+		_, _ = fmt.Printf("[✗] %s: FAILED\n", name)
+	}
+}
+
+func diagnoseRFField(ctx context.Context, device *pn532.Device) {
+	status, err := device.GetGeneralStatus(ctx)
+	switch {
+	case err != nil:
+		_, _ = fmt.Printf("[✗] RF field: %v\n", err)
+	case status.FieldPresent:
+		_, _ = fmt.Println("[✓] RF field: Active")
+	default:
+		_, _ = fmt.Println("[✓] RF field: Inactive (will activate on poll)")
+	}
+}
+
+func diagnoseTagDetection(ctx context.Context, device *pn532.Device) {
+	detectCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	tag, err := device.DetectTag(detectCtx)
+	if err != nil {
+		_, _ = fmt.Println("[✓] Tag detection: Ready (no tag present)")
+	} else {
+		_, _ = fmt.Printf("[✓] Tag detection: %s (UID: %s)\n", tag.Type, tag.UID)
+	}
+}
+
+func runDiagnostics(ctx context.Context, device *pn532.Device) {
+	_, _ = fmt.Println("\nPN532 Diagnostics")
+	_, _ = fmt.Println("=================")
+
+	diagnoseFirmware(ctx, device)
+	diagnoseRTT(ctx, device)
+	diagnoseTest(ctx, device, pn532.DiagnoseROMTest, "ROM test")
+	diagnoseTest(ctx, device, pn532.DiagnoseRAMTest, "RAM test")
+	diagnoseTest(ctx, device, pn532.DiagnoseSelfAntennaTest, "Antenna test")
+	diagnoseRFField(ctx, device)
+	diagnoseTagDetection(ctx, device)
+
+	_, _ = fmt.Println()
+}
+
 func run(ctx context.Context, cfg *config) error {
 	// Connect to device
 	device, err := connectToDevice(ctx, cfg)
@@ -302,6 +461,9 @@ func run(ctx context.Context, cfg *config) error {
 			_, _ = fmt.Fprintf(os.Stderr, "Failed to close device: %v\n", err)
 		}
 	}()
+
+	// Run diagnostics on startup
+	runDiagnostics(ctx, device)
 
 	// Mode selection based on writeText parameter
 	if cfg.writeText != "" {

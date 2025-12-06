@@ -23,8 +23,10 @@ package pn532
 import (
 	"context"
 	"errors"
-	"sync"
+	"fmt"
 	"time"
+
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 )
 
 // Transport defines the interface for communication with PN532 devices.
@@ -86,31 +88,49 @@ type TransportCapabilityChecker interface {
 	HasCapability(capability TransportCapability) bool
 }
 
+// PN532PowerMode represents the power mode state of the PN532
+type PN532PowerMode int
+
+const (
+	// PN532PowerModeNormal is the normal operating mode
+	PN532PowerModeNormal PN532PowerMode = iota
+	// PN532PowerModeSleep is the sleep mode (low power)
+	PN532PowerModeSleep
+	// PN532PowerModePowerDown is the power down mode (lowest power)
+	PN532PowerModePowerDown
+)
+
 // MockTransport provides a mock implementation of Transport for testing
 type MockTransport struct {
-	responses map[byte][]byte
-	callCount map[byte]int
-	errorMap  map[byte]error
-	timeout   time.Duration
-	delay     time.Duration
-	mu        sync.RWMutex
-	connected bool
+	responses      map[byte][]byte
+	callCount      map[byte]int
+	errorMap       map[byte]error
+	timeout        time.Duration
+	delay          time.Duration
+	powerMode      PN532PowerMode
+	mu             syncutil.RWMutex
+	connected      bool
+	rfFieldOn      bool
+	targetSelected bool
 }
 
 // NewMockTransport creates a new mock transport
 func NewMockTransport() *MockTransport {
 	return &MockTransport{
-		connected: true,
-		timeout:   time.Second,
-		responses: make(map[byte][]byte),
-		callCount: make(map[byte]int),
-		delay:     0,
-		errorMap:  make(map[byte]error),
+		connected:      true,
+		timeout:        time.Second,
+		responses:      make(map[byte][]byte),
+		callCount:      make(map[byte]int),
+		delay:          0,
+		errorMap:       make(map[byte]error),
+		powerMode:      PN532PowerModeNormal,
+		rfFieldOn:      false,
+		targetSelected: false,
 	}
 }
 
 // SendCommand implements Transport interface
-func (m *MockTransport) SendCommand(cmd byte, _ []byte) ([]byte, error) {
+func (m *MockTransport) SendCommand(cmd byte, data []byte) ([]byte, error) {
 	m.mu.RLock()
 	connected := m.connected
 	delay := m.delay
@@ -118,6 +138,11 @@ func (m *MockTransport) SendCommand(cmd byte, _ []byte) ([]byte, error) {
 
 	if !connected {
 		return nil, errors.New("transport not connected")
+	}
+
+	// Validate PN532 state machine
+	if err := m.validateState(cmd); err != nil {
+		return nil, err
 	}
 
 	// Simulate hardware delay if configured
@@ -135,6 +160,9 @@ func (m *MockTransport) SendCommand(cmd byte, _ []byte) ([]byte, error) {
 		return nil, err
 	}
 
+	// Update state based on command
+	m.updateState(cmd, data)
+
 	// Return configured response
 	if response, exists := m.responses[cmd]; exists {
 		m.mu.Unlock()
@@ -147,7 +175,7 @@ func (m *MockTransport) SendCommand(cmd byte, _ []byte) ([]byte, error) {
 }
 
 // SendCommandWithContext implements Transport interface with context support
-func (m *MockTransport) SendCommandWithContext(ctx context.Context, cmd byte, _ []byte) ([]byte, error) {
+func (m *MockTransport) SendCommandWithContext(ctx context.Context, cmd byte, data []byte) ([]byte, error) {
 	// Check context cancellation first
 	select {
 	case <-ctx.Done():
@@ -162,6 +190,11 @@ func (m *MockTransport) SendCommandWithContext(ctx context.Context, cmd byte, _ 
 
 	if !connected {
 		return nil, errors.New("transport not connected")
+	}
+
+	// Validate PN532 state machine
+	if err := m.validateState(cmd); err != nil {
+		return nil, err
 	}
 
 	// Simulate hardware delay if configured with context awareness
@@ -182,6 +215,9 @@ func (m *MockTransport) SendCommandWithContext(ctx context.Context, cmd byte, _ 
 		m.mu.Unlock()
 		return nil, err
 	}
+
+	// Update state based on command
+	m.updateState(cmd, data)
 
 	// Return configured response
 	if response, exists := m.responses[cmd]; exists {
@@ -266,5 +302,115 @@ func (m *MockTransport) Reset() {
 	m.mu.Lock()
 	m.callCount = make(map[byte]int)
 	m.connected = true
+	m.powerMode = PN532PowerModeNormal
+	m.rfFieldOn = false
+	m.targetSelected = false
 	m.mu.Unlock()
+}
+
+// PN532 state machine methods
+
+// validateState checks if the current state allows the command
+func (m *MockTransport) validateState(cmd byte) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Check power mode first
+	if m.powerMode != PN532PowerModeNormal {
+		// Only SAMConfiguration and GetFirmwareVersion can wake up the device
+		if cmd != cmdSamConfiguration && cmd != cmdGetFirmwareVersion {
+			return fmt.Errorf("PN532 in power down mode, cannot execute command 0x%02X", cmd)
+		}
+	}
+
+	// Commands that require RF field to be on
+	switch cmd {
+	case cmdInListPassiveTarget:
+		// InListPassiveTarget needs RF field on (it will be turned on by the command itself)
+		// No additional validation needed
+	case cmdInDataExchange, cmdInCommunicateThru:
+		// These require a target to be selected
+		if !m.targetSelected {
+			return fmt.Errorf("no target selected, cannot execute command 0x%02X (call InListPassiveTarget first)", cmd)
+		}
+	case cmdInRelease, cmdInSelect:
+		// These require a target to be selected
+		if !m.targetSelected {
+			return fmt.Errorf("no target selected, cannot execute command 0x%02X", cmd)
+		}
+	}
+
+	return nil
+}
+
+// updateState updates the PN532 state based on the command
+// Must be called with m.mu held
+func (m *MockTransport) updateState(cmd byte, _ []byte) {
+	switch cmd {
+	case cmdSamConfiguration:
+		// SAMConfiguration wakes up the device
+		m.powerMode = PN532PowerModeNormal
+	case cmdPowerDown:
+		// PowerDown puts device to sleep
+		m.powerMode = PN532PowerModePowerDown
+		m.targetSelected = false // Target lost when powering down
+	case cmdRFConfiguration:
+		// RF configuration can turn field on/off
+		// For simplicity, assume RF is turned on when this command is sent
+		m.rfFieldOn = true
+	case cmdInListPassiveTarget:
+		// When a target is successfully polled, RF field is on and target is selected
+		m.rfFieldOn = true
+		m.targetSelected = true
+	case cmdInRelease:
+		// Release deselects the target
+		m.targetSelected = false
+	}
+}
+
+// EnableRFField turns on the RF field for testing
+func (m *MockTransport) EnableRFField() {
+	m.mu.Lock()
+	m.rfFieldOn = true
+	m.mu.Unlock()
+}
+
+// DisableRFField turns off the RF field for testing (also deselects target)
+func (m *MockTransport) DisableRFField() {
+	m.mu.Lock()
+	m.rfFieldOn = false
+	m.targetSelected = false // Target lost when RF field is off
+	m.mu.Unlock()
+}
+
+// SelectTarget simulates a target being selected (as if InListPassiveTarget succeeded)
+func (m *MockTransport) SelectTarget() {
+	m.mu.Lock()
+	m.rfFieldOn = true
+	m.targetSelected = true
+	m.mu.Unlock()
+}
+
+// DeselectTarget clears the target selection
+func (m *MockTransport) DeselectTarget() {
+	m.mu.Lock()
+	m.targetSelected = false
+	m.mu.Unlock()
+}
+
+// SetPowerMode sets the power mode for testing
+func (m *MockTransport) SetPowerMode(mode PN532PowerMode) {
+	m.mu.Lock()
+	m.powerMode = mode
+	if mode != PN532PowerModeNormal {
+		m.targetSelected = false
+	}
+	m.mu.Unlock()
+}
+
+// GetState returns the current PN532 state (for test assertions)
+func (m *MockTransport) GetState() (powerMode PN532PowerMode, rfFieldOn, targetSelected bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.powerMode, m.rfFieldOn, m.targetSelected
 }

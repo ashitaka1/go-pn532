@@ -23,6 +23,8 @@ package pn532
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 )
 
 // Error categories for better error handling and retry logic
@@ -259,4 +261,204 @@ func NewChecksumMismatchError(op, port string) *TransportError {
 // NewTransportNotReadyError creates a transport not ready error (timeout)
 func NewTransportNotReadyError(op, port string) *TransportError {
 	return NewTransportError(op, port, ErrTransportNotReady, ErrorTypeTimeout)
+}
+
+// =============================================================================
+// Wire Trace Logging
+// =============================================================================
+// TraceableError embeds wire-level trace data in errors, allowing consumer
+// applications to access debug information when operations fail.
+
+// TraceDirection indicates the direction of wire data
+type TraceDirection string
+
+const (
+	// TraceTX indicates data sent to the PN532
+	TraceTX TraceDirection = "TX"
+	// TraceRX indicates data received from the PN532
+	TraceRX TraceDirection = "RX"
+)
+
+// TraceEntry represents a single wire-level operation
+type TraceEntry struct {
+	Timestamp time.Time
+	Direction TraceDirection
+	Note      string
+	Data      []byte
+}
+
+// String formats a trace entry for display
+func (e TraceEntry) String() string {
+	hexData := formatHexBytes(e.Data)
+	if e.Note != "" {
+		return fmt.Sprintf("[%s] %s: %s (%s)", e.Timestamp.Format("15:04:05.000"), e.Direction, hexData, e.Note)
+	}
+	return fmt.Sprintf("[%s] %s: %s", e.Timestamp.Format("15:04:05.000"), e.Direction, hexData)
+}
+
+// TraceableError wraps an error with wire-level trace data for debugging.
+// Consumer applications can use errors.As() to extract trace information:
+//
+//	var te *pn532.TraceableError
+//	if errors.As(err, &te) {
+//	    log.Printf("Wire trace:\n%s", te.FormatTrace())
+//	}
+type TraceableError struct {
+	Err       error
+	Transport string
+	Port      string
+	Trace     []TraceEntry
+}
+
+// Error implements the error interface
+func (e *TraceableError) Error() string {
+	return e.Err.Error()
+}
+
+// Unwrap returns the underlying error for errors.Is/As compatibility
+func (e *TraceableError) Unwrap() error {
+	return e.Err
+}
+
+// FormatTrace returns a human-readable formatted trace log
+func (e *TraceableError) FormatTrace() string {
+	if len(e.Trace) == 0 {
+		return fmt.Sprintf("[%s:%s] (no trace data)", e.Transport, e.Port)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("[%s:%s] Wire trace (%d entries):\n", e.Transport, e.Port, len(e.Trace)))
+
+	for _, entry := range e.Trace {
+		direction := ">"
+		if entry.Direction == TraceRX {
+			direction = "<"
+		}
+		hexData := formatHexBytes(entry.Data)
+		if entry.Note != "" {
+			sb.WriteString(fmt.Sprintf("  %s %s (%s)\n", direction, hexData, entry.Note))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", direction, hexData))
+		}
+	}
+
+	return sb.String()
+}
+
+// formatHexBytes formats a byte slice as space-separated hex values
+func formatHexBytes(data []byte) string {
+	if len(data) == 0 {
+		return "(empty)"
+	}
+	if len(data) > 32 {
+		// Truncate long data with ellipsis
+		parts := make([]string, 32)
+		for i := range 32 {
+			parts[i] = fmt.Sprintf("%02X", data[i])
+		}
+		return strings.Join(parts, " ") + fmt.Sprintf(" ... (%d bytes total)", len(data))
+	}
+	parts := make([]string, len(data))
+	for i, b := range data {
+		parts[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(parts, " ")
+}
+
+// TraceBuffer collects trace entries during a command operation.
+// It uses a fixed-size circular buffer to limit memory usage.
+type TraceBuffer struct {
+	transport string
+	port      string
+	entries   []TraceEntry
+	maxSize   int
+}
+
+// NewTraceBuffer creates a new trace buffer with the specified capacity
+func NewTraceBuffer(transport, port string, maxSize int) *TraceBuffer {
+	if maxSize <= 0 {
+		maxSize = 16 // Default to 16 entries
+	}
+	return &TraceBuffer{
+		entries:   make([]TraceEntry, 0, maxSize),
+		maxSize:   maxSize,
+		transport: transport,
+		port:      port,
+	}
+}
+
+// RecordTX records a transmission to the PN532
+func (tb *TraceBuffer) RecordTX(data []byte, note string) {
+	tb.record(TraceTX, data, note)
+}
+
+// RecordRX records data received from the PN532
+func (tb *TraceBuffer) RecordRX(data []byte, note string) {
+	tb.record(TraceRX, data, note)
+}
+
+// RecordTimeout records a timeout event
+func (tb *TraceBuffer) RecordTimeout(note string) {
+	tb.record(TraceRX, nil, "TIMEOUT: "+note)
+}
+
+// record adds an entry to the buffer, evicting oldest if full
+func (tb *TraceBuffer) record(dir TraceDirection, data []byte, note string) {
+	// Make a copy of data to avoid aliasing issues
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	entry := TraceEntry{
+		Direction: dir,
+		Data:      dataCopy,
+		Timestamp: time.Now(),
+		Note:      note,
+	}
+
+	if len(tb.entries) >= tb.maxSize {
+		// Shift entries to make room (evict oldest)
+		copy(tb.entries, tb.entries[1:])
+		tb.entries[len(tb.entries)-1] = entry
+	} else {
+		tb.entries = append(tb.entries, entry)
+	}
+}
+
+// WrapError wraps an error with the collected trace data.
+// Returns nil if err is nil.
+func (tb *TraceBuffer) WrapError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	// Make a copy of entries
+	entriesCopy := make([]TraceEntry, len(tb.entries))
+	copy(entriesCopy, tb.entries)
+
+	return &TraceableError{
+		Err:       err,
+		Trace:     entriesCopy,
+		Transport: tb.transport,
+		Port:      tb.port,
+	}
+}
+
+// Clear resets the trace buffer
+func (tb *TraceBuffer) Clear() {
+	tb.entries = tb.entries[:0]
+}
+
+// HasTrace checks if an error contains trace data
+func HasTrace(err error) bool {
+	var te *TraceableError
+	return errors.As(err, &te)
+}
+
+// GetTrace extracts trace data from an error, returning nil if not present
+func GetTrace(err error) *TraceableError {
+	var te *TraceableError
+	if errors.As(err, &te) {
+		return te
+	}
+	return nil
 }

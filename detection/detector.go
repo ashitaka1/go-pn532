@@ -218,7 +218,7 @@ func collectDetectionResults(
 	var allDevices []DeviceInfo
 	var errs []error
 
-	for i := 0; i < numDetectors; i++ {
+	for range numDetectors {
 		select {
 		case res := <-results:
 			if res.err != nil {

@@ -28,8 +28,9 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 )
 
 // By default we only support MIFARE Classic tags with NDEF formatted data
@@ -101,7 +102,7 @@ const (
 // Authentication timing metrics
 type authTiming struct {
 	attempts []time.Duration
-	mutex    sync.RWMutex
+	mutex    syncutil.RWMutex
 }
 
 func (at *authTiming) add(duration time.Duration) {
@@ -184,7 +185,7 @@ type MIFARETag struct {
 	BaseTag
 	timing          authTiming
 	lastAuthSector  int
-	authMutex       sync.RWMutex
+	authMutex       syncutil.RWMutex
 	lastAuthKeyType byte
 }
 
@@ -934,7 +935,7 @@ func (t *MIFARETag) AuthenticateRobustContext(ctx context.Context, sector uint8,
 func (t *MIFARETag) authenticateWithRetry(sector uint8, keyType byte, key []byte) error {
 	var lastErr error
 
-	for attempt := 0; attempt < t.config.RetryConfig.MaxAttempts; attempt++ {
+	for attempt := range t.config.RetryConfig.MaxAttempts {
 		level := t.getRetryLevel(attempt)
 
 		// Apply recovery strategy based on level
@@ -967,7 +968,7 @@ func (t *MIFARETag) authenticateWithRetry(sector uint8, keyType byte, key []byte
 func (t *MIFARETag) authenticateWithRetryContext(ctx context.Context, sector uint8, keyType byte, key []byte) error {
 	var lastErr error
 
-	for attempt := 0; attempt < t.config.RetryConfig.MaxAttempts; attempt++ {
+	for attempt := range t.config.RetryConfig.MaxAttempts {
 		// Check for context cancellation before each attempt
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -1053,7 +1054,7 @@ func (t *MIFARETag) applyRetryStrategy(level retryLevel, _ error) error {
 		// Heavy: RF field reset sequence (if device supports it)
 		// Note: This would require device-level support for field control
 		// For now, we do a longer reinitialization sequence
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			_, err := t.device.InListPassiveTarget(context.Background(), 1, 0x00)
 			if err == nil {
 				break

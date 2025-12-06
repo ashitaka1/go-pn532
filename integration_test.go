@@ -293,6 +293,8 @@ func BenchmarkTagDetection(b *testing.B) {
 
 // TestMIFAREVirtualTagReadWrite tests the MIFARE virtual tag implementations
 func TestMIFAREVirtualTagReadWrite(t *testing.T) {
+	// Default MIFARE key
+	defaultKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 
 	tests := []struct {
 		name        string
@@ -324,6 +326,11 @@ func TestMIFAREVirtualTagReadWrite(t *testing.T) {
 			// Test reading from multiple blocks
 			for _, blockNum := range tt.testBlocks {
 				t.Run(fmt.Sprintf("Block_%d", blockNum), func(t *testing.T) {
+					// Authenticate to the sector containing this block
+					sector := blockNum / 4
+					err := virtualTag.Authenticate(sector, testutil.MIFAREKeyA, defaultKey)
+					require.NoError(t, err, "Authentication should succeed")
+
 					// Test reading
 					data, err := virtualTag.ReadBlock(blockNum)
 					require.NoError(t, err)
@@ -357,6 +364,11 @@ func TestMIFAREVirtualTagReadWrite(t *testing.T) {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), "out of range")
 
+				// Authenticate sector 0 for data size test
+				sector := tt.testBlocks[0] / 4
+				err = virtualTag.Authenticate(sector, testutil.MIFAREKeyA, defaultKey)
+				require.NoError(t, err)
+
 				// Test wrong data size
 				err = virtualTag.WriteBlock(tt.testBlocks[0], make([]byte, 10))
 				assert.Error(t, err)
@@ -378,6 +390,10 @@ func TestMIFAREVirtualTagReadWrite(t *testing.T) {
 				virtualTag.Insert()
 				assert.True(t, virtualTag.Present)
 
+				// Re-authenticate after re-insertion
+				err = virtualTag.Authenticate(sector, testutil.MIFAREKeyA, defaultKey)
+				require.NoError(t, err)
+
 				_, err = virtualTag.ReadBlock(tt.testBlocks[0])
 				assert.NoError(t, err)
 			})
@@ -387,24 +403,38 @@ func TestMIFAREVirtualTagReadWrite(t *testing.T) {
 
 // TestMIFAREWriteProtection tests write protection on sector trailers
 func TestMIFAREWriteProtection(t *testing.T) {
+	// Default MIFARE key
+	defaultKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
+	// blockToSector calculates the sector for a given block
+	blockToSector := func(block int, is4K bool) int {
+		if is4K && block >= 128 {
+			// MIFARE 4K: sectors 32-39 have 16 blocks each
+			return 32 + (block-128)/16
+		}
+		return block / 4
+	}
 
 	tests := []struct {
 		name              string
 		createTag         func() *testutil.VirtualTag
 		protectedBlocks   []int
 		unprotectedBlocks []int
+		is4K              bool
 	}{
 		{
 			name:              "MIFARE1K_WriteProtection",
 			createTag:         func() *testutil.VirtualTag { return testutil.NewVirtualMIFARE1K(nil) },
 			protectedBlocks:   []int{3, 7, 11, 15}, // Sector trailers
 			unprotectedBlocks: []int{1, 2, 4, 5},   // Regular blocks
+			is4K:              false,
 		},
 		{
 			name:              "MIFARE4K_WriteProtection",
 			createTag:         func() *testutil.VirtualTag { return testutil.NewVirtualMIFARE4K(nil) },
 			protectedBlocks:   []int{3, 7, 11, 15, 143, 159}, // Include 4K sector trailers
 			unprotectedBlocks: []int{1, 2, 4, 5, 8, 9},       // Regular blocks
+			is4K:              true,
 		},
 	}
 
@@ -420,16 +450,24 @@ func TestMIFAREWriteProtection(t *testing.T) {
 				testData[i] = 0xAA // Test pattern
 			}
 
-			// Test protected blocks should fail
+			// Test protected blocks should fail (even when authenticated)
 			for _, block := range tt.protectedBlocks {
-				err := virtualTag.WriteBlock(block, testData)
+				sector := blockToSector(block, tt.is4K)
+				err := virtualTag.Authenticate(sector, testutil.MIFAREKeyA, defaultKey)
+				require.NoError(t, err, "Authentication should succeed for sector %d", sector)
+
+				err = virtualTag.WriteBlock(block, testData)
 				assert.Error(t, err, "Block %d should be write protected", block)
 				assert.Contains(t, err.Error(), "write protected")
 			}
 
 			// Test unprotected blocks should succeed
 			for _, block := range tt.unprotectedBlocks {
-				err := virtualTag.WriteBlock(block, testData)
+				sector := blockToSector(block, tt.is4K)
+				err := virtualTag.Authenticate(sector, testutil.MIFAREKeyA, defaultKey)
+				require.NoError(t, err, "Authentication should succeed for sector %d", sector)
+
+				err = virtualTag.WriteBlock(block, testData)
 				assert.NoError(t, err, "Block %d should be writable", block)
 
 				// Verify data was written

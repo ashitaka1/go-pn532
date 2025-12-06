@@ -372,7 +372,7 @@ func TestNTAGTag_FastRead(t *testing.T) {
 			expectedData: func() []byte {
 				// FastRead should return (7-4+1) * 4 = 16 bytes
 				data := make([]byte, 16)
-				for i := 0; i < 16; i++ {
+				for i := range 16 {
 					data[i] = byte(i)
 				}
 				return data
@@ -616,6 +616,97 @@ func TestNTAGFastReadDefaultLimits(t *testing.T) {
 	// (should be either Windows UART limit of 16 or default of 60)
 	assert.True(t, maxPages == 16 || maxPages == 60,
 		"Default MaxFastReadPages should be either Windows UART limit (16) or default (60), got %d", maxPages)
+}
+
+// TestNTAG_GetVersionDoesNotBreakSubsequentReads is a regression test for the
+// v0.8.1 → v0.8.3 NTAG read regression. The issue was that GetVersion() uses
+// InCommunicateThru (0x42) which doesn't maintain the PN532's target selection
+// state. Without re-selecting the target after GetVersion, subsequent
+// InDataExchange calls would fail with timeout error 01.
+//
+// See PN532 User Manual §7.3.9: "The host controller has to take care of the
+// selection of the target it wants to reach (whereas when using the
+// InDataExchange command, it is done automatically)."
+func TestNTAG_GetVersionDoesNotBreakSubsequentReads(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	// Setup mock responses for the full DetectType() + ReadBlock() flow:
+	// 1. ReadBlock(3) for CC - InDataExchange (0x40)
+	//    Response: valid NTAG CC with magic byte 0xE1
+	mockTransport.SetResponse(0x40, []byte{
+		0x41, 0x00, // InDataExchange response header + success status
+		0xE1, 0x10, 0x3E, 0x00, // CC: magic, version, size (NTAG215), access
+		0x00, 0x00, 0x00, 0x00, // Padding (NTAG returns 16 bytes)
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+	})
+
+	// 2. GetVersion() - InCommunicateThru (0x42)
+	//    Response: valid NTAG215 version info
+	mockTransport.SetResponse(0x42, []byte{
+		0x43, 0x00, // InCommunicateThru response header + success status
+		0x00, 0x04, 0x04, 0x02, 0x01, 0x00, 0x11, 0x03, // NTAG215 version
+	})
+
+	// 3. InSelect (0x54) - re-select target after GetVersion
+	//    This is the fix for the regression - without this, subsequent reads fail
+	mockTransport.SetResponse(0x54, []byte{
+		0x55, 0x00, // InSelect response header + success status
+	})
+
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
+
+	// Call DetectType which internally calls GetVersion (via InCommunicateThru)
+	// and then InSelect to restore target selection state
+	err := tag.DetectType()
+	require.NoError(t, err, "DetectType should succeed")
+	assert.Equal(t, NTAGType215, tag.tagType, "Should detect NTAG215 from version info")
+
+	// Now verify that subsequent reads work (this would fail without the InSelect fix)
+	// ReadBlock uses InDataExchange which requires proper target selection
+	data, err := tag.ReadBlock(4)
+	require.NoError(t, err, "ReadBlock after DetectType should succeed - "+
+		"if this fails with timeout error 01, the InSelect fix is not working")
+	assert.NotNil(t, data, "ReadBlock should return data")
+}
+
+// TestNTAG_GetVersionFailureStillAllowsReads verifies that even when GetVersion
+// fails (e.g., clone device), subsequent reads still work because we call
+// InSelect regardless of GetVersion success/failure.
+func TestNTAG_GetVersionFailureStillAllowsReads(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	// Setup mock responses:
+	// 1. ReadBlock(3) for CC - InDataExchange (0x40)
+	mockTransport.SetResponse(0x40, []byte{
+		0x41, 0x00,
+		0xE1, 0x10, 0x12, 0x00, // CC: magic, version, size (NTAG213), access
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+	})
+
+	// 2. GetVersion() fails - InCommunicateThru (0x42) returns error
+	mockTransport.SetError(0x42, errors.New("clone device: GET_VERSION not supported"))
+
+	// 3. InSelect (0x54) - should still be called after GetVersion failure
+	mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
+
+	// DetectType should succeed using CC-based fallback
+	err := tag.DetectType()
+	require.NoError(t, err, "DetectType should succeed with CC-based fallback")
+	assert.Equal(t, NTAGType213, tag.tagType, "Should detect NTAG213 from CC size field")
+
+	// Subsequent reads should still work
+	data, err := tag.ReadBlock(4)
+	require.NoError(t, err, "ReadBlock after failed GetVersion should succeed")
+	assert.NotNil(t, data)
 }
 
 // NDEF Message Tests

@@ -58,10 +58,32 @@ var (
 
 // Transport implements the pn532.Transport interface for SPI communication
 type Transport struct {
-	port     spi.PortCloser
-	conn     spi.Conn
-	portName string
-	timeout  time.Duration
+	port         spi.PortCloser
+	conn         spi.Conn
+	currentTrace *pn532.TraceBuffer // Trace buffer for current command (error-only)
+	portName     string
+	timeout      time.Duration
+}
+
+// traceTX records a TX operation if trace buffer is active
+func (t *Transport) traceTX(data []byte, note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordTX(data, note)
+	}
+}
+
+// traceRX records an RX operation if trace buffer is active
+func (t *Transport) traceRX(data []byte, note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordRX(data, note)
+	}
+}
+
+// traceTimeout records a timeout if trace buffer is active
+func (t *Transport) traceTimeout(note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordTimeout(note)
+	}
 }
 
 // New creates a new SPI transport
@@ -109,7 +131,7 @@ func (t *Transport) wakeup() {
 // PN532 uses LSB first, but most SPI implementations are MSB first
 func reverseBit(b byte) byte {
 	var result byte
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		result <<= 1
 		result |= b & 1
 		b >>= 1
@@ -155,19 +177,29 @@ func (t *Transport) waitReady() error {
 }
 
 // SendCommand sends a command to the PN532 and waits for response
+//
+//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
 func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
+	// Create trace buffer for this command (only used on error)
+	t.currentTrace = pn532.NewTraceBuffer("SPI", t.portName, 16)
+	defer func() { t.currentTrace = nil }() // Clear after command completes
+
 	if err := t.sendFrame(cmd, args); err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	if err := t.waitAck(); err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	// Small delay for PN532 to process command
 	time.Sleep(6 * time.Millisecond)
 
-	return t.receiveFrame()
+	resp, err := t.receiveFrame()
+	if err != nil {
+		return nil, t.currentTrace.WrapError(err)
+	}
+	return resp, nil
 }
 
 // SendCommandWithContext sends a command to the PN532 with context support
@@ -241,6 +273,9 @@ func (t *Transport) sendFrame(cmd byte, args []byte) error {
 	defer frame.PutBuffer(reversedFrame) // Clean up reversed frame buffer
 	copy(spiDataBuf[1:], reversedFrame)
 
+	// Trace the frame being sent (before bit reversal for readability)
+	t.traceTX(frameBuf[:frameSize], fmt.Sprintf("Cmd 0x%02X", cmd))
+
 	// Send the frame
 	time.Sleep(2 * time.Millisecond) // Required delay
 	if err := t.conn.Tx(spiDataBuf[:frameSize+1], nil); err != nil {
@@ -254,6 +289,7 @@ func (t *Transport) sendFrame(cmd byte, args []byte) error {
 func (t *Transport) waitAck() error {
 	// Wait for device to be ready
 	if err := t.waitReady(); err != nil {
+		t.traceTimeout("Device not ready for ACK")
 		return err
 	}
 
@@ -272,11 +308,14 @@ func (t *Transport) waitAck() error {
 
 	if !bytes.Equal(ack, ackFrame) {
 		if bytes.Equal(ack, nackFrame) {
+			t.traceRX(nackFrame, "NACK")
 			return pn532.NewNACKReceivedError("waitAck", t.portName)
 		}
+		t.traceRX(ack, "Invalid ACK")
 		return pn532.NewInvalidResponseError("waitAck", t.portName)
 	}
 
+	t.traceRX(ackFrame, "ACK")
 	return nil
 }
 
@@ -328,6 +367,13 @@ func (t *Transport) receiveFrame() ([]byte, error) {
 	// Convert and skip first byte
 	data := reverseBytes(fullData[1:])
 	defer frame.PutBuffer(data)
+
+	// Trace the complete response (header + data)
+	// Combine header and data for a complete picture
+	fullResponse := make([]byte, len(header)+len(data))
+	copy(fullResponse, header)
+	copy(fullResponse[len(header):], data)
+	t.traceRX(fullResponse, "Response")
 
 	// Skip TFI (first byte) and extract response data
 	if len(data) < int(length)+1 {

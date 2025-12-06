@@ -88,7 +88,7 @@ func TestDefaultRetryConfig(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // capture loop variable
+		// capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if tt.got != tt.expected {
@@ -103,7 +103,7 @@ func TestRetryConfigValidation(t *testing.T) {
 	tests := getRetryConfigTestCases()
 
 	for _, tt := range tests {
-		tt := tt // capture loop variable
+		// capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			validateRetryConfig(t, retryConfigValidation{

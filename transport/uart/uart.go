@@ -27,11 +27,11 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ZaparooProject/go-pn532"
 	"github.com/ZaparooProject/go-pn532/internal/frame"
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 	"go.bug.st/serial"
 )
 
@@ -57,8 +57,10 @@ var (
 // Transport implements the pn532.Transport interface for UART communication.
 type Transport struct {
 	port                  serial.Port
+	currentTrace          *pn532.TraceBuffer
 	portName              string
-	mu                    sync.Mutex
+	mu                    syncutil.Mutex
+	closeMu               syncutil.Mutex // Protects port close operations
 	lastCommand           byte
 	connectionEstablished bool
 }
@@ -66,6 +68,27 @@ type Transport struct {
 // isWindows returns true if running on Windows
 func isWindows() bool {
 	return runtime.GOOS == "windows"
+}
+
+// traceTX records a TX operation if trace buffer is active
+func (t *Transport) traceTX(data []byte, note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordTX(data, note)
+	}
+}
+
+// traceRX records an RX operation if trace buffer is active
+func (t *Transport) traceRX(data []byte, note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordRX(data, note)
+	}
+}
+
+// traceTimeout records a timeout if trace buffer is active
+func (t *Transport) traceTimeout(note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordTimeout(note)
+	}
 }
 
 // getReadTimeout returns the unified read timeout for all platforms
@@ -109,16 +132,22 @@ func New(portName string) (*Transport, error) {
 }
 
 // SendCommand sends a command to the PN532 and waits for response.
+//
+//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
 func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Create trace buffer for this command (only used on error)
+	t.currentTrace = pn532.NewTraceBuffer("UART", t.portName, 16)
+	defer func() { t.currentTrace = nil }() // Clear after command completes
 
 	// Track the command for special handling
 	t.lastCommand = cmd
 
 	ackData, err := t.sendFrame(cmd, args)
 	if err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	_ = ackData // ACK data handled in waitAck
@@ -132,7 +161,7 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 		// They return 0x00 for OK, 0xFF for failure
 		res, diagErr := t.receiveSpecialDiagnoseByte(args[0])
 		if diagErr != nil {
-			return nil, diagErr
+			return nil, t.currentTrace.WrapError(diagErr)
 		}
 
 		// Mark connection as established after first successful command
@@ -146,11 +175,11 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 
 	res, err := t.receiveFrame(ackData)
 	if err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	if err := t.sendAck(); err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	// Mark connection as established after first successful command
@@ -206,18 +235,32 @@ func (t *Transport) SetTimeout(timeout time.Duration) error {
 }
 
 // Close closes the transport connection
+// This method uses a separate mutex (closeMu) to close the port without waiting
+// for the main mutex (mu). This allows closing the port while SendCommand is
+// blocking on a read. Closing the port causes any blocking reads to fail
+// immediately with an I/O error, allowing SendCommand to return promptly.
 func (t *Transport) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.port != nil {
-		err := t.port.Close()
-		t.port = nil                    // Clear port reference after closing
-		t.connectionEstablished = false // Reset connection state
-		if err != nil {
+	// Use closeMu to serialize close operations and safely access port
+	t.closeMu.Lock()
+	port := t.port
+	if port != nil {
+		// Close the port - this will interrupt any blocking reads in SendCommand
+		// We do this BEFORE acquiring mu to avoid deadlock
+		if err := port.Close(); err != nil {
+			t.closeMu.Unlock()
 			return fmt.Errorf("UART close failed: %w", err)
 		}
 	}
+	t.closeMu.Unlock()
+
+	// Now acquire the main mutex to update state
+	// This will block until SendCommand finishes (which should be quick now
+	// that the port is closed and reads are failing)
+	t.mu.Lock()
+	t.port = nil
+	t.connectionEstablished = false
+	t.mu.Unlock()
+
 	return nil
 }
 
@@ -269,7 +312,7 @@ func (t *Transport) drainWithRetry(operation string) error {
 	const maxRetries = 3
 	baseDelay := 2 * time.Millisecond
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		err := t.port.Drain()
 		if err == nil {
 			return nil
@@ -305,7 +348,7 @@ func (t *Transport) wakeUpWithRetry() error {
 
 	var lastErr error
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		err := t.singleWakeUpAttempt()
 		if err == nil {
 			return nil // Wake-up successful
@@ -331,6 +374,7 @@ func (t *Transport) singleWakeUpAttempt() error {
 		0x00, 0x00, 0x00, 0x00,
 	}
 
+	t.traceTX(wakeSequence, "Wakeup")
 	bytesWritten, err := t.port.Write(wakeSequence)
 	if err != nil {
 		return fmt.Errorf("UART wake up write failed: %w", err)
@@ -343,6 +387,7 @@ func (t *Transport) singleWakeUpAttempt() error {
 
 // sendAck sends an ACK frame
 func (t *Transport) sendAck() error {
+	t.traceTX(ackFrame, "ACK")
 	n, err := t.port.Write(ackFrame)
 	if err != nil {
 		return fmt.Errorf("UART ACK write failed: %w", err)
@@ -355,6 +400,7 @@ func (t *Transport) sendAck() error {
 
 // sendNack sends a NACK frame
 func (t *Transport) sendNack() error {
+	t.traceTX(nackFrame, "NACK")
 	n, err := t.port.Write(nackFrame)
 	if err != nil {
 		return fmt.Errorf("UART NACK write failed: %w", err)
@@ -385,6 +431,7 @@ func (t *Transport) waitAck() ([]byte, error) {
 
 	for {
 		if tries >= maxTries {
+			t.traceTimeout("No ACK after 32 bytes")
 			return preAck, pn532.NewNoACKError("waitAck", t.portName)
 		}
 
@@ -402,6 +449,7 @@ func (t *Transport) waitAck() ([]byte, error) {
 		}
 
 		if bytes.Equal(ackBuf, ackFrame) {
+			t.traceRX(ackFrame, "ACK")
 			// Copy preAck data to new buffer for return since we'll release the pooled buffer
 			if len(preAck) == 0 {
 				return []byte{}, nil
@@ -466,6 +514,7 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 		return nil, err
 	}
 
+	t.traceTX(finalFrame, fmt.Sprintf("Cmd 0x%02X", cmd))
 	n, err := t.port.Write(finalFrame)
 	if err != nil {
 		return nil, fmt.Errorf("UART send frame write failed: %w", err)
@@ -489,7 +538,7 @@ func (t *Transport) receiveFrame(pre []byte) ([]byte, error) {
 	_ = pre // Pre-ACK data handled in receiveFrameAttempt
 	const maxTries = 3
 
-	for tries := 0; tries < maxTries; tries++ {
+	for tries := range maxTries {
 		data, shouldRetry, err := t.receiveFrameAttempt(pre, tries)
 		if err != nil {
 			return nil, err
@@ -610,7 +659,15 @@ func (t *Transport) processFrameData(buf []byte, totalLen int) (data []byte, ret
 	return t.extractFrameData(buf, off, frameLen, totalLen)
 }
 
-// readInitialData reads the initial frame data from the port
+// minFrameHeaderBytes is the minimum bytes needed to validate a frame header.
+// Frame structure: preamble (0-2 bytes), 0xFF (start), LEN, LCS
+// With typical 2-byte preamble: 00 00 FF LEN LCS = 5 bytes minimum
+const minFrameHeaderBytes = 5
+
+// readInitialData reads the initial frame data from the port.
+// It accumulates data until we have at least minFrameHeaderBytes or timeout.
+//
+//nolint:gocognit,revive // Accumulation loop with timeout requires multiple conditions
 func (t *Transport) readInitialData(buf []byte) (int, error) {
 	// Platform-specific delay to let the PN532 start sending
 	// Windows USB-serial drivers need more time for reliable responses
@@ -620,20 +677,40 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 	}
 	time.Sleep(initialDelay)
 
-	bytesRead, err := t.port.Read(buf)
-	if err != nil {
-		return 0, fmt.Errorf("UART initial data read failed: %w", err)
-	}
+	totalRead := 0
+	timeout := time.After(500 * time.Millisecond)
 
-	// If we got 0 bytes, try one more time with a longer delay
-	if bytesRead == 0 {
-		bytesRead, err = t.retryInitialRead(buf)
-		if err != nil {
-			return 0, err
+	// Accumulate data until we have enough for frame header validation
+	for totalRead < minFrameHeaderBytes {
+		select {
+		case <-timeout:
+			if totalRead == 0 {
+				// No data at all - try one more time with longer delay
+				return t.retryInitialRead(buf)
+			}
+			// Got some data but not enough - return what we have
+			// This will likely cause a retry at a higher level
+			return totalRead, nil
+		default:
+			bytesRead, err := t.port.Read(buf[totalRead:])
+			if err != nil {
+				return 0, fmt.Errorf("UART initial data read failed: %w", err)
+			}
+			totalRead += bytesRead
+
+			// If we have enough bytes, we can stop
+			if totalRead >= minFrameHeaderBytes {
+				break
+			}
+
+			// Small delay between reads to avoid tight loop
+			if bytesRead == 0 {
+				time.Sleep(time.Millisecond)
+			}
 		}
 	}
 
-	return bytesRead, nil
+	return totalRead, nil
 }
 
 // retryInitialRead performs a retry read with platform-specific timing
@@ -749,7 +826,12 @@ func (*Transport) validateFrameChecksum(buf []byte, off, frameLen int) bool {
 }
 
 // extractFrameData extracts and validates the final frame data
-func (*Transport) extractFrameData(buf []byte, off, frameLen, _ int) (data []byte, retry bool, err error) {
+func (t *Transport) extractFrameData(buf []byte, off, frameLen, totalLen int) (data []byte, retry bool, err error) {
+	// Trace the raw frame received (including preamble, checksums, etc.)
+	if totalLen > 0 {
+		t.traceRX(buf[:totalLen], "Response")
+	}
+
 	data, retry, err = frame.ExtractFrameData(buf, off, frameLen, pn532ToHost)
 	if err != nil {
 		return data, retry, fmt.Errorf("UART frame data extraction failed: %w", err)

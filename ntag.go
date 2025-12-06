@@ -937,6 +937,18 @@ func (t *NTAGTag) DetectType() error {
 
 	// Now try to get the actual version information using GET_VERSION
 	version, err := t.GetVersion()
+
+	// Re-select target after GetVersion to restore PN532 internal state.
+	// GetVersion uses InCommunicateThru (0x42) which is a raw pass-through command
+	// that doesn't maintain the PN532's target selection state. Without re-selection,
+	// subsequent InDataExchange calls may fail with timeout error 01.
+	// See PN532 User Manual §7.3.9: "The host controller has to take care of the
+	// selection of the target it wants to reach (whereas when using the
+	// InDataExchange command, it is done automatically)."
+	if selectErr := t.device.InSelect(context.Background(), 0); selectErr != nil {
+		debugf("NTAG DetectType: InSelect after GetVersion failed: %v", selectErr)
+	}
+
 	if err != nil {
 		// If GET_VERSION fails, we still know it's an NTAG from the CC check
 		// Use fallback detection method based on capability container
@@ -1065,7 +1077,7 @@ func (t *NTAGTag) getTagTypeName() string {
 
 func (t *NTAGTag) readBlockWithRetry(block uint8) ([]byte, error) {
 	maxRetries := 3
-	for i := 0; i < maxRetries; i++ {
+	for i := range maxRetries {
 		data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, block})
 		if err != nil {
 			// If we get authentication error 14, try InCommunicateThru as fallback for clone devices

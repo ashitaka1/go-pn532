@@ -632,7 +632,7 @@ func (f *FeliCaTag) writeNDEFBlocks(paddedData []byte) error {
 		return fmt.Errorf("NDEF data too large: requires %d blocks but maximum is %d", blocksToWrite, 0xFFFE)
 	}
 
-	for block := 0; block < blocksToWrite; block++ {
+	for block := range blocksToWrite {
 		blockData := paddedData[block*feliCaBlockSize : (block+1)*feliCaBlockSize]
 		if block >= 0xFFFE {
 			return fmt.Errorf("block index too large: %d", block)
@@ -659,7 +659,7 @@ func (*FeliCaTag) updateAIBWithLength(currentAIB []byte, ndefLength uint32) []by
 
 	// Recalculate checksum for first 14 bytes
 	var sum uint16
-	for i := 0; i < 14; i++ {
+	for i := range 14 {
 		sum += uint16(newAIB[i])
 	}
 	newAIB[14] = byte((sum >> 8) & 0xFF)
@@ -677,7 +677,7 @@ func (*FeliCaTag) validateAIB(aib []byte) bool {
 
 	// Calculate checksum of first 14 bytes
 	var sum uint16
-	for i := 0; i < 14; i++ {
+	for i := range 14 {
 		sum += uint16(aib[i])
 	}
 

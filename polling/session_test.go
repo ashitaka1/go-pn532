@@ -29,13 +29,16 @@ import (
 	"time"
 
 	pn532 "github.com/ZaparooProject/go-pn532"
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// createMockDeviceWithTransport creates a device with mock transport for testing
+// createMockDeviceWithTransport creates a device with mock transport for testing.
+// The mock starts with a target selected (simulating successful InListPassiveTarget).
 func createMockDeviceWithTransport(t *testing.T) (*pn532.Device, *pn532.MockTransport) {
 	mockTransport := pn532.NewMockTransport()
+	mockTransport.SelectTarget() // Simulate that a tag was detected
 	device, err := pn532.New(mockTransport)
 	require.NoError(t, err)
 	return device, mockTransport
@@ -80,6 +83,102 @@ func TestNewSession(t *testing.T) {
 		assert.Equal(t, config, session.config)
 		assert.Equal(t, 50*time.Millisecond, session.config.PollInterval)
 	})
+}
+
+func TestSession_CallbackSetters(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+
+	t.Run("SetOnCardDetected", func(t *testing.T) {
+		t.Parallel()
+		session := NewSession(device, nil)
+
+		var called atomic.Bool
+		session.SetOnCardDetected(func(_ *pn532.DetectedTag) error {
+			called.Store(true)
+			return nil
+		})
+
+		// Verify callback was set by checking it's not nil
+		session.stateMutex.RLock()
+		cb := session.OnCardDetected
+		session.stateMutex.RUnlock()
+		assert.NotNil(t, cb)
+	})
+
+	t.Run("SetOnCardRemoved", func(t *testing.T) {
+		t.Parallel()
+		session := NewSession(device, nil)
+
+		var called atomic.Bool
+		session.SetOnCardRemoved(func() {
+			called.Store(true)
+		})
+
+		session.stateMutex.RLock()
+		cb := session.OnCardRemoved
+		session.stateMutex.RUnlock()
+		assert.NotNil(t, cb)
+	})
+
+	t.Run("SetOnCardChanged", func(t *testing.T) {
+		t.Parallel()
+		session := NewSession(device, nil)
+
+		var called atomic.Bool
+		session.SetOnCardChanged(func(_ *pn532.DetectedTag) error {
+			called.Store(true)
+			return nil
+		})
+
+		session.stateMutex.RLock()
+		cb := session.OnCardChanged
+		session.stateMutex.RUnlock()
+		assert.NotNil(t, cb)
+	})
+}
+
+func TestSession_CallbackSettersConcurrent(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// This test verifies no race conditions when setting callbacks concurrently
+	// Run with -race flag to detect races
+	var wg sync.WaitGroup
+	const numGoroutines = 10
+
+	for range numGoroutines {
+		wg.Add(3)
+
+		go func() {
+			defer wg.Done()
+			session.SetOnCardDetected(func(_ *pn532.DetectedTag) error {
+				return nil
+			})
+		}()
+
+		go func() {
+			defer wg.Done()
+			session.SetOnCardRemoved(func() {})
+		}()
+
+		go func() {
+			defer wg.Done()
+			session.SetOnCardChanged(func(_ *pn532.DetectedTag) error {
+				return nil
+			})
+		}()
+	}
+
+	wg.Wait()
+
+	// Verify callbacks are set (any of them, since order is non-deterministic)
+	session.stateMutex.RLock()
+	defer session.stateMutex.RUnlock()
+	assert.NotNil(t, session.OnCardDetected)
+	assert.NotNil(t, session.OnCardRemoved)
+	assert.NotNil(t, session.OnCardChanged)
 }
 
 func TestSession_PauseResume(t *testing.T) {
@@ -128,11 +227,11 @@ func TestSession_ConcurrentPauseResume(t *testing.T) {
 	iterations := 100
 
 	// Start multiple goroutines doing pause/resume
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < iterations; j++ {
+			for range iterations {
 				session.Pause()
 				time.Sleep(time.Microsecond)
 				session.Resume()
@@ -324,7 +423,7 @@ func TestSession_PauseAcknowledgment_RaceCondition(t *testing.T) {
 	errorChan := make(chan error, numGoroutines)
 
 	// Launch multiple goroutines calling pauseWithAck concurrently
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -416,13 +515,13 @@ func TestSession_ConcurrentWrites(t *testing.T) {
 	detectedTag := createTestDetectedTag()
 
 	var writeOrder []int
-	var mu sync.Mutex
+	var mu syncutil.Mutex
 	var wg sync.WaitGroup
 
 	numWrites := 5
 
 	// Start multiple concurrent writes
-	for i := 0; i < numWrites; i++ {
+	for i := range numWrites {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -451,7 +550,7 @@ func TestSession_ConcurrentWrites(t *testing.T) {
 
 	// Verify writes were serialized (no overlapping)
 	// Each write should complete before the next starts due to mutex
-	for i := 0; i < numWrites; i++ {
+	for i := range numWrites {
 		assert.Contains(t, writeOrder, i)
 	}
 }
@@ -633,7 +732,7 @@ func TestSession_ConcurrentWriteStressTest(t *testing.T) {
 	const numGoroutines = 20
 	const writesPerGoroutine = 10
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		wg.Add(1)
 		go func(routineID int) {
 			defer wg.Done()
@@ -663,7 +762,7 @@ func runStressTestWrites(
 	tag *pn532.DetectedTag,
 	params stressTestParams,
 ) {
-	for j := 0; j < params.writesPerGoroutine; j++ {
+	for j := range params.writesPerGoroutine {
 		err := session.WriteToTag(
 			context.Background(), context.Background(), tag,
 			func(_ context.Context, _ pn532.Tag) error {

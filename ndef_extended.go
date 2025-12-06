@@ -653,7 +653,7 @@ func parseMACAddress(mac string) ([]byte, error) {
 	}
 
 	macBytes := make([]byte, 6)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		var b byte
 		_, err := fmt.Sscanf(mac[i*2:i*2+2], "%02x", &b)
 		if err != nil {

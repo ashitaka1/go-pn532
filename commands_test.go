@@ -46,7 +46,7 @@ func TestCommandConstants(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // capture loop variable
+		// capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if tt.constant != tt.expected {
@@ -73,7 +73,7 @@ func TestPowerDownWakeupFlags(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // capture loop variable
+		// capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if tt.flag != tt.expected {
@@ -108,7 +108,7 @@ func TestWakeupFlagsCombination(t *testing.T) {
 	}
 
 	for _, tt := range powerOf2Tests {
-		tt := tt // capture loop variable
+		// capture loop variable
 		t.Run(tt.name+"_power_of_2", func(t *testing.T) {
 			t.Parallel()
 			// Check that flag has exactly one bit set (is a power of 2)

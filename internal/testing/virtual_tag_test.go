@@ -27,7 +27,6 @@ import (
 // TestVirtualTagCreation tests the creation of different virtual tag types
 func TestVirtualTagCreation(t *testing.T) {
 
-
 	tests := []struct {
 		name           string
 		createTag      func() *VirtualTag
@@ -62,7 +61,6 @@ func TestVirtualTagCreation(t *testing.T) {
 		tt := tt // capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 
-
 			tag := tt.createTag()
 			require.NotNil(t, tag)
 
@@ -76,25 +74,30 @@ func TestVirtualTagCreation(t *testing.T) {
 
 // TestVirtualTagCustomUID tests creation with custom UIDs
 func TestVirtualTagCustomUID(t *testing.T) {
-
+	// Default MIFARE key
+	defaultKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 
 	customUID := []byte{0xAA, 0xBB, 0xCC, 0xDD}
 
 	tests := []struct {
 		name      string
 		createTag func([]byte) *VirtualTag
+		isMIFARE  bool
 	}{
 		{
 			name:      "NTAG213_CustomUID",
 			createTag: NewVirtualNTAG213,
+			isMIFARE:  false,
 		},
 		{
 			name:      "MIFARE1K_CustomUID",
 			createTag: NewVirtualMIFARE1K,
+			isMIFARE:  true,
 		},
 		{
 			name:      "MIFARE4K_CustomUID",
 			createTag: NewVirtualMIFARE4K,
+			isMIFARE:  true,
 		},
 	}
 
@@ -102,11 +105,17 @@ func TestVirtualTagCustomUID(t *testing.T) {
 		tt := tt // capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 
-
 			tag := tt.createTag(customUID)
 			require.NotNil(t, tag)
 
 			assert.Equal(t, customUID, tag.UID)
+
+			// Authenticate sector 0 for MIFARE tags before reading block 0
+			if tt.isMIFARE {
+				err := tag.Authenticate(0, MIFAREKeyA, defaultKey)
+				require.NoError(t, err)
+			}
+
 			// Verify UID is stored in block 0
 			block0, err := tag.ReadBlock(0)
 			require.NoError(t, err)
@@ -117,7 +126,6 @@ func TestVirtualTagCustomUID(t *testing.T) {
 
 // TestNDEFTextOperations tests NDEF text reading and writing
 func TestNDEFTextOperations(t *testing.T) {
-
 
 	tag := NewVirtualNTAG213(nil)
 	require.NotNil(t, tag)
@@ -170,12 +178,11 @@ func TestNDEFTextOperations(t *testing.T) {
 // TestNDEFParsingEdgeCases tests complex NDEF parsing scenarios
 func TestNDEFParsingEdgeCases(t *testing.T) {
 
-
 	tests := []struct {
-		name           string
-		setupTag       func(*VirtualTag)
-		expectedText   string
-		description    string
+		name         string
+		setupTag     func(*VirtualTag)
+		expectedText string
+		description  string
 	}{
 		{
 			name: "EmptyNDEFMessage",
@@ -263,7 +270,6 @@ func TestNDEFParsingEdgeCases(t *testing.T) {
 		tt := tt // capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 
-
 			tag := NewVirtualNTAG213(nil)
 			require.NotNil(t, tag)
 
@@ -279,7 +285,8 @@ func TestNDEFParsingEdgeCases(t *testing.T) {
 
 // TestVirtualTagMemoryLayout tests the memory initialization
 func TestVirtualTagMemoryLayout(t *testing.T) {
-
+	// Default MIFARE key
+	defaultKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 
 	tests := []struct {
 		name      string
@@ -312,6 +319,10 @@ func TestVirtualTagMemoryLayout(t *testing.T) {
 			name:      "MIFARE1K_MemoryLayout",
 			createTag: func() *VirtualTag { return NewVirtualMIFARE1K(nil) },
 			testFunc: func(t *testing.T, tag *VirtualTag) {
+				// Authenticate sector 0 first
+				err := tag.Authenticate(0, MIFAREKeyA, defaultKey)
+				require.NoError(t, err)
+
 				// Block 0: UID should be set
 				block0, err := tag.ReadBlock(0)
 				require.NoError(t, err)
@@ -319,10 +330,14 @@ func TestVirtualTagMemoryLayout(t *testing.T) {
 
 				// Check sector trailers (blocks 3, 7, 11, 15)
 				for sector := 0; sector < 16; sector++ {
+					// Authenticate each sector before reading its trailer
+					err := tag.Authenticate(sector, MIFAREKeyA, defaultKey)
+					require.NoError(t, err, "Authentication should succeed for sector %d", sector)
+
 					trailerBlock := sector*4 + 3
 					trailer, err := tag.ReadBlock(trailerBlock)
 					require.NoError(t, err)
-					
+
 					// Check default key A (first 6 bytes should be 0xFF)
 					for i := 0; i < 6; i++ {
 						assert.Equal(t, byte(0xFF), trailer[i], "Key A byte %d in sector %d", i, sector)
@@ -336,7 +351,6 @@ func TestVirtualTagMemoryLayout(t *testing.T) {
 		tt := tt // capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 
-
 			tag := tt.createTag()
 			require.NotNil(t, tag)
 
@@ -347,7 +361,6 @@ func TestVirtualTagMemoryLayout(t *testing.T) {
 
 // TestGetUIDString tests the UID string conversion (currently unused but tested for completeness)
 func TestGetUIDString(t *testing.T) {
-
 
 	tests := []struct {
 		name        string
@@ -380,7 +393,6 @@ func TestGetUIDString(t *testing.T) {
 		tt := tt // capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 
-
 			tag := NewVirtualNTAG213(tt.uid)
 			require.NotNil(t, tag)
 
@@ -392,7 +404,6 @@ func TestGetUIDString(t *testing.T) {
 
 // TestNDEFMessageSizeHandling tests NDEF message size limits
 func TestNDEFMessageSizeHandling(t *testing.T) {
-
 
 	tag := NewVirtualNTAG213(nil)
 	require.NotNil(t, tag)
