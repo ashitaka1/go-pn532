@@ -28,11 +28,14 @@ import (
 
 // VirtualTag represents a simulated NFC tag for testing
 type VirtualTag struct {
-	Type     string
-	UID      []byte
-	Memory   [][]byte
-	ndefData []byte
-	Present  bool
+	sectorKeys          map[int][]byte
+	Type                string
+	UID                 []byte
+	Memory              [][]byte
+	ndefData            []byte
+	authenticatedSector int
+	Present             bool
+	authenticatedKey    byte
 }
 
 // NewVirtualNTAG213 creates a virtual NTAG213 tag with default content
@@ -65,13 +68,15 @@ func NewVirtualMIFARE1K(uid []byte) *VirtualTag {
 	}
 
 	tag := &VirtualTag{
-		Type:    "MIFARE1K",
-		UID:     uid,
-		Memory:  make([][]byte, 64), // MIFARE 1K has 64 blocks (1024 bytes)
-		Present: true,
+		Type:                "MIFARE1K",
+		UID:                 uid,
+		Memory:              make([][]byte, 64), // MIFARE 1K has 64 blocks (1024 bytes)
+		Present:             true,
+		authenticatedSector: -1, // Not authenticated initially
+		sectorKeys:          make(map[int][]byte),
 	}
 
-	// Initialize with default MIFARE memory layout
+	// Initialize with default MIFARE memory layout and keys
 	tag.initMIFARE1KMemory()
 
 	return tag
@@ -84,13 +89,15 @@ func NewVirtualMIFARE4K(uid []byte) *VirtualTag {
 	}
 
 	tag := &VirtualTag{
-		Type:    "MIFARE4K",
-		UID:     uid,
-		Memory:  make([][]byte, 256), // MIFARE 4K has 256 blocks (4096 bytes)
-		Present: true,
+		Type:                "MIFARE4K",
+		UID:                 uid,
+		Memory:              make([][]byte, 256), // MIFARE 4K has 256 blocks (4096 bytes)
+		Present:             true,
+		authenticatedSector: -1, // Not authenticated initially
+		sectorKeys:          make(map[int][]byte),
 	}
 
-	// Initialize with default MIFARE memory layout
+	// Initialize with default MIFARE memory layout and keys
 	tag.initMIFARE4KMemory()
 
 	return tag
@@ -109,6 +116,14 @@ func (v *VirtualTag) ReadBlock(block int) ([]byte, error) {
 
 	if block < 0 || block >= len(v.Memory) {
 		return nil, fmt.Errorf("block %d out of range", block)
+	}
+
+	// MIFARE tags require authentication before reading
+	if v.isMIFARE() {
+		sector := v.blockToSector(block)
+		if v.authenticatedSector != sector {
+			return nil, fmt.Errorf("not authenticated to sector %d (block %d)", sector, block)
+		}
 	}
 
 	if v.Memory[block] == nil {
@@ -130,6 +145,14 @@ func (v *VirtualTag) WriteBlock(block int, data []byte) error {
 
 	if block < 0 || block >= len(v.Memory) {
 		return fmt.Errorf("block %d out of range", block)
+	}
+
+	// MIFARE tags require authentication before writing
+	if v.isMIFARE() {
+		sector := v.blockToSector(block)
+		if v.authenticatedSector != sector {
+			return fmt.Errorf("not authenticated to sector %d (block %d)", sector, block)
+		}
 	}
 
 	// Check for write protection based on tag type
@@ -241,15 +264,19 @@ func (v *VirtualTag) initMIFARE1KMemory() {
 		v.Memory[i] = make([]byte, 16)
 	}
 
+	// Default MIFARE key: FF FF FF FF FF FF
+	defaultKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
 	// Set default keys and access bits for sector trailers
 	for sector := 0; sector < 16; sector++ {
 		trailerBlock := sector*4 + 3
-		// Default MIFARE key: FF FF FF FF FF FF
 		v.Memory[trailerBlock] = []byte{
 			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Key A
 			0xFF, 0x07, 0x80, 0x69, // Access bits
 			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Key B
 		}
+		// Store keys in sectorKeys map (Key A + Key B)
+		v.sectorKeys[sector] = append(append([]byte{}, defaultKey...), defaultKey...)
 	}
 }
 
@@ -262,6 +289,9 @@ func (v *VirtualTag) initMIFARE4KMemory() {
 		v.Memory[i] = make([]byte, 16)
 	}
 
+	// Default MIFARE key: FF FF FF FF FF FF
+	defaultKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
 	// Set default keys for all sector trailers
 	// Sectors 0-31 have 4 blocks each, sectors 32-39 have 16 blocks each
 	for sector := 0; sector < 32; sector++ {
@@ -271,6 +301,8 @@ func (v *VirtualTag) initMIFARE4KMemory() {
 			0xFF, 0x07, 0x80, 0x69, // Access bits
 			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Key B
 		}
+		// Store keys in sectorKeys map (Key A + Key B)
+		v.sectorKeys[sector] = append(append([]byte{}, defaultKey...), defaultKey...)
 	}
 	for sector := 32; sector < 40; sector++ {
 		trailerBlock := 128 + (sector-32)*16 + 15
@@ -279,6 +311,8 @@ func (v *VirtualTag) initMIFARE4KMemory() {
 			0xFF, 0x07, 0x80, 0x69, // Access bits
 			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Key B
 		}
+		// Store keys in sectorKeys map (Key A + Key B)
+		v.sectorKeys[sector] = append(append([]byte{}, defaultKey...), defaultKey...)
 	}
 }
 
@@ -382,4 +416,137 @@ func (v *VirtualTag) collectTextData(startBlock, textStart int) string {
 	}
 
 	return string(textData)
+}
+
+// MIFARE authentication methods
+
+// MIFAREKeyA is the key type constant for Key A
+const MIFAREKeyA = 0x00
+
+// MIFAREKeyB is the key type constant for Key B
+const MIFAREKeyB = 0x01
+
+// Authenticate authenticates a sector with the given key
+// keyType: 0x00 for Key A, 0x01 for Key B
+func (v *VirtualTag) Authenticate(sector int, keyType byte, key []byte) error {
+	if !v.Present {
+		return errors.New("tag not present")
+	}
+
+	if !v.isMIFARE() {
+		return errors.New("authentication only supported for MIFARE tags")
+	}
+
+	if len(key) != 6 {
+		return errors.New("MIFARE key must be 6 bytes")
+	}
+
+	// Check sector bounds
+	maxSector := v.getMaxSector()
+	if sector < 0 || sector >= maxSector {
+		return fmt.Errorf("sector %d out of range (max %d)", sector, maxSector-1)
+	}
+
+	// Validate key against stored keys
+	storedKeys, exists := v.sectorKeys[sector]
+	if !exists {
+		return fmt.Errorf("no keys configured for sector %d", sector)
+	}
+
+	var expectedKey []byte
+	switch keyType {
+	case MIFAREKeyA:
+		expectedKey = storedKeys[0:6]
+	case MIFAREKeyB:
+		expectedKey = storedKeys[6:12]
+	default:
+		return fmt.Errorf("invalid key type: 0x%02X", keyType)
+	}
+
+	// Compare keys
+	if !bytesEqual(key, expectedKey) {
+		v.authenticatedSector = -1 // Clear authentication on failure
+		return errors.New("authentication failed: incorrect key")
+	}
+
+	v.authenticatedSector = sector
+	v.authenticatedKey = keyType
+	return nil
+}
+
+// ResetAuthentication clears the authentication state
+func (v *VirtualTag) ResetAuthentication() {
+	v.authenticatedSector = -1
+	v.authenticatedKey = 0
+}
+
+// IsAuthenticated returns true if authenticated to the given sector
+func (v *VirtualTag) IsAuthenticated(sector int) bool {
+	return v.authenticatedSector == sector
+}
+
+// GetAuthenticatedSector returns the currently authenticated sector (-1 if none)
+func (v *VirtualTag) GetAuthenticatedSector() int {
+	return v.authenticatedSector
+}
+
+// SetSectorKey sets custom keys for a sector
+// keys should be 12 bytes: 6 bytes Key A + 6 bytes Key B
+func (v *VirtualTag) SetSectorKey(sector int, keys []byte) error {
+	if !v.isMIFARE() {
+		return errors.New("sector keys only apply to MIFARE tags")
+	}
+	if len(keys) != 12 {
+		return errors.New("keys must be 12 bytes (Key A + Key B)")
+	}
+	maxSector := v.getMaxSector()
+	if sector < 0 || sector >= maxSector {
+		return fmt.Errorf("sector %d out of range (max %d)", sector, maxSector-1)
+	}
+	v.sectorKeys[sector] = append([]byte{}, keys...)
+	return nil
+}
+
+// Helper methods
+
+func (v *VirtualTag) isMIFARE() bool {
+	return v.Type == "MIFARE1K" || v.Type == "MIFARE4K"
+}
+
+func (v *VirtualTag) getMaxSector() int {
+	switch v.Type {
+	case "MIFARE1K":
+		return 16
+	case "MIFARE4K":
+		return 40
+	default:
+		return 0
+	}
+}
+
+func (v *VirtualTag) blockToSector(block int) int {
+	switch v.Type {
+	case "MIFARE1K":
+		return block / 4
+	case "MIFARE4K":
+		if block < 128 {
+			return block / 4
+		}
+		// Sectors 32-39 have 16 blocks each
+		return 32 + (block-128)/16
+	default:
+		return 0
+	}
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -590,6 +590,7 @@ func TestMIFARETag_WriteBlockDirect(t *testing.T) {
 
 			// Create mock transport and device
 			mt := NewMockTransport()
+			mt.SelectTarget() // Tag operations require a target to be selected
 			tt.setupMock(mt)
 
 			device := &Device{transport: mt}

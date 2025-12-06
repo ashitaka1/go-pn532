@@ -423,6 +423,7 @@ func testInCommand(t *testing.T, testName string, cmd byte, deviceFunc func(*Dev
 
 			// Setup mock transport
 			mock := NewMockTransport()
+			mock.SelectTarget() // InRelease/InSelect require a target to be selected
 			tt.setupMock(mock)
 
 			// Create device

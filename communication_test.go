@@ -34,6 +34,7 @@ import (
 func setupDeviceWithMock(t *testing.T, setupMock func(*MockTransport)) (*Device, *MockTransport) {
 	t.Helper()
 	mock := NewMockTransport()
+	mock.SelectTarget() // Most communication tests need a target selected
 	setupMock(mock)
 	device, err := New(mock)
 	require.NoError(t, err)

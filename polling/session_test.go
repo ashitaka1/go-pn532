@@ -33,9 +33,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// createMockDeviceWithTransport creates a device with mock transport for testing
+// createMockDeviceWithTransport creates a device with mock transport for testing.
+// The mock starts with a target selected (simulating successful InListPassiveTarget).
 func createMockDeviceWithTransport(t *testing.T) (*pn532.Device, *pn532.MockTransport) {
 	mockTransport := pn532.NewMockTransport()
+	mockTransport.SelectTarget() // Simulate that a tag was detected
 	device, err := pn532.New(mockTransport)
 	require.NoError(t, err)
 	return device, mockTransport
