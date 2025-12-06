@@ -61,7 +61,7 @@ func parseResponseFrame(t *testing.T, data []byte) (cmd byte, responseData []byt
 
 	// Find start code
 	startIdx := -1
-	for i := 0; i < len(data)-1; i++ {
+	for i := range len(data) - 1 {
 		if data[i] == pn532StartCode1 && data[i+1] == pn532StartCode2 {
 			startIdx = i
 			break

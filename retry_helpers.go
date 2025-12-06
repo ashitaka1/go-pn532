@@ -37,7 +37,7 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 	const maxRetries = 3
 	const retryDelay = 10 * time.Millisecond
 
-	for i := 0; i < maxRetries; i++ {
+	for i := range maxRetries {
 		// Try to read NDEF data
 		msg, err := readFunc()
 		if err != nil {

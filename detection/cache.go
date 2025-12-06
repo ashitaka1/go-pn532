@@ -21,8 +21,9 @@
 package detection
 
 import (
-	"sync"
 	"time"
+
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 )
 
 // cacheEntry holds cached detection results.
@@ -34,7 +35,7 @@ type cacheEntry struct {
 // detectionCache provides thread-safe caching of detection results.
 type detectionCache struct {
 	entries map[string]cacheEntry
-	mu      sync.RWMutex
+	mu      syncutil.RWMutex
 }
 
 // global cache instance.

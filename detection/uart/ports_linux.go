@@ -90,7 +90,7 @@ func processUSBDeviceEntry(ttyDir string, entry os.DirEntry) (serialPort, bool) 
 // readUSBAttributes reads USB device attributes by walking up the device tree
 func readUSBAttributes(port *serialPort, devicePath string) {
 	current := devicePath
-	for i := 0; i < 10; i++ { // Limit iterations to prevent infinite loops
+	for range 10 { // Limit iterations to prevent infinite loops
 		if readUSBIdentifiers(port, current) {
 			break
 		}

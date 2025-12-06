@@ -682,7 +682,7 @@ func (d *Device) InAutoPoll(
 	results := []AutoPollResult{}
 	offset := 2
 
-	for i := 0; i < int(numTargets); i++ {
+	for i := range numTargets {
 		if offset+2 > len(res) {
 			return nil, fmt.Errorf("%w: response truncated when expecting target %d header", ErrInvalidResponse, i+1)
 		}
@@ -910,8 +910,8 @@ func (d *Device) parseInListPassiveTargetResponse(res []byte) ([]*DetectedTag, e
 	tags := make([]*DetectedTag, 0, int(numTargets))
 	offset := 2
 
-	for i := 0; i < int(numTargets); i++ {
-		tag, newOffset, err := d.parseTargetAtOffset(res, offset, i+1)
+	for i := range numTargets {
+		tag, newOffset, err := d.parseTargetAtOffset(res, offset, int(i)+1)
 		if err != nil {
 			return nil, err
 		}

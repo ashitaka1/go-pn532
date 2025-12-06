@@ -109,7 +109,7 @@ func (t *Transport) wakeup() {
 // PN532 uses LSB first, but most SPI implementations are MSB first
 func reverseBit(b byte) byte {
 	var result byte
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		result <<= 1
 		result |= b & 1
 		b >>= 1

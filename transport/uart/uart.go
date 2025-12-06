@@ -27,11 +27,11 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ZaparooProject/go-pn532"
 	"github.com/ZaparooProject/go-pn532/internal/frame"
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 	"go.bug.st/serial"
 )
 
@@ -58,7 +58,7 @@ var (
 type Transport struct {
 	port                  serial.Port
 	portName              string
-	mu                    sync.Mutex
+	mu                    syncutil.Mutex
 	lastCommand           byte
 	connectionEstablished bool
 }
@@ -269,7 +269,7 @@ func (t *Transport) drainWithRetry(operation string) error {
 	const maxRetries = 3
 	baseDelay := 2 * time.Millisecond
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		err := t.port.Drain()
 		if err == nil {
 			return nil
@@ -305,7 +305,7 @@ func (t *Transport) wakeUpWithRetry() error {
 
 	var lastErr error
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		err := t.singleWakeUpAttempt()
 		if err == nil {
 			return nil // Wake-up successful
@@ -489,7 +489,7 @@ func (t *Transport) receiveFrame(pre []byte) ([]byte, error) {
 	_ = pre // Pre-ACK data handled in receiveFrameAttempt
 	const maxTries = 3
 
-	for tries := 0; tries < maxTries; tries++ {
+	for tries := range maxTries {
 		data, shouldRetry, err := t.receiveFrameAttempt(pre, tries)
 		if err != nil {
 			return nil, err

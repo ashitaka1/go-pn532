@@ -150,7 +150,7 @@ func (t *Transport) checkReady() error {
 	baseDelay := time.Millisecond
 
 	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		// Use buffer pool for ready status check - small optimization
 		ready := frame.GetSmallBuffer(1)
 
@@ -276,7 +276,7 @@ func (t *Transport) receiveFrame() ([]byte, error) {
 	deadline := time.Now().Add(t.timeout)
 	const maxTries = 3
 
-	for tries := 0; tries < maxTries; tries++ {
+	for range maxTries {
 		if time.Now().After(deadline) {
 			return nil, &pn532.TransportError{
 				Op: "receiveFrame", Port: t.busName,
@@ -359,7 +359,7 @@ func (t *Transport) readFrameData() (buf []byte, actualLen int, err error) {
 
 	// Find frame start in header
 	frameStart := -1
-	for i := 0; i < headerSize-1; i++ {
+	for i := range headerSize - 1 {
 		if headerBuf[i] == 0x00 && headerBuf[i+1] == 0xFF {
 			frameStart = i + 2 // Point to length byte
 			break
@@ -434,7 +434,7 @@ func (t *Transport) findI2CFrameStart(buf []byte, actualLen int) (int, error) {
 		searchLen = len(buf)
 	}
 
-	for off := 0; off < searchLen-1; off++ {
+	for off := range searchLen - 1 {
 		if buf[off] == 0x00 && buf[off+1] == 0xFF {
 			return off + 2, nil // Skip to length byte
 		}

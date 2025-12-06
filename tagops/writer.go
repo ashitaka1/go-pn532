@@ -95,7 +95,7 @@ func (t *TagOperations) writeNTAGBlocks(_ context.Context, startBlock byte, data
 	}
 
 	// Write page by page (NTAG doesn't support multi-page write)
-	for i := 0; i < numPages; i++ {
+	for i := range numPages {
 		page := startPage + byte(i)
 
 		// Get 4 bytes for this page (pad with zeros if necessary)
@@ -133,7 +133,7 @@ func (t *TagOperations) writeMIFAREBlocks(_ context.Context, startBlock byte, da
 	numBlocks := (len(data) + 15) / 16 // Round up to nearest block
 
 	// Write block by block
-	for i := 0; i < numBlocks; i++ {
+	for i := range numBlocks {
 		block := startBlock + byte(i)
 
 		// Skip trailer blocks (every 4th block in each sector)

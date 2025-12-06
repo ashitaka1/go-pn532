@@ -30,7 +30,7 @@ func TestAutoPollResultToDetectedTag(t *testing.T) {
 	testCases := getAutoPollTestCases()
 
 	for _, tc := range testCases {
-		tc := tc // capture loop variable
+		// capture loop variable
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			detected := tc.result.ToDetectedTag()
@@ -176,7 +176,7 @@ func TestMapToTagType(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // capture loop variable
+		// capture loop variable
 		t.Run(string(rune(tt.autoPollType)), func(t *testing.T) {
 			t.Parallel()
 			result := AutoPollResult{
@@ -265,7 +265,7 @@ func BenchmarkToDetectedTag(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = result.ToDetectedTag()
 	}
 }

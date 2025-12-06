@@ -17,15 +17,15 @@ jobs:
         go-version: ['1.24.x']
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: ${{ matrix.go-version }}
-    
+
     - name: Cache Go modules
       uses: actions/cache@v4
       with:
@@ -35,12 +35,15 @@ jobs:
           ${{ runner.os }}-go-${{ matrix.go-version }}-
           ${{ runner.os }}-go-
       continue-on-error: true
-    
+
     - name: Download dependencies
       run: go mod download
-    
+
     - name: Run unit tests
       run: go test -v -race -timeout=10m ./...
+
+    - name: Run deadlock detection tests
+      run: go test -v -race -timeout=10m -tags=deadlock ./...
 
   integration:
     strategy:
@@ -49,15 +52,15 @@ jobs:
         go-version: ['1.24.x']
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: ${{ matrix.go-version }}
-    
+
     - name: Cache Go modules
       uses: actions/cache@v4
       with:
@@ -67,23 +70,26 @@ jobs:
           ${{ runner.os }}-go-${{ matrix.go-version }}-
           ${{ runner.os }}-go-
       continue-on-error: true
-    
+
     - name: Download dependencies
       run: go mod download
-    
+
     - name: Run integration tests
-      run: go test -v -race -timeout=15m -parallel=4 -tags=integration ./...
+      run: go test -v -race -timeout=15m -tags=integration ./...
+
+    - name: Run integration tests with deadlock detection
+      run: go test -v -race -timeout=15m -tags=integration,deadlock ./...
 
   lint:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: '1.24.x'
-    
+
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v7
       with:
@@ -94,15 +100,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: '1.24.x'
-    
+
     - name: Build
       run: go build -v ./...
-    
+
     - name: Build examples
       run: |
         for dir in examples/*/; do

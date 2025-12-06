@@ -73,7 +73,7 @@ func ParseNDEFMessage(data []byte) (*NDEFMessage, error) {
 // extractNDEFPayload extracts the NDEF message from TLV format
 func extractNDEFPayload(data []byte) []byte {
 	// Look for NDEF TLV (0x03)
-	for i := 0; i < len(data)-2; i++ {
+	for i := range len(data) - 2 {
 		if data[i] != 0x03 {
 			continue
 		}

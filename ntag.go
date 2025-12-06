@@ -1065,7 +1065,7 @@ func (t *NTAGTag) getTagTypeName() string {
 
 func (t *NTAGTag) readBlockWithRetry(block uint8) ([]byte, error) {
 	maxRetries := 3
-	for i := 0; i < maxRetries; i++ {
+	for i := range maxRetries {
 		data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, block})
 		if err != nil {
 			// If we get authentication error 14, try InCommunicateThru as fallback for clone devices

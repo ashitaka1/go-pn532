@@ -169,7 +169,7 @@ func getJitterTestCases() []struct {
 
 func collectJitterSamples(baseSleep time.Duration, jitterFactor float64, iterations int) []time.Duration {
 	results := make([]time.Duration, iterations)
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		results[i] = calculateJitteredSleep(baseSleep, jitterFactor)
 	}
 	return results
@@ -449,7 +449,7 @@ func BenchmarkCalculateJitteredSleep(b *testing.B) {
 	jitterFactor := 0.1
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		calculateJitteredSleep(baseSleep, jitterFactor)
 	}
 }
@@ -463,7 +463,7 @@ func BenchmarkCalculateNextBackoff(b *testing.B) {
 	backoff := 100 * time.Millisecond
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		calculateNextBackoff(backoff, config)
 	}
 }

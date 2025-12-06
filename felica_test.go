@@ -450,7 +450,7 @@ func TestFeliCaTag_ValidateAIB(t *testing.T) {
 				aib[0] = 0x10 // Version
 				// Calculate checksum
 				var sum uint16
-				for i := 0; i < 14; i++ {
+				for i := range 14 {
 					sum += uint16(aib[i])
 				}
 				aib[14] = byte((sum >> 8) & 0xFF)

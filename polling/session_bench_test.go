@@ -83,7 +83,7 @@ func benchmarkSessionImpl(b *testing.B, sessionFactory func(device *pn532.Device
 
 	b.ResetTimer() // Start timing after setup
 
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		// Measure Session.Start() call latency
 		err := session.Start(ctx)
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
@@ -136,7 +136,7 @@ func benchmarkWriteOperation(b *testing.B, session *Session) {
 
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		err := session.WriteToTag(ctx, ctx, detectedTag, writeFn)
 		if err != nil {
 			b.Fatalf("WriteToTag failed: %v", err)
@@ -161,7 +161,7 @@ func BenchmarkMemoryAllocation(b *testing.B) {
 
 	b.Run("Traditional_Session_Allocation", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for range b.N {
 			session := NewSession(device, config)
 			_ = session.Close()
 		}
@@ -169,7 +169,7 @@ func BenchmarkMemoryAllocation(b *testing.B) {
 
 	b.Run("Actor_Based_Session_Allocation", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for range b.N {
 			session := NewActorBasedSession(device, config)
 			_ = session.Close()
 		}

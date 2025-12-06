@@ -24,8 +24,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
+
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 )
 
 // Transport defines the interface for communication with PN532 devices.
@@ -107,7 +108,7 @@ type MockTransport struct {
 	timeout        time.Duration
 	delay          time.Duration
 	powerMode      PN532PowerMode
-	mu             sync.RWMutex
+	mu             syncutil.RWMutex
 	connected      bool
 	rfFieldOn      bool
 	targetSelected bool

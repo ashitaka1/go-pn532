@@ -29,6 +29,7 @@ import (
 	"time"
 
 	pn532 "github.com/ZaparooProject/go-pn532"
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -130,11 +131,11 @@ func TestSession_ConcurrentPauseResume(t *testing.T) {
 	iterations := 100
 
 	// Start multiple goroutines doing pause/resume
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < iterations; j++ {
+			for range iterations {
 				session.Pause()
 				time.Sleep(time.Microsecond)
 				session.Resume()
@@ -326,7 +327,7 @@ func TestSession_PauseAcknowledgment_RaceCondition(t *testing.T) {
 	errorChan := make(chan error, numGoroutines)
 
 	// Launch multiple goroutines calling pauseWithAck concurrently
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -418,13 +419,13 @@ func TestSession_ConcurrentWrites(t *testing.T) {
 	detectedTag := createTestDetectedTag()
 
 	var writeOrder []int
-	var mu sync.Mutex
+	var mu syncutil.Mutex
 	var wg sync.WaitGroup
 
 	numWrites := 5
 
 	// Start multiple concurrent writes
-	for i := 0; i < numWrites; i++ {
+	for i := range numWrites {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -453,7 +454,7 @@ func TestSession_ConcurrentWrites(t *testing.T) {
 
 	// Verify writes were serialized (no overlapping)
 	// Each write should complete before the next starts due to mutex
-	for i := 0; i < numWrites; i++ {
+	for i := range numWrites {
 		assert.Contains(t, writeOrder, i)
 	}
 }
@@ -635,7 +636,7 @@ func TestSession_ConcurrentWriteStressTest(t *testing.T) {
 	const numGoroutines = 20
 	const writesPerGoroutine = 10
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		wg.Add(1)
 		go func(routineID int) {
 			defer wg.Done()
@@ -665,7 +666,7 @@ func runStressTestWrites(
 	tag *pn532.DetectedTag,
 	params stressTestParams,
 ) {
-	for j := 0; j < params.writesPerGoroutine; j++ {
+	for j := range params.writesPerGoroutine {
 		err := session.WriteToTag(
 			context.Background(), context.Background(), tag,
 			func(_ context.Context, _ pn532.Tag) error {

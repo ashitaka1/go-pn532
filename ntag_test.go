@@ -372,7 +372,7 @@ func TestNTAGTag_FastRead(t *testing.T) {
 			expectedData: func() []byte {
 				// FastRead should return (7-4+1) * 4 = 16 bytes
 				data := make([]byte, 16)
-				for i := 0; i < 16; i++ {
+				for i := range 16 {
 					data[i] = byte(i)
 				}
 				return data

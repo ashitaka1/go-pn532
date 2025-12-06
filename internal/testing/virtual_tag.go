@@ -268,7 +268,7 @@ func (v *VirtualTag) initMIFARE1KMemory() {
 	defaultKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 
 	// Set default keys and access bits for sector trailers
-	for sector := 0; sector < 16; sector++ {
+	for sector := range 16 {
 		trailerBlock := sector*4 + 3
 		v.Memory[trailerBlock] = []byte{
 			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Key A
@@ -294,7 +294,7 @@ func (v *VirtualTag) initMIFARE4KMemory() {
 
 	// Set default keys for all sector trailers
 	// Sectors 0-31 have 4 blocks each, sectors 32-39 have 16 blocks each
-	for sector := 0; sector < 32; sector++ {
+	for sector := range 32 {
 		trailerBlock := sector*4 + 3
 		v.Memory[trailerBlock] = []byte{
 			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Key A
@@ -372,7 +372,7 @@ func (v *VirtualTag) extractNDEFTextFromNTAG() string {
 
 func (v *VirtualTag) findNDEFTextInBlock(block int) string {
 	// Look for NDEF Text record header (0xD1, 0x01)
-	for i := 0; i < len(v.Memory[block])-1; i++ {
+	for i := range len(v.Memory[block]) - 1 {
 		if v.Memory[block][i] == 0xD1 && v.Memory[block][i+1] == 0x01 {
 			return v.extractTextFromNDEFRecord(block, i)
 		}

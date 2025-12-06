@@ -21,7 +21,7 @@ var errPortClosed = errors.New("port is closed")
 // mockReverseBit reverses the bits in a byte (for LSB <-> MSB conversion).
 func mockReverseBit(b byte) byte {
 	var result byte
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		result <<= 1
 		result |= b & 1
 		b >>= 1

@@ -4,6 +4,11 @@ run:
   go: '1.24'
 
 linters:
+  exclusions:
+    rules:
+      - linters:
+          - forbidigo
+        path: internal/syncutil/
   enable:
     - staticcheck
     - errcheck
@@ -46,6 +51,10 @@ linters:
     - grouper
     - paralleltest
     - tparallel
+    - copyloopvar
+    - intrange
+    - nakedret
+    - forbidigo
   settings:
     govet:
       enable:
@@ -165,6 +174,14 @@ linters:
     wrapcheck:
       extra-ignore-sigs:
         - .Err(
+    forbidigo:
+      forbid:
+        - pattern: 'sync\.Mutex'
+          msg: "use syncutil.Mutex instead of sync.Mutex for deadlock detection support"
+        - pattern: 'sync\.RWMutex'
+          msg: "use syncutil.RWMutex instead of sync.RWMutex for deadlock detection support"
+      exclude-godoc-examples: true
+      analyze-types: true
     goheader:
       template: |-
         go-pn532

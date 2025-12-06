@@ -24,11 +24,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ZaparooProject/go-pn532"
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 )
 
 // Session handles continuous card monitoring with state machine
@@ -43,8 +43,8 @@ type Session struct {
 	ackChan        chan struct{}
 	actor          *DeviceActor
 	state          CardState
-	stateMutex     sync.RWMutex
-	writeMutex     sync.Mutex
+	stateMutex     syncutil.RWMutex
+	writeMutex     syncutil.Mutex
 	isPaused       atomic.Bool
 	closed         atomic.Bool // Prevents callbacks from executing after Close()
 }

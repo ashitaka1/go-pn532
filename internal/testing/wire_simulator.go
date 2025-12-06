@@ -35,7 +35,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"sync"
+
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 )
 
 // PN532 Protocol Constants from PN532 User Manual §6.2.1
@@ -164,7 +165,7 @@ type VirtualPN532 struct {
 	rxBuffer            bytes.Buffer
 	txBuffer            bytes.Buffer
 	state               SimulatorState
-	mu                  sync.Mutex
+	mu                  syncutil.Mutex
 	firmwareIC          byte
 	firmwareVer         byte
 	firmwareRev         byte
@@ -379,7 +380,7 @@ var errIncompleteFrame = errors.New("incomplete frame")
 
 // findFrameStart locates the 0x00 0xFF start code pattern (§6.2.1.6)
 func (*VirtualPN532) findFrameStart(data []byte) int {
-	for i := 0; i < len(data)-1; i++ {
+	for i := range len(data) - 1 {
 		if data[i] == pn532StartCode1 && data[i+1] == pn532StartCode2 {
 			return i
 		}
