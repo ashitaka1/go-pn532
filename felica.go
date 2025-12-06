@@ -637,7 +637,7 @@ func (f *FeliCaTag) writeNDEFBlocks(paddedData []byte) error {
 		if block >= 0xFFFE {
 			return fmt.Errorf("block index too large: %d", block)
 		}
-		blockIndex := uint16(block) + 1 //nolint:gosec // Safe conversion checked above, blocks start at 1
+		blockIndex := uint16(block) + 1
 		writeErr := f.WriteBlockExtended(blockIndex, blockData)
 		if writeErr != nil {
 			return fmt.Errorf("failed to write NDEF block %d: %w", block+1, writeErr)

@@ -132,7 +132,6 @@ func writeTLV(buf *bytes.Buffer, typ uint16, data []byte) error {
 		return fmt.Errorf("TLV data too long: %d bytes", len(data))
 	}
 	// Safe to convert after length check above
-	//nolint:gosec // length check above ensures safe conversion
 	if err := binary.Write(buf, binary.BigEndian, uint16(len(data))); err != nil {
 		return fmt.Errorf("failed to write TLV length: %w", err)
 	}
@@ -237,7 +236,6 @@ func finalizeCredentialData(buf *bytes.Buffer, credLenPos, credStart int) ([]byt
 		return nil, errors.New("credential data too long")
 	}
 	// Safe to convert after length check above
-	//nolint:gosec // length check above ensures safe conversion
 	binary.BigEndian.PutUint16(data[credLenPos:], uint16(credLen))
 	return data, nil
 }

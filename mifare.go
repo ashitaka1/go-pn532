@@ -1083,7 +1083,6 @@ func (t *MIFARETag) calculateRetryDelay(attempt int) time.Duration {
 	if attempt > 30 { // Prevent overflow
 		attempt = 30
 	}
-	//nolint:gosec // G115: Overflow prevented by bounds check above
 	shiftAmount := uint(attempt)
 	delay := t.config.RetryConfig.InitialBackoff * time.Duration(1<<shiftAmount)
 	if delay > t.config.RetryConfig.MaxBackoff {

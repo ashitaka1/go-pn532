@@ -43,14 +43,14 @@ func TestBasicTagDetection(t *testing.T) {
 			wantUID: "04abcdef123456",
 		},
 		{
-			name:    "MIFARE1K_Detection", 
+			name:    "MIFARE1K_Detection",
 			tagType: "MIFARE1K",
 			uid:     testutil.TestMIFARE1KUID,
 			wantUID: "12345678",
 		},
 		{
 			name:    "MIFARE4K_Detection",
-			tagType: "MIFARE4K", 
+			tagType: "MIFARE4K",
 			uid:     testutil.TestMIFARE4KUID,
 			wantUID: "abcdef01",
 		},
@@ -60,16 +60,15 @@ func TestBasicTagDetection(t *testing.T) {
 		tt := tt // capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
 
-
 			// Setup mock transport
 			mock := NewMockTransport()
-			
+
 			// Configure firmware version response
 			mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-			
+
 			// Configure SAM configuration response
 			mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
-			
+
 			// Configure tag detection response
 			mock.SetResponse(testutil.CmdInListPassiveTarget, testutil.BuildTagDetectionResponse(tt.tagType, tt.uid))
 
@@ -81,12 +80,12 @@ func TestBasicTagDetection(t *testing.T) {
 			// Initialize device to trigger firmware version check
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			
+
 			err = device.InitContext(ctx)
 			require.NoError(t, err)
 
 			// Test tag detection
-			tags, err := device.DetectTagsContext(ctx, 1, 0)
+			tags, err := device.DetectTags(ctx, 1, 0)
 			require.NoError(t, err)
 			require.Len(t, tags, 1)
 
@@ -107,16 +106,15 @@ func TestBasicTagDetection(t *testing.T) {
 // TestTagNotFound tests the scenario when no tag is present
 func TestTagNotFound(t *testing.T) {
 
-
 	// Setup mock transport
 	mock := NewMockTransport()
-	
+
 	// Configure firmware version response
 	mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-	
+
 	// Configure SAM configuration response
 	mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
-	
+
 	// Configure no tag response
 	mock.SetResponse(testutil.CmdInListPassiveTarget, testutil.BuildNoTagResponse())
 
@@ -127,19 +125,18 @@ func TestTagNotFound(t *testing.T) {
 	// Initialize device
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	
+
 	err = device.InitContext(ctx)
 	require.NoError(t, err)
 
 	// Test tag detection - should find no tags
-	tags, err := device.DetectTagsContext(ctx, 1, 0)
+	tags, err := device.DetectTags(ctx, 1, 0)
 	require.NoError(t, err)
 	assert.Len(t, tags, 0)
 }
 
 // TestTagReadWrite tests reading from and writing to a virtual tag
 func TestTagReadWrite(t *testing.T) {
-
 
 	// Create virtual NTAG213 tag
 	virtualTag := testutil.NewVirtualNTAG213(nil)
@@ -171,16 +168,15 @@ func TestTagReadWrite(t *testing.T) {
 // TestTransportErrorHandling tests error scenarios
 func TestTransportErrorHandling(t *testing.T) {
 
-
 	// Setup mock transport with error injection
 	mock := NewMockTransport()
-	
+
 	// Configure firmware version response
 	mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-	
+
 	// Configure SAM configuration response
 	mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
-	
+
 	// Inject error for tag detection
 	mock.SetError(testutil.CmdInListPassiveTarget, assert.AnError)
 
@@ -191,12 +187,12 @@ func TestTransportErrorHandling(t *testing.T) {
 	// Initialize device
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	
+
 	err = device.InitContext(ctx)
 	require.NoError(t, err)
 
 	// Test tag detection with error
-	_, err = device.DetectTagsContext(ctx, 1, 0)
+	_, err = device.DetectTags(ctx, 1, 0)
 	assert.Error(t, err)
 
 	// Verify error was injected
@@ -206,11 +202,10 @@ func TestTransportErrorHandling(t *testing.T) {
 // TestTransportTimeout tests timeout scenarios
 func TestTransportTimeout(t *testing.T) {
 
-
 	// Setup mock transport with delay
 	mock := NewMockTransport()
 	mock.SetDelay(200 * time.Millisecond) // Simulate slow hardware
-	
+
 	// Configure responses
 	mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
 	mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
@@ -223,7 +218,7 @@ func TestTransportTimeout(t *testing.T) {
 	// Initialize device first
 	initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
 	defer initCancel()
-	
+
 	err = device.InitContext(initCtx)
 	require.NoError(t, err)
 
@@ -231,10 +226,10 @@ func TestTransportTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	tags, err := device.DetectTagsContext(ctx, 1, 0)
+	tags, err := device.DetectTags(ctx, 1, 0)
 	require.NoError(t, err)
 	assert.Len(t, tags, 1)
-	
+
 	// Note: Testing actual context timeout requires the transport layer to be context-aware,
 	// which would be a significant architectural change. For now, we verify that operations
 	// complete successfully within reasonable timeouts despite mock delays.
@@ -242,7 +237,6 @@ func TestTransportTimeout(t *testing.T) {
 
 // TestTagRemoval tests tag removal scenarios
 func TestTagRemoval(t *testing.T) {
-
 
 	// Create virtual tag and test removal
 	virtualTag := testutil.NewVirtualNTAG213(nil)
@@ -282,7 +276,7 @@ func BenchmarkTagDetection(b *testing.B) {
 	require.NoError(b, err)
 
 	ctx := context.Background()
-	
+
 	// Initialize device
 	err = device.InitContext(ctx)
 	require.NoError(b, err)
@@ -291,7 +285,7 @@ func BenchmarkTagDetection(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		tags, err := device.DetectTagsContext(ctx, 1, 0)
+		tags, err := device.DetectTags(ctx, 1, 0)
 		require.NoError(b, err)
 		require.Len(b, tags, 1)
 	}
@@ -299,7 +293,6 @@ func BenchmarkTagDetection(b *testing.B) {
 
 // TestMIFAREVirtualTagReadWrite tests the MIFARE virtual tag implementations
 func TestMIFAREVirtualTagReadWrite(t *testing.T) {
-
 
 	tests := []struct {
 		name        string
@@ -322,7 +315,6 @@ func TestMIFAREVirtualTagReadWrite(t *testing.T) {
 	for _, tt := range tests {
 		tt := tt // capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
-
 
 			// Create virtual tag
 			virtualTag := tt.createTag()
@@ -396,7 +388,6 @@ func TestMIFAREVirtualTagReadWrite(t *testing.T) {
 // TestMIFAREWriteProtection tests write protection on sector trailers
 func TestMIFAREWriteProtection(t *testing.T) {
 
-
 	tests := []struct {
 		name              string
 		createTag         func() *testutil.VirtualTag
@@ -420,7 +411,6 @@ func TestMIFAREWriteProtection(t *testing.T) {
 	for _, tt := range tests {
 		tt := tt // capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
-
 
 			virtualTag := tt.createTag()
 			require.NotNil(t, virtualTag)
