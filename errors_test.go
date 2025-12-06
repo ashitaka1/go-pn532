@@ -24,6 +24,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsRetryable(t *testing.T) {
@@ -575,5 +576,310 @@ func TestPN532ErrorHelperFunctions(t *testing.T) {
 				t.Errorf("IsPN532TimeoutError() = %v, want %v", got, tt.wantIsPN532TimeoutError)
 			}
 		})
+	}
+}
+
+// =============================================================================
+// Trace Tests
+// =============================================================================
+
+func TestTraceBuffer_BasicOperations(t *testing.T) {
+	t.Parallel()
+
+	tb := NewTraceBuffer("UART", "/dev/ttyUSB0", 10)
+
+	// Record TX and RX
+	tb.RecordTX([]byte{0x00, 0x00, 0xFF, 0x02, 0xFE, 0xD4, 0x02, 0x2A, 0x00}, "Cmd 0x02")
+	tb.RecordRX([]byte{0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00}, "ACK")
+	tb.RecordRX([]byte{0x00, 0x00, 0xFF, 0x06, 0xFA, 0xD5, 0x03, 0x32, 0x01, 0x06, 0x07, 0xE8, 0x00}, "Response")
+
+	// Wrap an error
+	originalErr := errors.New("test error")
+	wrappedErr := tb.WrapError(originalErr)
+
+	// Verify it's a TraceableError
+	var te *TraceableError
+	if !errors.As(wrappedErr, &te) {
+		t.Fatal("WrapError should return a TraceableError")
+	}
+
+	// Verify trace entries
+	if len(te.Trace) != 3 {
+		t.Errorf("Expected 3 trace entries, got %d", len(te.Trace))
+	}
+
+	// Verify first entry is TX
+	if te.Trace[0].Direction != TraceTX {
+		t.Errorf("First entry should be TX, got %v", te.Trace[0].Direction)
+	}
+
+	// Verify transport and port
+	if te.Transport != "UART" {
+		t.Errorf("Transport = %q, want %q", te.Transport, "UART")
+	}
+	if te.Port != "/dev/ttyUSB0" {
+		t.Errorf("Port = %q, want %q", te.Port, "/dev/ttyUSB0")
+	}
+}
+
+func TestTraceableError_Unwrap(t *testing.T) {
+	t.Parallel()
+
+	originalErr := ErrNoACK
+	tb := NewTraceBuffer("I2C", "/dev/i2c-1", 10)
+	tb.RecordTX([]byte{0x01, 0x02}, "test")
+	wrappedErr := tb.WrapError(originalErr)
+
+	// errors.Is should work through TraceableError
+	if !errors.Is(wrappedErr, ErrNoACK) {
+		t.Error("errors.Is should match underlying error through TraceableError")
+	}
+
+	// Unwrap should return original error
+	var te *TraceableError
+	if errors.As(wrappedErr, &te) {
+		if !errors.Is(te.Unwrap(), originalErr) {
+			t.Error("Unwrap should return the original error")
+		}
+	}
+}
+
+func TestTraceableError_FormatTrace(t *testing.T) {
+	t.Parallel()
+
+	tb := NewTraceBuffer("SPI", "/dev/spidev0.0", 10)
+	tb.RecordTX([]byte{0xD4, 0x02}, "GetFirmware")
+	tb.RecordRX([]byte{0xD5, 0x03, 0x32}, "Response")
+	tb.RecordTimeout("No ACK")
+
+	wrappedErr := tb.WrapError(errors.New("timeout"))
+
+	var te *TraceableError
+	if !errors.As(wrappedErr, &te) {
+		t.Fatal("Expected TraceableError")
+	}
+
+	formatted := te.FormatTrace()
+
+	// Should contain transport info
+	if !strings.Contains(formatted, "SPI") {
+		t.Error("FormatTrace should contain transport type")
+	}
+
+	// Should contain port
+	if !strings.Contains(formatted, "/dev/spidev0.0") {
+		t.Error("FormatTrace should contain port name")
+	}
+
+	// Should contain direction markers
+	if !strings.Contains(formatted, ">") && !strings.Contains(formatted, "<") {
+		t.Error("FormatTrace should contain direction markers")
+	}
+
+	// Should contain hex data
+	if !strings.Contains(formatted, "D4") {
+		t.Error("FormatTrace should contain hex-formatted data")
+	}
+}
+
+func TestTraceBuffer_CircularBuffer(t *testing.T) {
+	t.Parallel()
+
+	// Create a small buffer
+	tb := NewTraceBuffer("UART", "test", 3)
+
+	// Add more entries than capacity
+	tb.RecordTX([]byte{0x01}, "first")
+	tb.RecordTX([]byte{0x02}, "second")
+	tb.RecordTX([]byte{0x03}, "third")
+	tb.RecordTX([]byte{0x04}, "fourth")
+
+	wrappedErr := tb.WrapError(errors.New("test"))
+	var te *TraceableError
+	if !errors.As(wrappedErr, &te) {
+		t.Fatal("Expected TraceableError")
+	}
+
+	// Should only have 3 entries (oldest evicted)
+	if len(te.Trace) != 3 {
+		t.Errorf("Expected 3 entries in circular buffer, got %d", len(te.Trace))
+	}
+
+	// First entry should be "second" (oldest non-evicted)
+	if te.Trace[0].Note != "second" {
+		t.Errorf("First entry should be 'second', got %q", te.Trace[0].Note)
+	}
+
+	// Last entry should be "fourth" (newest)
+	if te.Trace[2].Note != "fourth" {
+		t.Errorf("Last entry should be 'fourth', got %q", te.Trace[2].Note)
+	}
+}
+
+func TestTraceBuffer_WrapNilError(t *testing.T) {
+	t.Parallel()
+
+	tb := NewTraceBuffer("UART", "test", 10)
+	tb.RecordTX([]byte{0x01}, "test")
+
+	// WrapError should return nil for nil error
+	result := tb.WrapError(nil)
+	if result != nil {
+		t.Error("WrapError(nil) should return nil")
+	}
+}
+
+func TestTraceBuffer_Clear(t *testing.T) {
+	t.Parallel()
+
+	tb := NewTraceBuffer("UART", "test", 10)
+	tb.RecordTX([]byte{0x01}, "first")
+	tb.RecordTX([]byte{0x02}, "second")
+
+	tb.Clear()
+
+	wrappedErr := tb.WrapError(errors.New("test"))
+	var te *TraceableError
+	if !errors.As(wrappedErr, &te) {
+		t.Fatal("Expected TraceableError")
+	}
+
+	if len(te.Trace) != 0 {
+		t.Errorf("Expected 0 entries after Clear, got %d", len(te.Trace))
+	}
+}
+
+func TestHasTrace(t *testing.T) {
+	t.Parallel()
+
+	// Error with trace
+	tb := NewTraceBuffer("UART", "test", 10)
+	tb.RecordTX([]byte{0x01}, "test")
+	withTrace := tb.WrapError(errors.New("test"))
+
+	if !HasTrace(withTrace) {
+		t.Error("HasTrace should return true for TraceableError")
+	}
+
+	// Error without trace
+	withoutTrace := errors.New("plain error")
+	if HasTrace(withoutTrace) {
+		t.Error("HasTrace should return false for plain error")
+	}
+
+	// Nil error
+	if HasTrace(nil) {
+		t.Error("HasTrace should return false for nil")
+	}
+}
+
+func TestGetTrace(t *testing.T) {
+	t.Parallel()
+
+	// Error with trace
+	tb := NewTraceBuffer("UART", "test", 10)
+	tb.RecordTX([]byte{0x01}, "test")
+	withTrace := tb.WrapError(errors.New("test"))
+
+	te := GetTrace(withTrace)
+	if te == nil {
+		t.Fatal("GetTrace should return TraceableError")
+	}
+	if te.Transport != "UART" {
+		t.Errorf("Transport = %q, want %q", te.Transport, "UART")
+	}
+
+	// Error without trace
+	withoutTrace := errors.New("plain error")
+	if GetTrace(withoutTrace) != nil {
+		t.Error("GetTrace should return nil for plain error")
+	}
+
+	// Nil error
+	if GetTrace(nil) != nil {
+		t.Error("GetTrace should return nil for nil")
+	}
+}
+
+func TestTraceEntry_String(t *testing.T) {
+	t.Parallel()
+
+	entry := TraceEntry{
+		Direction: TraceTX,
+		Data:      []byte{0xD4, 0x02},
+		Timestamp: time.Now(),
+		Note:      "GetFirmware",
+	}
+
+	str := entry.String()
+
+	if !strings.Contains(str, "TX") {
+		t.Error("TraceEntry.String should contain direction")
+	}
+	if !strings.Contains(str, "D4") {
+		t.Error("TraceEntry.String should contain hex data")
+	}
+	if !strings.Contains(str, "GetFirmware") {
+		t.Error("TraceEntry.String should contain note")
+	}
+}
+
+func TestFormatHexBytes_LongData(t *testing.T) {
+	t.Parallel()
+
+	// Create data longer than 32 bytes
+	longData := make([]byte, 50)
+	for i := range longData {
+		longData[i] = byte(i)
+	}
+
+	formatted := formatHexBytes(longData)
+
+	// Should be truncated
+	if !strings.Contains(formatted, "...") {
+		t.Error("Long data should be truncated with ellipsis")
+	}
+	if !strings.Contains(formatted, "50 bytes total") {
+		t.Error("Should indicate total bytes")
+	}
+}
+
+func TestFormatHexBytes_EmptyData(t *testing.T) {
+	t.Parallel()
+
+	formatted := formatHexBytes([]byte{})
+	if formatted != "(empty)" {
+		t.Errorf("Expected '(empty)', got %q", formatted)
+	}
+}
+
+func TestTraceableError_Error(t *testing.T) {
+	t.Parallel()
+
+	originalErr := errors.New("original error message")
+	tb := NewTraceBuffer("UART", "test", 10)
+	wrappedErr := tb.WrapError(originalErr)
+
+	// Error() should return the underlying error message
+	if wrappedErr.Error() != originalErr.Error() {
+		t.Errorf("Error() = %q, want %q", wrappedErr.Error(), originalErr.Error())
+	}
+}
+
+func TestTraceableError_FormatTrace_Empty(t *testing.T) {
+	t.Parallel()
+
+	tb := NewTraceBuffer("UART", "/dev/ttyUSB0", 10)
+	// Don't add any entries
+
+	wrappedErr := tb.WrapError(errors.New("test"))
+	var te *TraceableError
+	if !errors.As(wrappedErr, &te) {
+		t.Fatal("Expected TraceableError")
+	}
+
+	formatted := te.FormatTrace()
+	if !strings.Contains(formatted, "no trace data") {
+		t.Error("FormatTrace with empty trace should indicate no data")
 	}
 }

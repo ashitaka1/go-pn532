@@ -56,9 +56,31 @@ var (
 
 // Transport implements the pn532.Transport interface for I2C communication
 type Transport struct {
-	dev     *i2c.Dev
-	busName string
-	timeout time.Duration
+	dev          *i2c.Dev
+	currentTrace *pn532.TraceBuffer // Trace buffer for current command (error-only)
+	busName      string
+	timeout      time.Duration
+}
+
+// traceTX records a TX operation if trace buffer is active
+func (t *Transport) traceTX(data []byte, note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordTX(data, note)
+	}
+}
+
+// traceRX records an RX operation if trace buffer is active
+func (t *Transport) traceRX(data []byte, note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordRX(data, note)
+	}
+}
+
+// traceTimeout records a timeout if trace buffer is active
+func (t *Transport) traceTimeout(note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordTimeout(note)
+	}
 }
 
 // New creates a new I2C transport
@@ -92,19 +114,29 @@ func New(busName string) (*Transport, error) {
 }
 
 // SendCommand sends a command to the PN532 and waits for response
+//
+//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
 func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
+	// Create trace buffer for this command (only used on error)
+	t.currentTrace = pn532.NewTraceBuffer("I2C", t.busName, 16)
+	defer func() { t.currentTrace = nil }() // Clear after command completes
+
 	if err := t.sendFrame(cmd, args); err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	if err := t.waitAck(); err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	// Small delay for PN532 to process command
 	time.Sleep(6 * time.Millisecond)
 
-	return t.receiveFrame()
+	resp, err := t.receiveFrame()
+	if err != nil {
+		return nil, t.currentTrace.WrapError(err)
+	}
+	return resp, nil
 }
 
 // SendCommandWithContext sends a command to the PN532 with context support
@@ -218,6 +250,7 @@ func (t *Transport) sendFrame(cmd byte, args []byte) error {
 	frm[8+len(args)] = 0x00          // postamble
 
 	// Send frame via I2C (slice to exact size)
+	t.traceTX(frm[:totalFrameSize], fmt.Sprintf("Cmd 0x%02X", cmd))
 	if err := t.dev.Tx(frm[:totalFrameSize], nil); err != nil {
 		return fmt.Errorf("failed to send I2C frame: %w", err)
 	}
@@ -246,17 +279,20 @@ func (t *Transport) waitAck() error {
 		}
 
 		if bytes.Equal(ackBuf, ackFrame) {
+			t.traceRX(ackFrame, "ACK")
 			return nil
 		}
 
 		time.Sleep(time.Millisecond)
 	}
 
+	t.traceTimeout("No ACK received")
 	return pn532.NewNoACKError("waitAck", t.busName)
 }
 
 // sendAck sends an ACK frame to the PN532
 func (t *Transport) sendAck() error {
+	t.traceTX(ackFrame, "ACK")
 	if err := t.dev.Tx(ackFrame, nil); err != nil {
 		return fmt.Errorf("failed to send ACK: %w", err)
 	}
@@ -265,6 +301,7 @@ func (t *Transport) sendAck() error {
 
 // sendNack sends a NACK frame to the PN532
 func (t *Transport) sendNack() error {
+	t.traceTX(nackFrame, "NACK")
 	if err := t.dev.Tx(nackFrame, nil); err != nil {
 		return fmt.Errorf("failed to send NACK: %w", err)
 	}
@@ -323,6 +360,11 @@ func (t *Transport) receiveFrameAttempt() (data []byte, shouldRetry bool, err er
 		return nil, false, err
 	}
 	defer frame.PutBuffer(buf) // Ensure buffer is returned to pool
+
+	// Trace the raw response frame
+	if actualLen > 0 {
+		t.traceRX(buf[:actualLen], "Response")
+	}
 
 	off, err := t.findI2CFrameStart(buf, actualLen)
 	if err != nil {

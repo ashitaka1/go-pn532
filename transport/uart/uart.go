@@ -57,6 +57,7 @@ var (
 // Transport implements the pn532.Transport interface for UART communication.
 type Transport struct {
 	port                  serial.Port
+	currentTrace          *pn532.TraceBuffer
 	portName              string
 	mu                    syncutil.Mutex
 	lastCommand           byte
@@ -66,6 +67,27 @@ type Transport struct {
 // isWindows returns true if running on Windows
 func isWindows() bool {
 	return runtime.GOOS == "windows"
+}
+
+// traceTX records a TX operation if trace buffer is active
+func (t *Transport) traceTX(data []byte, note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordTX(data, note)
+	}
+}
+
+// traceRX records an RX operation if trace buffer is active
+func (t *Transport) traceRX(data []byte, note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordRX(data, note)
+	}
+}
+
+// traceTimeout records a timeout if trace buffer is active
+func (t *Transport) traceTimeout(note string) {
+	if t.currentTrace != nil {
+		t.currentTrace.RecordTimeout(note)
+	}
 }
 
 // getReadTimeout returns the unified read timeout for all platforms
@@ -109,16 +131,22 @@ func New(portName string) (*Transport, error) {
 }
 
 // SendCommand sends a command to the PN532 and waits for response.
+//
+//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
 func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Create trace buffer for this command (only used on error)
+	t.currentTrace = pn532.NewTraceBuffer("UART", t.portName, 16)
+	defer func() { t.currentTrace = nil }() // Clear after command completes
 
 	// Track the command for special handling
 	t.lastCommand = cmd
 
 	ackData, err := t.sendFrame(cmd, args)
 	if err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	_ = ackData // ACK data handled in waitAck
@@ -132,7 +160,7 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 		// They return 0x00 for OK, 0xFF for failure
 		res, diagErr := t.receiveSpecialDiagnoseByte(args[0])
 		if diagErr != nil {
-			return nil, diagErr
+			return nil, t.currentTrace.WrapError(diagErr)
 		}
 
 		// Mark connection as established after first successful command
@@ -146,11 +174,11 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 
 	res, err := t.receiveFrame(ackData)
 	if err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	if err := t.sendAck(); err != nil {
-		return nil, err
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	// Mark connection as established after first successful command
@@ -331,6 +359,7 @@ func (t *Transport) singleWakeUpAttempt() error {
 		0x00, 0x00, 0x00, 0x00,
 	}
 
+	t.traceTX(wakeSequence, "Wakeup")
 	bytesWritten, err := t.port.Write(wakeSequence)
 	if err != nil {
 		return fmt.Errorf("UART wake up write failed: %w", err)
@@ -343,6 +372,7 @@ func (t *Transport) singleWakeUpAttempt() error {
 
 // sendAck sends an ACK frame
 func (t *Transport) sendAck() error {
+	t.traceTX(ackFrame, "ACK")
 	n, err := t.port.Write(ackFrame)
 	if err != nil {
 		return fmt.Errorf("UART ACK write failed: %w", err)
@@ -355,6 +385,7 @@ func (t *Transport) sendAck() error {
 
 // sendNack sends a NACK frame
 func (t *Transport) sendNack() error {
+	t.traceTX(nackFrame, "NACK")
 	n, err := t.port.Write(nackFrame)
 	if err != nil {
 		return fmt.Errorf("UART NACK write failed: %w", err)
@@ -385,6 +416,7 @@ func (t *Transport) waitAck() ([]byte, error) {
 
 	for {
 		if tries >= maxTries {
+			t.traceTimeout("No ACK after 32 bytes")
 			return preAck, pn532.NewNoACKError("waitAck", t.portName)
 		}
 
@@ -402,6 +434,7 @@ func (t *Transport) waitAck() ([]byte, error) {
 		}
 
 		if bytes.Equal(ackBuf, ackFrame) {
+			t.traceRX(ackFrame, "ACK")
 			// Copy preAck data to new buffer for return since we'll release the pooled buffer
 			if len(preAck) == 0 {
 				return []byte{}, nil
@@ -466,6 +499,7 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 		return nil, err
 	}
 
+	t.traceTX(finalFrame, fmt.Sprintf("Cmd 0x%02X", cmd))
 	n, err := t.port.Write(finalFrame)
 	if err != nil {
 		return nil, fmt.Errorf("UART send frame write failed: %w", err)
@@ -777,7 +811,12 @@ func (*Transport) validateFrameChecksum(buf []byte, off, frameLen int) bool {
 }
 
 // extractFrameData extracts and validates the final frame data
-func (*Transport) extractFrameData(buf []byte, off, frameLen, _ int) (data []byte, retry bool, err error) {
+func (t *Transport) extractFrameData(buf []byte, off, frameLen, totalLen int) (data []byte, retry bool, err error) {
+	// Trace the raw frame received (including preamble, checksums, etc.)
+	if totalLen > 0 {
+		t.traceRX(buf[:totalLen], "Response")
+	}
+
 	data, retry, err = frame.ExtractFrameData(buf, off, frameLen, pn532ToHost)
 	if err != nil {
 		return data, retry, fmt.Errorf("UART frame data extraction failed: %w", err)
