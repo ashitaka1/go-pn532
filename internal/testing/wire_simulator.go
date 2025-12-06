@@ -173,6 +173,7 @@ type VirtualPN532 struct {
 	injectChecksumError bool
 	injectNACK          bool
 	dropNextACK         bool
+	zombieMode          bool
 	firmwareVer         byte
 }
 
@@ -293,6 +294,16 @@ func (v *VirtualPN532) InjectPreACKGarbage(garbage []byte) {
 	copy(v.preACKGarbage, garbage)
 }
 
+// SetZombieMode enables or disables zombie mode. When enabled, the simulator
+// will ACK commands but never send the response frame. This tests timeout
+// handling and recovery when the PN532 becomes unresponsive after acknowledging
+// a command (e.g., due to power issues, hardware fault, or firmware hang).
+func (v *VirtualPN532) SetZombieMode(enabled bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.zombieMode = enabled
+}
+
 // GetState returns the current simulator state.
 func (v *VirtualPN532) GetState() SimulatorState {
 	v.mu.Lock()
@@ -326,6 +337,7 @@ func (v *VirtualPN532) Reset() {
 	v.injectNACK = false
 	v.dropNextACK = false
 	v.preACKGarbage = nil
+	v.zombieMode = false
 }
 
 // processReceivedData parses frames from the receive buffer and generates responses.
@@ -524,6 +536,12 @@ func (v *VirtualPN532) processCommand(frameData []byte) error {
 		v.txBuffer.Write(ACKFrame)
 	}
 	v.dropNextACK = false
+
+	// In zombie mode, ACK is sent but response is never generated
+	// This simulates a PN532 that hangs after acknowledging a command
+	if v.zombieMode {
+		return nil
+	}
 
 	cmd := frameData[1]
 	params := frameData[2:]

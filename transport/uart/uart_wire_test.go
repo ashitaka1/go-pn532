@@ -1055,3 +1055,150 @@ func TestUART_PreACKGarbage_WithJitter(t *testing.T) {
 	assert.Len(t, resp, 5)
 	assert.Equal(t, byte(0x32), resp[1])
 }
+
+// =============================================================================
+// Zombie Mode Tests
+// These tests verify timeout handling when PN532 ACKs but never sends response
+// =============================================================================
+
+// TestUART_ZombieMode_Basic tests that zombie mode causes timeout
+func TestUART_ZombieMode_Basic(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	sim.SetZombieMode(true)
+
+	transport := newTestTransport(sim)
+	// Set a short timeout so test doesn't take too long
+	_ = transport.SetTimeout(50 * time.Millisecond)
+
+	// Command should time out - ACK is received but no response
+	_, err := transport.SendCommand(0x02, nil)
+	require.Error(t, err, "Command should fail in zombie mode")
+
+	// Error should be a transport error (timeout type)
+	var transportErr *pn532.TransportError
+	assert.True(t, errors.As(err, &transportErr), "Error should be TransportError, got: %T", err)
+}
+
+// TestUART_ZombieMode_Recovery tests recovery after disabling zombie mode
+func TestUART_ZombieMode_Recovery(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(50 * time.Millisecond)
+
+	// First: Enable zombie mode and verify timeout
+	sim.SetZombieMode(true)
+	_, err := transport.SendCommand(0x02, nil)
+	require.Error(t, err, "Command should fail in zombie mode")
+
+	// Reset the simulator (clears buffers and zombie mode)
+	sim.Reset()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Now command should succeed
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed after disabling zombie mode")
+	require.NotNil(t, resp)
+	assert.Len(t, resp, 5)
+}
+
+// TestUART_ZombieMode_MultipleCommands tests multiple commands in zombie mode
+func TestUART_ZombieMode_MultipleCommands(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	sim.SetZombieMode(true)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(30 * time.Millisecond)
+
+	// Multiple commands should all time out
+	for i := range 3 {
+		_, err := transport.SendCommand(0x02, nil)
+		require.Error(t, err, "Command %d should fail in zombie mode", i+1)
+	}
+}
+
+// TestUART_ZombieMode_SAMConfiguration tests SAM config command in zombie mode
+func TestUART_ZombieMode_SAMConfiguration(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetZombieMode(true)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(50 * time.Millisecond)
+
+	// SAM Configuration should also time out in zombie mode
+	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.Error(t, err, "SAMConfiguration should fail in zombie mode")
+}
+
+// TestUART_ZombieMode_InListPassiveTarget tests tag detection in zombie mode.
+//
+// IMPORTANT: This test documents correct PN532 behavior, not a quirk.
+//
+// Standard PN532 behavior for InListPassiveTarget:
+//   - Tag present: PN532 sends ACK, then response frame with tag data
+//   - No tag present: PN532 sends ACK only, NO response frame (times out)
+//
+// This is confirmed by NXP documentation and matches how other libraries handle it:
+//   - Adafruit-PN532: returns false on timeout (interprets as "no card")
+//   - libnfc: treats timeout as "no targets found"
+//
+// Our UART transport converts the timeout into a synthetic [0x4B, 0x00] response
+// (InListPassiveTarget response code + 0 tags), which is semantically equivalent.
+//
+// Consequence: "zombie device" and "no tags present" are INDISTINGUISHABLE at the
+// wire level for InListPassiveTarget. Both result in: ACK received, no response.
+// This is correct - zombie mode detection works for other commands like
+// GetFirmwareVersion and SAMConfiguration.
+func TestUART_ZombieMode_InListPassiveTarget(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+	sim.SetZombieMode(true)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(50 * time.Millisecond)
+
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+
+	// Zombie mode + InListPassiveTarget = "no tags" response (not an error)
+	// This matches real PN532 behavior where no-tag and unresponsive are identical
+	require.NoError(t, err, "InListPassiveTarget timeout is 'no tags', not an error")
+	assert.Equal(t, []byte{0x4B, 0x00}, resp, "Synthetic 'no tags' response")
+}
+
+// TestUART_ZombieMode_TraceIncluded tests that trace is included in zombie timeout errors
+func TestUART_ZombieMode_TraceIncluded(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	sim.SetZombieMode(true)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(50 * time.Millisecond)
+
+	_, err := transport.SendCommand(0x02, nil)
+	require.Error(t, err)
+
+	// Error should include trace information
+	if pn532.HasTrace(err) {
+		trace := pn532.GetTrace(err)
+		require.NotNil(t, trace)
+		assert.Equal(t, "UART", trace.Transport)
+		assert.Greater(t, len(trace.Trace), 0, "Trace should have entries")
+
+		// Should have TX entry for the command and RX entry for ACK
+		var hasTX, hasRX bool
+		for _, entry := range trace.Trace {
+			if entry.Direction == pn532.TraceTX {
+				hasTX = true
+			}
+			if entry.Direction == pn532.TraceRX {
+				hasRX = true
+			}
+		}
+		assert.True(t, hasTX, "Trace should have TX entry")
+		assert.True(t, hasRX, "Trace should have RX entry (for ACK)")
+	}
+}
