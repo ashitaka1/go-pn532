@@ -291,6 +291,104 @@ func runWriteMode(ctx context.Context, device *pn532.Device, cfg *config) error 
 	return nil
 }
 
+func diagnoseFirmware(ctx context.Context, device *pn532.Device) {
+	version, err := device.GetFirmwareVersion(ctx)
+	if err != nil {
+		_, _ = fmt.Printf("[✗] Firmware: %v\n", err)
+		return
+	}
+	var protocols []string
+	if version.SupportIso14443a {
+		protocols = append(protocols, "ISO14443A")
+	}
+	if version.SupportIso14443b {
+		protocols = append(protocols, "ISO14443B")
+	}
+	if version.SupportIso18092 {
+		protocols = append(protocols, "ISO18092")
+	}
+	_, _ = fmt.Printf("[✓] Firmware: v%s (%s)\n", version.Version, strings.Join(protocols, ", "))
+}
+
+func diagnoseRTT(ctx context.Context, device *pn532.Device) {
+	const samples = 10
+	var rtts []time.Duration
+	for range samples {
+		start := time.Now()
+		_, err := device.GetFirmwareVersion(ctx)
+		if err == nil {
+			rtts = append(rtts, time.Since(start))
+		}
+	}
+	if len(rtts) == 0 {
+		_, _ = fmt.Println("[✗] Communication: Failed to measure RTT")
+		return
+	}
+	minRTT, maxRTT, sumRTT := rtts[0], rtts[0], time.Duration(0)
+	for _, rtt := range rtts {
+		sumRTT += rtt
+		if rtt < minRTT {
+			minRTT = rtt
+		}
+		if rtt > maxRTT {
+			maxRTT = rtt
+		}
+	}
+	avgRTT := sumRTT / time.Duration(len(rtts))
+	_, _ = fmt.Printf("[✓] Communication: RTT min=%s avg=%s max=%s (%d samples)\n",
+		minRTT.Round(time.Millisecond), avgRTT.Round(time.Millisecond), maxRTT.Round(time.Millisecond), len(rtts))
+}
+
+func diagnoseTest(ctx context.Context, device *pn532.Device, testNum byte, name string) {
+	result, err := device.Diagnose(ctx, testNum, nil)
+	switch {
+	case err != nil:
+		_, _ = fmt.Printf("[✗] %s: %v\n", name, err)
+	case result.Success:
+		_, _ = fmt.Printf("[✓] %s: OK\n", name)
+	default:
+		_, _ = fmt.Printf("[✗] %s: FAILED\n", name)
+	}
+}
+
+func diagnoseRFField(ctx context.Context, device *pn532.Device) {
+	status, err := device.GetGeneralStatus(ctx)
+	switch {
+	case err != nil:
+		_, _ = fmt.Printf("[✗] RF field: %v\n", err)
+	case status.FieldPresent:
+		_, _ = fmt.Println("[✓] RF field: Active")
+	default:
+		_, _ = fmt.Println("[✓] RF field: Inactive (will activate on poll)")
+	}
+}
+
+func diagnoseTagDetection(ctx context.Context, device *pn532.Device) {
+	detectCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	tag, err := device.DetectTag(detectCtx)
+	if err != nil {
+		_, _ = fmt.Println("[✓] Tag detection: Ready (no tag present)")
+	} else {
+		_, _ = fmt.Printf("[✓] Tag detection: %s (UID: %s)\n", tag.Type, tag.UID)
+	}
+}
+
+func runDiagnostics(ctx context.Context, device *pn532.Device) {
+	_, _ = fmt.Println("\nPN532 Diagnostics")
+	_, _ = fmt.Println("=================")
+
+	diagnoseFirmware(ctx, device)
+	diagnoseRTT(ctx, device)
+	diagnoseTest(ctx, device, pn532.DiagnoseROMTest, "ROM test")
+	diagnoseTest(ctx, device, pn532.DiagnoseRAMTest, "RAM test")
+	diagnoseTest(ctx, device, pn532.DiagnoseSelfAntennaTest, "Antenna test")
+	diagnoseRFField(ctx, device)
+	diagnoseTagDetection(ctx, device)
+
+	_, _ = fmt.Println()
+}
+
 func run(ctx context.Context, cfg *config) error {
 	// Connect to device
 	device, err := connectToDevice(ctx, cfg)
@@ -302,6 +400,9 @@ func run(ctx context.Context, cfg *config) error {
 			_, _ = fmt.Fprintf(os.Stderr, "Failed to close device: %v\n", err)
 		}
 	}()
+
+	// Run diagnostics on startup
+	runDiagnostics(ctx, device)
 
 	// Mode selection based on writeText parameter
 	if cfg.writeText != "" {

@@ -60,6 +60,7 @@ type Transport struct {
 	currentTrace          *pn532.TraceBuffer
 	portName              string
 	mu                    syncutil.Mutex
+	closeMu               syncutil.Mutex // Protects port close operations
 	lastCommand           byte
 	connectionEstablished bool
 }
@@ -234,18 +235,32 @@ func (t *Transport) SetTimeout(timeout time.Duration) error {
 }
 
 // Close closes the transport connection
+// This method uses a separate mutex (closeMu) to close the port without waiting
+// for the main mutex (mu). This allows closing the port while SendCommand is
+// blocking on a read. Closing the port causes any blocking reads to fail
+// immediately with an I/O error, allowing SendCommand to return promptly.
 func (t *Transport) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.port != nil {
-		err := t.port.Close()
-		t.port = nil                    // Clear port reference after closing
-		t.connectionEstablished = false // Reset connection state
-		if err != nil {
+	// Use closeMu to serialize close operations and safely access port
+	t.closeMu.Lock()
+	port := t.port
+	if port != nil {
+		// Close the port - this will interrupt any blocking reads in SendCommand
+		// We do this BEFORE acquiring mu to avoid deadlock
+		if err := port.Close(); err != nil {
+			t.closeMu.Unlock()
 			return fmt.Errorf("UART close failed: %w", err)
 		}
 	}
+	t.closeMu.Unlock()
+
+	// Now acquire the main mutex to update state
+	// This will block until SendCommand finishes (which should be quick now
+	// that the port is closed and reads are failing)
+	t.mu.Lock()
+	t.port = nil
+	t.connectionEstablished = false
+	t.mu.Unlock()
+
 	return nil
 }
 

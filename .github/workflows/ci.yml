@@ -19,10 +19,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: ${{ matrix.go-version }}
 
@@ -54,10 +54,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: ${{ matrix.go-version }}
 
@@ -83,10 +83,10 @@ jobs:
   fuzz:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.24.x'
 
@@ -104,15 +104,15 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.24.x'
 
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v7
+      uses: golangci/golangci-lint-action@v9
       with:
         version: latest
         args: --timeout 5m
@@ -120,10 +120,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.24.x'
 
@@ -138,3 +138,16 @@ jobs:
             (cd "$dir" && go build -v .)
           fi
         done
+
+    - name: Cross-compile check
+      run: |
+        echo "Cross-compiling for Linux (amd64)..."
+        GOOS=linux GOARCH=amd64 go build -v ./...
+        echo "Cross-compiling for Linux (arm64)..."
+        GOOS=linux GOARCH=arm64 go build -v ./...
+        echo "Cross-compiling for Windows (amd64)..."
+        GOOS=windows GOARCH=amd64 go build -v ./...
+        echo "Cross-compiling for macOS (amd64)..."
+        GOOS=darwin GOARCH=amd64 go build -v ./...
+        echo "Cross-compiling for macOS (arm64)..."
+        GOOS=darwin GOARCH=arm64 go build -v ./...
