@@ -1202,3 +1202,213 @@ func TestUART_ZombieMode_TraceIncluded(t *testing.T) {
 		assert.True(t, hasRX, "Trace should have RX entry (for ACK)")
 	}
 }
+
+// =============================================================================
+// Rapid Polling Stress Tests
+// =============================================================================
+// These tests hammer InListPassiveTarget rapidly to catch state machine
+// corruption, race conditions, and issues with clone chips that crash
+// when polled too fast.
+
+// TestUART_RapidPolling_Basic tests rapid InListPassiveTarget polling without jitter
+func TestUART_RapidPolling_Basic(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	const numPolls = 50
+	var successCount, errorCount int
+
+	for range numPolls {
+		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00}) // InListPassiveTarget
+		if err != nil {
+			errorCount++
+			continue
+		}
+		successCount++
+
+		// Verify we got a valid response (either tag or no-tag)
+		require.True(t, len(resp) >= 2, "Response should have at least 2 bytes")
+		assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
+	}
+
+	// All polls should succeed in ideal conditions
+	assert.Equal(t, numPolls, successCount, "All polls should succeed")
+	assert.Equal(t, 0, errorCount, "No errors expected")
+}
+
+// TestUART_RapidPolling_WithJitter tests rapid polling with fragmented reads
+func TestUART_RapidPolling_WithJitter(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	config := virt.JitterConfig{
+		MaxLatencyMs:     10,
+		FragmentReads:    true,
+		FragmentMinBytes: 2,
+	}
+	transport := newJitteryTestTransport(sim, config)
+	_ = transport.SetTimeout(200 * time.Millisecond)
+
+	const numPolls = 30
+	var successCount, errorCount int
+
+	for range numPolls {
+		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		if err != nil {
+			errorCount++
+			continue
+		}
+		successCount++
+		require.True(t, len(resp) >= 2)
+		assert.Equal(t, byte(0x4B), resp[0])
+	}
+
+	// With jitter, we should still have high success rate
+	assert.GreaterOrEqual(t, successCount, numPolls*8/10, "At least 80% success rate with jitter")
+}
+
+// TestUART_RapidPolling_TagTransitions tests rapid polling during tag insert/remove
+func TestUART_RapidPolling_TagTransitions(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	const numPolls = 40
+	var tagPresentCount, tagAbsentCount int
+
+	for i := range numPolls {
+		// Toggle tag presence every 5 polls
+		if i%10 < 5 {
+			sim.AddTag(tag)
+		} else {
+			sim.RemoveAllTags()
+		}
+
+		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		require.NoError(t, err, "Poll should not error")
+		require.True(t, len(resp) >= 2)
+
+		numTags := resp[1]
+		if numTags > 0 {
+			tagPresentCount++
+		} else {
+			tagAbsentCount++
+		}
+	}
+
+	// Should see both tag present and absent states
+	assert.Positive(t, tagPresentCount, "Should detect tag present at least once")
+	assert.Positive(t, tagAbsentCount, "Should detect tag absent at least once")
+}
+
+// TestUART_RapidPolling_Recovery tests recovery after inducing errors
+func TestUART_RapidPolling_Recovery(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	// Phase 1: Normal polling
+	for range 10 {
+		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		require.NoError(t, err)
+		assert.Equal(t, byte(0x4B), resp[0])
+	}
+
+	// Phase 2: Enable zombie mode (simulates device hang)
+	sim.SetZombieMode(true)
+	for range 5 {
+		_, _ = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		// Errors expected (synthetic response for InListPassiveTarget)
+	}
+
+	// Phase 3: Disable zombie mode and verify recovery
+	sim.SetZombieMode(false)
+	var recoverySuccess int
+	for range 10 {
+		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		if err == nil && len(resp) >= 2 && resp[0] == 0x4B {
+			recoverySuccess++
+		}
+	}
+
+	// Should recover and detect tags again
+	assert.GreaterOrEqual(t, recoverySuccess, 8, "Should recover at least 80% after zombie mode")
+}
+
+// TestUART_RapidPolling_MixedCommands tests rapid interleaved commands
+func TestUART_RapidPolling_MixedCommands(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	const iterations = 20
+	var pollSuccess, fwSuccess, samSuccess int
+
+	for range iterations {
+		// InListPassiveTarget
+		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		if err == nil && len(resp) >= 2 && resp[0] == 0x4B {
+			pollSuccess++
+		}
+
+		// GetFirmwareVersion (response: [0x03, IC, Ver, Rev, Support] = 5 bytes)
+		resp, err = transport.SendCommand(0x02, nil)
+		if err == nil && len(resp) == 5 {
+			fwSuccess++
+		}
+
+		// SAMConfiguration
+		resp, err = transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+		if err == nil {
+			samSuccess++
+		}
+	}
+
+	// All commands should succeed
+	assert.Equal(t, iterations, pollSuccess, "All polls should succeed")
+	assert.Equal(t, iterations, fwSuccess, "All firmware queries should succeed")
+	assert.Equal(t, iterations, samSuccess, "All SAM configs should succeed")
+}
+
+// TestUART_RapidPolling_AggressiveJitter tests rapid polling with worst-case jitter
+func TestUART_RapidPolling_AggressiveJitter(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	config := virt.JitterConfig{
+		MaxLatencyMs:      15,
+		FragmentReads:     true,
+		FragmentMinBytes:  1, // Single byte fragmentation
+		USBBoundaryStress: true,
+	}
+	transport := newJitteryTestTransport(sim, config)
+	_ = transport.SetTimeout(300 * time.Millisecond)
+
+	const numPolls = 20
+	var successCount int
+
+	for range numPolls {
+		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		if err == nil && len(resp) >= 2 && resp[0] == 0x4B {
+			successCount++
+		}
+	}
+
+	// Even with aggressive jitter, should have reasonable success
+	assert.GreaterOrEqual(t, successCount, numPolls*6/10, "At least 60% success with aggressive jitter")
+}
