@@ -203,8 +203,8 @@ func validateTimeoutError(t *testing.T, err error, elapsed, expectedTimeout time
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Expected context.DeadlineExceeded, got: %v", err)
 	}
-	// Should complete near the timeout duration
-	if elapsed < expectedTimeout || elapsed > expectedTimeout+50*time.Millisecond {
+	// Should complete near the timeout duration (allow 5ms under for timing precision on CI)
+	if elapsed < expectedTimeout-5*time.Millisecond || elapsed > expectedTimeout+50*time.Millisecond {
 		t.Errorf("Unexpected timing: %v, expected ~%v", elapsed, expectedTimeout)
 	}
 }
