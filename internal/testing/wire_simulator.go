@@ -160,19 +160,20 @@ type SimulatorState struct {
 // - State machine (power modes, RF field, target selection)
 // - Command-specific responses
 type VirtualPN532 struct {
-	lastResponse        []byte
+	preACKGarbage       []byte
 	tags                []*VirtualTag
+	lastResponse        []byte
 	rxBuffer            bytes.Buffer
 	txBuffer            bytes.Buffer
 	state               SimulatorState
 	mu                  syncutil.Mutex
 	firmwareIC          byte
-	firmwareVer         byte
 	firmwareRev         byte
 	firmwareSupport     byte
 	injectChecksumError bool
 	injectNACK          bool
 	dropNextACK         bool
+	firmwareVer         byte
 }
 
 // NewVirtualPN532 creates a new wire-level PN532 simulator.
@@ -281,6 +282,17 @@ func (v *VirtualPN532) DropNextACK() {
 	v.dropNextACK = true
 }
 
+// InjectPreACKGarbage causes the simulator to inject the specified garbage bytes
+// before the next ACK frame. This tests the UART transport's tryProcessPreAckData
+// handling, which was a critical Windows bug fix for garbage data appearing
+// before ACK frames on noisy UART lines.
+func (v *VirtualPN532) InjectPreACKGarbage(garbage []byte) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.preACKGarbage = make([]byte, len(garbage))
+	copy(v.preACKGarbage, garbage)
+}
+
 // GetState returns the current simulator state.
 func (v *VirtualPN532) GetState() SimulatorState {
 	v.mu.Lock()
@@ -313,6 +325,7 @@ func (v *VirtualPN532) Reset() {
 	v.injectChecksumError = false
 	v.injectNACK = false
 	v.dropNextACK = false
+	v.preACKGarbage = nil
 }
 
 // processReceivedData parses frames from the receive buffer and generates responses.
@@ -494,10 +507,16 @@ func (*VirtualPN532) parseExtendedFrame(data []byte) (resultData []byte, resultL
 // processCommand handles a parsed command frame.
 // frameData contains: TFI(1) + Command(1) + Params(n)
 //
-//nolint:revive,cyclop // High cyclomatic complexity expected for command dispatch
+//nolint:revive,cyclop,gocyclo // High cyclomatic complexity expected for command dispatch
 func (v *VirtualPN532) processCommand(frameData []byte) error {
 	if len(frameData) < 2 {
 		return v.sendErrorFrame()
+	}
+
+	// Inject pre-ACK garbage if configured (for testing UART garbage handling)
+	if len(v.preACKGarbage) > 0 {
+		v.txBuffer.Write(v.preACKGarbage)
+		v.preACKGarbage = nil
 	}
 
 	// Send ACK first (unless testing ACK drop)

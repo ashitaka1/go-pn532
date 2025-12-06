@@ -878,3 +878,180 @@ func TestUART_Jittery_AggressiveFragmentation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[1])
 }
+
+// =============================================================================
+// Pre-ACK Garbage Injection Tests
+// =============================================================================
+// These tests verify that the UART transport correctly handles garbage bytes
+// appearing before ACK frames - a critical Windows bug fix for noisy UART lines.
+
+// TestUART_PreACKGarbage_SimpleBytes tests handling of simple garbage before ACK
+func TestUART_PreACKGarbage_SimpleBytes(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Inject random garbage bytes before the ACK
+	garbage := []byte{0xAA, 0xBB, 0xCC, 0xDD}
+	sim.InjectPreACKGarbage(garbage)
+
+	transport := newTestTransport(sim)
+
+	// Despite garbage, command should succeed
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed despite pre-ACK garbage")
+	require.NotNil(t, resp)
+
+	// Verify response is correct
+	assert.Len(t, resp, 5)
+	assert.Equal(t, byte(0x03), resp[0], "Response code should be 0x03")
+	assert.Equal(t, byte(0x32), resp[1], "IC should be 0x32")
+}
+
+// TestUART_PreACKGarbage_FakeFrameStart tests garbage that looks like a frame start
+func TestUART_PreACKGarbage_FakeFrameStart(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Inject garbage that looks like frame start (0x00 0xFF pattern)
+	// This was specifically the Windows bug - partial frame data appearing
+	garbage := []byte{0x00, 0x00, 0xFF, 0xFF}
+	sim.InjectPreACKGarbage(garbage)
+
+	transport := newTestTransport(sim)
+
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed despite fake frame start garbage")
+	require.NotNil(t, resp)
+
+	assert.Len(t, resp, 5)
+	assert.Equal(t, byte(0x32), resp[1], "IC should be 0x32")
+}
+
+// TestUART_PreACKGarbage_SingleByte tests handling of single garbage byte
+func TestUART_PreACKGarbage_SingleByte(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Single byte garbage
+	sim.InjectPreACKGarbage([]byte{0x00})
+
+	transport := newTestTransport(sim)
+
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed with single garbage byte")
+	require.NotNil(t, resp)
+	assert.Len(t, resp, 5)
+}
+
+// TestUART_PreACKGarbage_LongGarbage tests handling of longer garbage sequences
+func TestUART_PreACKGarbage_LongGarbage(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// 16 bytes of garbage (max pre-ACK buffer is 16 in UART transport)
+	garbage := []byte{
+		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+		0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+	}
+	sim.InjectPreACKGarbage(garbage)
+
+	transport := newTestTransport(sim)
+
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed with long garbage")
+	require.NotNil(t, resp)
+	assert.Len(t, resp, 5)
+}
+
+// TestUART_PreACKGarbage_WithTagDetection tests pre-ACK garbage during tag operations
+func TestUART_PreACKGarbage_WithTagDetection(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	transport := newTestTransport(sim)
+
+	// First configure SAM without garbage
+	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+
+	// Now inject garbage for tag detection
+	sim.InjectPreACKGarbage([]byte{0xDE, 0xAD, 0xBE, 0xEF})
+
+	// Detect tag - should work despite garbage
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err, "Tag detection should succeed despite pre-ACK garbage")
+
+	// Verify tag was detected
+	require.GreaterOrEqual(t, len(resp), 2)
+	assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
+	assert.Equal(t, byte(0x01), resp[1], "Should detect 1 tag")
+}
+
+// TestUART_PreACKGarbage_MultipleCommands tests garbage is only injected once
+func TestUART_PreACKGarbage_MultipleCommands(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Inject garbage (should only affect next command)
+	sim.InjectPreACKGarbage([]byte{0xFF, 0xFF, 0xFF, 0xFF})
+
+	transport := newTestTransport(sim)
+
+	// First command - should handle garbage
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	assert.Len(t, resp, 5)
+
+	// Second command - should work without garbage
+	resp, err = transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	assert.Len(t, resp, 5)
+
+	// Third command - also clean
+	resp, err = transport.SendCommand(0x02, nil)
+	require.NoError(t, err)
+	assert.Len(t, resp, 5)
+}
+
+// TestUART_PreACKGarbage_AllZeros tests handling of all-zero garbage
+func TestUART_PreACKGarbage_AllZeros(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// All zeros - common case for noise on UART lines
+	garbage := []byte{0x00, 0x00, 0x00, 0x00, 0x00}
+	sim.InjectPreACKGarbage(garbage)
+
+	transport := newTestTransport(sim)
+
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed with all-zero garbage")
+	require.NotNil(t, resp)
+	assert.Len(t, resp, 5)
+}
+
+// TestUART_PreACKGarbage_WithJitter tests garbage combined with jittery reads
+func TestUART_PreACKGarbage_WithJitter(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Inject garbage
+	sim.InjectPreACKGarbage([]byte{0xAA, 0xBB, 0xCC})
+
+	// Create jittery transport (aggressive fragmentation)
+	config := virt.JitterConfig{
+		MaxLatencyMs:     5,
+		FragmentReads:    true,
+		FragmentMinBytes: 1,
+		Seed:             98765,
+	}
+	transport := newJitteryTestTransport(sim, config)
+
+	// Command should succeed despite both garbage AND jitter
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed with garbage and jitter")
+	require.NotNil(t, resp)
+	assert.Len(t, resp, 5)
+	assert.Equal(t, byte(0x32), resp[1])
+}
