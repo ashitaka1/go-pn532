@@ -2,7 +2,7 @@ module github.com/ZaparooProject/go-pn532
 
 go 1.23.0
 
-toolchain go1.24.5
+toolchain go1.24.11
 
 require (
 	github.com/hsanjuan/go-ndef v0.0.1
