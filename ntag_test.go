@@ -511,8 +511,8 @@ func TestNTAG215BlockByBlockBufferOverflow(t *testing.T) {
 	// Mock subsequent block reads (blocks 5-67) with test data
 	for block := uint8(5); block < 68; block++ {
 		blockData := make([]byte, 18) // Response header + 16 bytes data
-		blockData[0] = 0x41           //nolint:gosec // G602: slice has fixed size 18
-		blockData[1] = 0x00           //nolint:gosec // G602: slice has fixed size 18
+		blockData[0] = 0x41
+		blockData[1] = 0x00
 		for i := 2; i < 18; i++ {
 			blockData[i] = block // Fill with block number for testing
 		}

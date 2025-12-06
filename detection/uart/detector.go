@@ -334,7 +334,7 @@ func probeDevice(_ context.Context, path string, mode detection.Mode) bool {
 
 	case detection.Safe:
 		// Just try to get firmware version
-		_, err := device.GetFirmwareVersion()
+		_, err := device.GetFirmwareVersion(context.Background())
 		return err == nil
 
 	case detection.Full:

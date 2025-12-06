@@ -20,10 +20,6 @@
 
 package pn532
 
-import (
-	"context"
-)
-
 // SAMMode represents the SAM configuration mode
 type SAMMode byte
 
@@ -40,12 +36,3 @@ const (
 	// SAMNormal is an alias for SAMModeNormal for backward compatibility
 	SAMNormal = SAMModeNormal
 )
-
-// SAMConfiguration configures the SAM with advanced modes
-// mode: Configuration mode (Normal, VirtualCard, WiredCard, DualCard)
-// timeout: Timeout value (0x00-0xFF) - time to wait for tag
-// irq: IRQ settings (0x00 = no IRQ, 0x01 = IRQ enabled)
-// Based on PN532 manual section 7.2.10
-func (d *Device) SAMConfiguration(mode SAMMode, timeout, irq byte) error {
-	return d.SAMConfigurationContext(context.Background(), mode, timeout, irq)
-}

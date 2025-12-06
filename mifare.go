@@ -294,7 +294,7 @@ func (t *MIFARETag) ReadBlock(block uint8) ([]byte, error) {
 	}
 
 	// Send read command
-	data, err := t.device.SendDataExchange([]byte{mifareCmdRead, block})
+	data, err := t.device.SendDataExchange(context.Background(), []byte{mifareCmdRead, block})
 	if err != nil {
 		return nil, fmt.Errorf("%w (block %d): %w", ErrTagReadFailed, block, err)
 	}
@@ -310,7 +310,7 @@ func (t *MIFARETag) ReadBlock(block uint8) ([]byte, error) {
 // ReadBlockDirect reads a block directly without authentication (for clone tags)
 func (t *MIFARETag) ReadBlockDirect(block uint8) ([]byte, error) {
 	// Send read command directly
-	data, err := t.device.SendDataExchange([]byte{mifareCmdRead, block})
+	data, err := t.device.SendDataExchange(context.Background(), []byte{mifareCmdRead, block})
 	if err != nil {
 		// If we get a timeout error, try InCommunicateThru as fallback
 		if IsPN532TimeoutError(err) {
@@ -349,7 +349,7 @@ func (t *MIFARETag) WriteBlock(block uint8, data []byte) error {
 	cmd := []byte{mifareCmdWrite, block}
 	cmd = append(cmd, data...)
 
-	_, err := t.device.SendDataExchange(cmd)
+	_, err := t.device.SendDataExchange(context.Background(), cmd)
 	if err != nil {
 		return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 	}
@@ -380,7 +380,7 @@ func (t *MIFARETag) WriteBlockDirect(block uint8, data []byte) error {
 	cmd := []byte{mifareCmdWrite, block}
 	cmd = append(cmd, data...)
 
-	_, err = t.device.SendDataExchange(cmd)
+	_, err = t.device.SendDataExchange(context.Background(), cmd)
 	if err != nil {
 		// Try alternative approach - some clones might need different handling
 		return t.writeBlockDirectAlternative(block, data, err)
@@ -425,7 +425,7 @@ func (t *MIFARETag) writeBlockCommunicateThru(block uint8, data []byte) error {
 	cmd = append(cmd, data...)
 
 	// Use SendRawCommand instead of SendDataExchange
-	_, err := t.device.SendRawCommand(cmd)
+	_, err := t.device.SendRawCommand(context.Background(), cmd)
 	if err != nil {
 		return fmt.Errorf("raw write command failed: %w", err)
 	}
@@ -439,7 +439,7 @@ func (t *MIFARETag) readBlockCommunicateThru(block uint8) ([]byte, error) {
 	cmd := []byte{mifareCmdRead, block}
 
 	// Use SendRawCommand instead of SendDataExchange
-	data, err := t.device.SendRawCommand(cmd)
+	data, err := t.device.SendRawCommand(context.Background(), cmd)
 	if err != nil {
 		return nil, fmt.Errorf("raw read command failed: %w", err)
 	}
@@ -797,7 +797,7 @@ func (t *MIFARETag) ResetAuthState() error {
 
 	// Force PN532 to reset by attempting to re-detect the tag
 	// This clears any internal authentication state in the PN532 chip
-	_, err := t.device.InListPassiveTargetContext(context.Background(), 1, 0x00)
+	_, err := t.device.InListPassiveTarget(context.Background(), 1, 0x00)
 	return err
 }
 
@@ -830,7 +830,7 @@ func (t *MIFARETag) Authenticate(sector uint8, keyType byte, key []byte) error {
 	cmd = append(cmd, secureKeyCopy...) // Key must come first
 	cmd = append(cmd, t.uid[:4]...)     // UID comes second
 
-	_, err := t.device.SendDataExchange(cmd)
+	_, err := t.device.SendDataExchange(context.Background(), cmd)
 	if err != nil {
 		// SECURITY: Thread-safe state clearing on failure
 		t.authMutex.Lock()
@@ -863,7 +863,7 @@ func (t *MIFARETag) AuthenticateContext(ctx context.Context, sector uint8, keyTy
 	cmd = append(cmd, key...)
 	cmd = append(cmd, t.uid[:4]...)
 
-	_, err := t.device.SendDataExchangeContext(ctx, cmd)
+	_, err := t.device.SendDataExchange(ctx, cmd)
 	return err
 }
 
@@ -1036,7 +1036,7 @@ func (t *MIFARETag) applyRetryStrategy(level retryLevel, _ error) error {
 
 	case retryModerate:
 		// Moderate: Card reinitialization (critical fix from research)
-		_, err := t.device.InListPassiveTargetContext(context.Background(), 1, 0x00)
+		_, err := t.device.InListPassiveTarget(context.Background(), 1, 0x00)
 		if err != nil {
 			return fmt.Errorf("card reinitialization failed: %w", err)
 		}
@@ -1054,7 +1054,7 @@ func (t *MIFARETag) applyRetryStrategy(level retryLevel, _ error) error {
 		// Note: This would require device-level support for field control
 		// For now, we do a longer reinitialization sequence
 		for i := 0; i < 3; i++ {
-			_, err := t.device.InListPassiveTargetContext(context.Background(), 1, 0x00)
+			_, err := t.device.InListPassiveTarget(context.Background(), 1, 0x00)
 			if err == nil {
 				break
 			}
@@ -1083,7 +1083,6 @@ func (t *MIFARETag) calculateRetryDelay(attempt int) time.Duration {
 	if attempt > 30 { // Prevent overflow
 		attempt = 30
 	}
-	//nolint:gosec // G115: Overflow prevented by bounds check above
 	shiftAmount := uint(attempt)
 	delay := t.config.RetryConfig.InitialBackoff * time.Duration(1<<shiftAmount)
 	if delay > t.config.RetryConfig.MaxBackoff {
@@ -1129,7 +1128,7 @@ func (t *MIFARETag) tryChineseCloneUnlock(_ uint8) bool {
 	commands := []byte{chineseCloneUnlock7Bit, chineseCloneUnlock8Bit}
 
 	for _, cmd := range commands {
-		_, err := t.device.SendDataExchange([]byte{cmd})
+		_, err := t.device.SendDataExchange(context.Background(), []byte{cmd})
 		if err == nil {
 			// Unlock successful - this is a Gen1 clone tag
 			return true

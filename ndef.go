@@ -75,13 +75,6 @@ type NDEFRecord struct {
 	Payload []byte
 }
 
-// BuildNDEFMessage creates NDEF data from text
-//
-// Deprecated: Use BuildTextMessage or BuildNDEFMessageEx for more flexibility
-func BuildNDEFMessage(text string) ([]byte, error) {
-	return BuildTextMessage(text)
-}
-
 // calculateNDEFHeader calculates the NDEF TLV header
 func calculateNDEFHeader(payload []byte) ([]byte, error) {
 	length := len(payload)

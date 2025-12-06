@@ -34,7 +34,6 @@ func TestErrorWrapping(t *testing.T) {
 	tests := []struct {
 		wrapFunc      func(error) error
 		name          string
-		wantType      ErrorType
 		wantRetryable bool
 	}{
 		{
@@ -43,7 +42,6 @@ func TestErrorWrapping(t *testing.T) {
 				return fmt.Errorf("operation failed: %w", err)
 			},
 			wantRetryable: true,
-			wantType:      ErrorTypeTimeout,
 		},
 		{
 			name: "double wrapping",
@@ -52,7 +50,6 @@ func TestErrorWrapping(t *testing.T) {
 				return fmt.Errorf("outer error: %w", wrapped)
 			},
 			wantRetryable: true,
-			wantType:      ErrorTypeTimeout,
 		},
 		{
 			name: "custom wrapper",
@@ -60,7 +57,6 @@ func TestErrorWrapping(t *testing.T) {
 				return &customError{msg: "custom wrapper", cause: err}
 			},
 			wantRetryable: true, // Should still detect wrapped retryable error
-			wantType:      ErrorTypeTimeout,
 		},
 	}
 
@@ -73,12 +69,6 @@ func TestErrorWrapping(t *testing.T) {
 			gotRetryable := IsRetryable(wrappedErr)
 			if gotRetryable != tt.wantRetryable {
 				t.Errorf("IsRetryable() = %v, want %v", gotRetryable, tt.wantRetryable)
-			}
-
-			// Test error type detection
-			gotType := GetErrorType(wrappedErr)
-			if gotType != tt.wantType {
-				t.Errorf("GetErrorType() = %v, want %v", gotType, tt.wantType)
 			}
 
 			// Test that original error is still accessible
@@ -238,60 +228,6 @@ func TestErrorChainRetryability(t *testing.T) {
 	}
 }
 
-func TestErrorTypeChainDetection(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		errorFunc func() error
-		name      string
-		wantType  ErrorType
-	}{
-		{
-			name: "timeout in chain",
-			errorFunc: func() error {
-				return fmt.Errorf("operation timeout: %w", ErrTransportTimeout)
-			},
-			wantType: ErrorTypeTimeout,
-		},
-		{
-			name: "transient in chain",
-			errorFunc: func() error {
-				base := ErrCommunicationFailed
-				return fmt.Errorf("retry failed: %w", base)
-			},
-			wantType: ErrorTypeTransient,
-		},
-		{
-			name: "permanent in chain",
-			errorFunc: func() error {
-				return fmt.Errorf("device missing: %w", ErrDeviceNotFound)
-			},
-			wantType: ErrorTypePermanent,
-		},
-		{
-			name: "transport error type preserved",
-			errorFunc: func() error {
-				te := &TransportError{
-					Type:      ErrorTypeTransient,
-					Retryable: true,
-				}
-				return fmt.Errorf("wrapped transport: %w", te)
-			},
-			wantType: ErrorTypeTransient,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := tt.errorFunc()
-			got := GetErrorType(err)
-			if got != tt.wantType {
-				t.Errorf("GetErrorType() = %v, want %v", got, tt.wantType)
-			}
-		})
-	}
-}
-
 func TestErrorStringPropagation(t *testing.T) {
 	t.Parallel()
 	baseErr := ErrTransportRead
@@ -329,7 +265,6 @@ func TestComplexErrorScenarios(t *testing.T) {
 			validateErrorProperties(t, errorProperties{
 				err:       err,
 				retryable: tt.retryable,
-				errorType: tt.errorType,
 			})
 		})
 	}
@@ -341,7 +276,6 @@ func getComplexErrorTestCases() []struct {
 	expectIs   []error
 	expectAs   []any
 	retryable  bool
-	errorType  ErrorType
 } {
 	return []struct {
 		name       string
@@ -349,7 +283,6 @@ func getComplexErrorTestCases() []struct {
 		expectIs   []error
 		expectAs   []any
 		retryable  bool
-		errorType  ErrorType
 	}{
 		{
 			name: "transport error wrapped multiple times",
@@ -361,7 +294,6 @@ func getComplexErrorTestCases() []struct {
 			expectIs:  []error{},
 			expectAs:  []any{},
 			retryable: true,
-			errorType: ErrorTypeTimeout,
 		},
 		{
 			name: "custom error with transport error",
@@ -373,7 +305,6 @@ func getComplexErrorTestCases() []struct {
 			expectIs:  []error{},
 			expectAs:  []any{},
 			retryable: true,
-			errorType: ErrorTypeTransient,
 		},
 	}
 }
@@ -401,15 +332,10 @@ func logErrorTypes(t *testing.T, err error) {
 type errorProperties struct {
 	err       error
 	retryable bool
-	errorType ErrorType
 }
 
 func validateErrorProperties(t *testing.T, props errorProperties) {
 	if IsRetryable(props.err) != props.retryable {
 		t.Errorf("IsRetryable() = %v, want %v", IsRetryable(props.err), props.retryable)
-	}
-
-	if GetErrorType(props.err) != props.errorType {
-		t.Errorf("GetErrorType() = %v, want %v", GetErrorType(props.err), props.errorType)
 	}
 }

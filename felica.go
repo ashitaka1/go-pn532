@@ -176,7 +176,7 @@ func (f *FeliCaTag) ReadBlockExtended(block uint16) ([]byte, error) {
 		0x80|byte((block>>8)&0x0F), byte(block&0xFF), 0x00)
 
 	// Send command via data exchange
-	response, err := f.device.SendDataExchange(cmd)
+	response, err := f.device.SendDataExchange(context.Background(), cmd)
 	if err != nil {
 		return nil, fmt.Errorf("FeliCa read command failed: %w", err)
 	}
@@ -255,7 +255,7 @@ func (f *FeliCaTag) WriteBlockExtended(block uint16, data []byte) error {
 	cmd = append(cmd, data...)
 
 	// Send command via data exchange
-	response, err := f.device.SendDataExchange(cmd)
+	response, err := f.device.SendDataExchange(context.Background(), cmd)
 	if err != nil {
 		return fmt.Errorf("FeliCa write command failed: %w", err)
 	}
@@ -499,7 +499,7 @@ func (f *FeliCaTag) Polling(systemCode uint16) error {
 	)
 
 	// Send command via data exchange
-	response, err := f.device.SendDataExchange(cmd)
+	response, err := f.device.SendDataExchange(context.Background(), cmd)
 	if err != nil {
 		return fmt.Errorf("FeliCa polling command failed: %w", err)
 	}
@@ -563,7 +563,7 @@ func (f *FeliCaTag) RequestService(serviceCodes []uint16) ([]byte, error) {
 	}
 
 	// Send command via data exchange
-	response, err := f.device.SendDataExchange(cmd)
+	response, err := f.device.SendDataExchange(context.Background(), cmd)
 	if err != nil {
 		return nil, fmt.Errorf("FeliCa request service command failed: %w", err)
 	}
@@ -637,7 +637,7 @@ func (f *FeliCaTag) writeNDEFBlocks(paddedData []byte) error {
 		if block >= 0xFFFE {
 			return fmt.Errorf("block index too large: %d", block)
 		}
-		blockIndex := uint16(block) + 1 //nolint:gosec // Safe conversion checked above, blocks start at 1
+		blockIndex := uint16(block) + 1
 		writeErr := f.WriteBlockExtended(blockIndex, blockData)
 		if writeErr != nil {
 			return fmt.Errorf("failed to write NDEF block %d: %w", block+1, writeErr)

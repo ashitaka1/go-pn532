@@ -70,21 +70,3 @@ func ValidateFrameChecksum(buf []byte, start, end int) bool {
 
 	return chk != 0
 }
-
-// FindFrameStart locates the start of a PN532 frame in the buffer
-// Returns the offset where the frame starts, or -1 if not found
-// shouldRetry indicates if more data should be read
-func FindFrameStart(buf []byte, totalLen int, startMarker byte) (offset int, shouldRetry bool) {
-	for i := 0; i < totalLen-1; i++ {
-		if buf[i] == Preamble && buf[i+1] == startMarker {
-			return i, false
-		}
-	}
-
-	// If we didn't find a complete start sequence, we might need more data
-	if totalLen > 0 && buf[totalLen-1] == Preamble {
-		return -1, true
-	}
-
-	return -1, false
-}

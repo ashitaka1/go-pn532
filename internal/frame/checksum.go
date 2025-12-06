@@ -29,25 +29,3 @@ func CalculateChecksum(data []byte) byte {
 	}
 	return chk
 }
-
-// ValidateChecksum verifies that the provided data has a valid checksum
-// Returns true if checksum is invalid (requiring NACK), false if valid
-func ValidateChecksum(data []byte) bool {
-	return CalculateChecksum(data) != 0
-}
-
-// CalculateDataChecksum computes the checksum for frame data (TFI + data bytes)
-// and returns the two's complement (for inclusion in frame)
-func CalculateDataChecksum(tfi byte, data []byte) byte {
-	chk := tfi
-	for _, b := range data {
-		chk += b
-	}
-	return (^chk) + 1 // Two's complement
-}
-
-// CalculateLengthChecksum computes the length checksum (LCS)
-// The LCS is the two's complement of the length
-func CalculateLengthChecksum(length byte) byte {
-	return (^length) + 1
-}

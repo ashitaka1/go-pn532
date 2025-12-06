@@ -126,7 +126,7 @@ func (da *DeviceActor) performPoll() {
 	}
 
 	start := time.Now()
-	detectedTags, err := da.device.InitiatorListPassiveTargets(1, pn532.TagTypeAny, nil)
+	detectedTags, err := da.device.InitiatorListPassiveTargets(context.Background(), 1, pn532.TagTypeAny, nil)
 	pollDuration := time.Since(start)
 
 	// Track poll cycle

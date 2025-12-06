@@ -73,7 +73,7 @@ func New(device *pn532.Device) *TagOperations {
 // This must be called before any read/write operations.
 func (t *TagOperations) DetectTag(ctx context.Context) error {
 	// Detect tag
-	tag, err := t.device.DetectTagContext(ctx)
+	tag, err := t.device.DetectTag(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to detect tag: %w", err)
 	}

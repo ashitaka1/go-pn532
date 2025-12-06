@@ -131,6 +131,9 @@ func (*Device) getCurrentTarget() byte {
 	return 1
 }
 
+// Option is a functional option for configuring a Device
+type Option func(*Device) error
+
 // New creates a new PN532 device with the given transport
 func New(transport Transport, opts ...Option) (*Device, error) {
 	device := &Device{
@@ -403,9 +406,6 @@ func (d *Device) SetTimeout(timeout time.Duration) error {
 // SetRetryConfig updates the retry configuration
 func (d *Device) SetRetryConfig(config *RetryConfig) {
 	d.config.RetryConfig = config
-	if tr, ok := d.transport.(*TransportWithRetry); ok {
-		tr.SetRetryConfig(config)
-	}
 }
 
 // IsAutoPollSupported returns true if the transport supports native InAutoPoll

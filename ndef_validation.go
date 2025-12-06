@@ -535,18 +535,3 @@ func validateTypeField(tnf uint8, typeField []byte) error {
 
 	return nil
 }
-
-// ValidateNDEFPayload validates just the NDEF payload without TLV wrapper
-func ValidateNDEFPayload(payload []byte) error {
-	return validateNDEFStructure(payload)
-}
-
-// IsValidNDEFMessage checks if data contains a valid NDEF message
-func IsValidNDEFMessage(data []byte) bool {
-	return ValidateNDEFMessage(data) == nil
-}
-
-// IsValidNDEFPayload checks if payload is a valid NDEF structure
-func IsValidNDEFPayload(payload []byte) bool {
-	return ValidateNDEFPayload(payload) == nil
-}

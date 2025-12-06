@@ -48,14 +48,25 @@ type config struct {
 	debug      bool
 }
 
+// Package-level flag variables
+var (
+	flagWriteText  string
+	flagDevicePath string
+	flagDebug      bool
+)
+
+func init() {
+	flag.StringVar(&flagWriteText, "write", "", "Text to write to the next scanned tag (exits after write)")
+	flag.StringVar(&flagDevicePath, "device", "", "Device path (auto-detect if empty)")
+	flag.BoolVar(&flagDebug, "debug", false, "Enable debug output")
+}
+
 func parseConfig() *config {
-	cfg := &config{}
-
-	flag.StringVar(&cfg.writeText, "write", "", "Text to write to the next scanned tag (exits after write)")
-	flag.StringVar(&cfg.devicePath, "device", "", "Device path (auto-detect if empty)")
-	flag.BoolVar(&cfg.debug, "debug", false, "Enable debug output")
-
-	flag.Parse()
+	cfg := &config{
+		writeText:  flagWriteText,
+		devicePath: flagDevicePath,
+		debug:      flagDebug,
+	}
 
 	// Enable debug output if --debug flag is set
 	if cfg.debug {
@@ -152,9 +163,9 @@ func connectToDevice(ctx context.Context, cfg *config) (*pn532.Device, error) {
 		return nil, fmt.Errorf("failed to connect to PN532 device: %w", err)
 	}
 
-	// Show firmware version if debug enabled - use context-aware method
+	// Show firmware version if debug enabled
 	if cfg.debug {
-		if version, versionErr := device.GetFirmwareVersionContext(ctx); versionErr == nil {
+		if version, versionErr := device.GetFirmwareVersion(ctx); versionErr == nil {
 			_, _ = fmt.Printf("PN532 Firmware: %s\n", version.Version)
 		}
 	}
@@ -302,6 +313,7 @@ func run(ctx context.Context, cfg *config) error {
 }
 
 func main() {
+	flag.Parse()
 	os.Exit(mainWithExitCode())
 }
 
