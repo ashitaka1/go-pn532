@@ -1077,7 +1077,7 @@ func TestUART_ZombieMode_Basic(t *testing.T) {
 
 	// Error should be a transport error (timeout type)
 	var transportErr *pn532.TransportError
-	assert.True(t, errors.As(err, &transportErr), "Error should be TransportError, got: %T", err)
+	assert.ErrorAs(t, err, &transportErr, "Error should be TransportError, got: %T", err)
 }
 
 // TestUART_ZombieMode_Recovery tests recovery after disabling zombie mode
@@ -1186,7 +1186,7 @@ func TestUART_ZombieMode_TraceIncluded(t *testing.T) {
 		trace := pn532.GetTrace(err)
 		require.NotNil(t, trace)
 		assert.Equal(t, "UART", trace.Transport)
-		assert.Greater(t, len(trace.Trace), 0, "Trace should have entries")
+		assert.NotEmpty(t, trace.Trace, "Trace should have entries")
 
 		// Should have TX entry for the command and RX entry for ACK
 		var hasTX, hasRX bool
@@ -1231,7 +1231,7 @@ func TestUART_RapidPolling_Basic(t *testing.T) {
 		successCount++
 
 		// Verify we got a valid response (either tag or no-tag)
-		require.True(t, len(resp) >= 2, "Response should have at least 2 bytes")
+		require.GreaterOrEqual(t, len(resp), 2, "Response should have at least 2 bytes")
 		assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
 	}
 
@@ -1264,7 +1264,7 @@ func TestUART_RapidPolling_WithJitter(t *testing.T) {
 			continue
 		}
 		successCount++
-		require.True(t, len(resp) >= 2)
+		require.GreaterOrEqual(t, len(resp), 2)
 		assert.Equal(t, byte(0x4B), resp[0])
 	}
 
@@ -1293,7 +1293,7 @@ func TestUART_RapidPolling_TagTransitions(t *testing.T) {
 
 		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
 		require.NoError(t, err, "Poll should not error")
-		require.True(t, len(resp) >= 2)
+		require.GreaterOrEqual(t, len(resp), 2)
 
 		numTags := resp[1]
 		if numTags > 0 {
@@ -1372,7 +1372,7 @@ func TestUART_RapidPolling_MixedCommands(t *testing.T) {
 		}
 
 		// SAMConfiguration
-		resp, err = transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+		_, err = transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
 		if err == nil {
 			samSuccess++
 		}

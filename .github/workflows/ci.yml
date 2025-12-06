@@ -80,6 +80,27 @@ jobs:
     - name: Run integration tests with deadlock detection
       run: go test -v -race -timeout=15m -tags=integration,deadlock ./...
 
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24.x'
+
+    - name: Run fuzz tests (quick)
+      run: |
+        # Run each fuzz test for 10 seconds to catch obvious issues
+        # Corpus files from testdata/fuzz/ are also run as regression tests
+        go test -fuzz=FuzzValidateFrameLength -fuzztime=10s ./internal/frame/
+        go test -fuzz=FuzzValidateFrameChecksum -fuzztime=10s ./internal/frame/
+        go test -fuzz=FuzzExtractFrameData -fuzztime=10s ./internal/frame/
+        go test -fuzz=FuzzHandleErrorFrame -fuzztime=10s ./internal/frame/
+        go test -fuzz=FuzzCalculateChecksum -fuzztime=10s ./internal/frame/
+        go test -fuzz=FuzzBufferPool -fuzztime=10s ./internal/frame/
+
   lint:
     runs-on: ubuntu-latest
     steps:

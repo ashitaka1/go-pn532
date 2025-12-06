@@ -1,4 +1,4 @@
-.PHONY: all build test test-unit test-integration deadlock lint lint-fix clean coverage check help reader
+.PHONY: all build test test-unit test-integration deadlock lint lint-fix clean coverage check help reader fuzz fuzz-quick
 
 # Go parameters
 GOCMD=go
@@ -61,6 +61,28 @@ bench:
 	@echo "Running benchmarks..."
 	$(GOTEST) -bench=. -benchmem ./...
 
+# Run fuzz tests (30s each - good for development)
+fuzz:
+	@echo "Running fuzz tests (30s each)..."
+	$(GOTEST) -fuzz=FuzzValidateFrameLength -fuzztime=30s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzValidateFrameChecksum -fuzztime=30s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzExtractFrameData -fuzztime=30s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzHandleErrorFrame -fuzztime=30s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzCalculateChecksum -fuzztime=30s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzBufferPool -fuzztime=30s ./internal/frame/
+	@echo "Fuzz testing complete!"
+
+# Run quick fuzz tests (5s each - good for CI)
+fuzz-quick:
+	@echo "Running quick fuzz tests (5s each)..."
+	$(GOTEST) -fuzz=FuzzValidateFrameLength -fuzztime=5s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzValidateFrameChecksum -fuzztime=5s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzExtractFrameData -fuzztime=5s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzHandleErrorFrame -fuzztime=5s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzCalculateChecksum -fuzztime=5s ./internal/frame/
+	$(GOTEST) -fuzz=FuzzBufferPool -fuzztime=5s ./internal/frame/
+	@echo "Quick fuzz testing complete!"
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning..."
@@ -87,6 +109,8 @@ help:
 	@echo "  test-integration - Run integration tests with race detection"
 	@echo "  deadlock         - Run tests with deadlock detection enabled"
 	@echo "  bench            - Run benchmarks"
+	@echo "  fuzz             - Run fuzz tests (30s each, ~3 min total)"
+	@echo "  fuzz-quick       - Run quick fuzz tests (5s each, ~30s total, for CI)"
 	@echo "  coverage         - Run tests and generate HTML coverage report"
 	@echo "  lint             - Run linters (golangci-lint)"
 	@echo "  lint-fix         - Run linters with auto-fix"

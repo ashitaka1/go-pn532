@@ -59,7 +59,8 @@ func ValidateFrameLength(
 // Returns true if checksum is invalid (requiring NACK), false if valid
 // This consolidates the validateFrameChecksum logic from UART and I2C transports
 func ValidateFrameChecksum(buf []byte, start, end int) bool {
-	if end > len(buf) {
+	// Handle invalid slice bounds - negative indices or out of range
+	if start < 0 || end < 0 || start > end || end > len(buf) {
 		return true
 	}
 
