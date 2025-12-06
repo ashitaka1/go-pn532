@@ -85,6 +85,102 @@ func TestNewSession(t *testing.T) {
 	})
 }
 
+func TestSession_CallbackSetters(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+
+	t.Run("SetOnCardDetected", func(t *testing.T) {
+		t.Parallel()
+		session := NewSession(device, nil)
+
+		var called atomic.Bool
+		session.SetOnCardDetected(func(_ *pn532.DetectedTag) error {
+			called.Store(true)
+			return nil
+		})
+
+		// Verify callback was set by checking it's not nil
+		session.stateMutex.RLock()
+		cb := session.OnCardDetected
+		session.stateMutex.RUnlock()
+		assert.NotNil(t, cb)
+	})
+
+	t.Run("SetOnCardRemoved", func(t *testing.T) {
+		t.Parallel()
+		session := NewSession(device, nil)
+
+		var called atomic.Bool
+		session.SetOnCardRemoved(func() {
+			called.Store(true)
+		})
+
+		session.stateMutex.RLock()
+		cb := session.OnCardRemoved
+		session.stateMutex.RUnlock()
+		assert.NotNil(t, cb)
+	})
+
+	t.Run("SetOnCardChanged", func(t *testing.T) {
+		t.Parallel()
+		session := NewSession(device, nil)
+
+		var called atomic.Bool
+		session.SetOnCardChanged(func(_ *pn532.DetectedTag) error {
+			called.Store(true)
+			return nil
+		})
+
+		session.stateMutex.RLock()
+		cb := session.OnCardChanged
+		session.stateMutex.RUnlock()
+		assert.NotNil(t, cb)
+	})
+}
+
+func TestSession_CallbackSettersConcurrent(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// This test verifies no race conditions when setting callbacks concurrently
+	// Run with -race flag to detect races
+	var wg sync.WaitGroup
+	const numGoroutines = 10
+
+	for range numGoroutines {
+		wg.Add(3)
+
+		go func() {
+			defer wg.Done()
+			session.SetOnCardDetected(func(_ *pn532.DetectedTag) error {
+				return nil
+			})
+		}()
+
+		go func() {
+			defer wg.Done()
+			session.SetOnCardRemoved(func() {})
+		}()
+
+		go func() {
+			defer wg.Done()
+			session.SetOnCardChanged(func(_ *pn532.DetectedTag) error {
+				return nil
+			})
+		}()
+	}
+
+	wg.Wait()
+
+	// Verify callbacks are set (any of them, since order is non-deterministic)
+	session.stateMutex.RLock()
+	defer session.stateMutex.RUnlock()
+	assert.NotNil(t, session.OnCardDetected)
+	assert.NotNil(t, session.OnCardRemoved)
+	assert.NotNil(t, session.OnCardChanged)
+}
+
 func TestSession_PauseResume(t *testing.T) {
 	t.Parallel()
 

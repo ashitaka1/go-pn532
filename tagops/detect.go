@@ -23,6 +23,8 @@ package tagops
 import (
 	"bytes"
 	"fmt"
+
+	"github.com/ZaparooProject/go-pn532"
 )
 
 const (
@@ -33,16 +35,11 @@ const (
 
 // TagInfo contains detailed information about a detected tag
 type TagInfo struct {
-	// String fields (24 bytes each on 64-bit)
-	TypeName   string
-	NTAGType   string
-	MIFAREType string
-
-	// Slice field (24 bytes on 64-bit)
-	UID []byte
-
-	// Integer fields (8 bytes each on 64-bit for TagType as int, 4 bytes for int)
-	Type        TagType
+	TypeName    string
+	NTAGType    string
+	MIFAREType  string
+	Type        pn532.TagType
+	UID         []byte
 	TotalPages  int
 	UserMemory  int
 	Sectors     int
@@ -61,7 +58,7 @@ func (t *TagOperations) GetTagInfo() (*TagInfo, error) {
 	}
 
 	switch t.tagType {
-	case TagTypeNTAG:
+	case pn532.TagTypeNTAG:
 		info.TypeName = ntagTypeName
 		info.TotalPages = t.totalPages
 		info.UserMemory = (t.totalPages - 4) * 4 // Exclude first 4 pages
@@ -78,7 +75,7 @@ func (t *TagOperations) GetTagInfo() (*TagInfo, error) {
 			info.NTAGType = fmt.Sprintf("NTAG (unknown, %d pages)", t.totalPages)
 		}
 
-	case TagTypeMIFARE:
+	case pn532.TagTypeMIFARE:
 		info.TypeName = mifareClassicName
 		// Try to determine if it's 1K or 4K
 		// This is a simplified check - real detection would need SAK analysis
@@ -93,63 +90,60 @@ func (t *TagOperations) GetTagInfo() (*TagInfo, error) {
 			info.TotalMemory = 1024
 		}
 
-	case TagTypeUnknown:
-		info.TypeName = unknownTagName
-	default:
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		info.TypeName = unknownTagName
 	}
 
 	return info, nil
 }
 
-// String returns a human-readable string representation of the tag type
-func (t TagType) String() string {
+// TagTypeDisplayName returns a human-readable display name for a tag type
+// This provides more descriptive names than the raw pn532.TagType string values
+func TagTypeDisplayName(t pn532.TagType) string {
 	switch t {
-	case TagTypeUnknown:
-		return unknownTagName
-	case TagTypeNTAG:
+	case pn532.TagTypeNTAG:
 		return ntagTypeName
-	case TagTypeMIFARE:
+	case pn532.TagTypeMIFARE:
 		return mifareClassicName
-	default:
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return unknownTagName
 	}
+	return unknownTagName
 }
 
 // DetectTagTypeFromUID attempts to determine tag type from UID characteristics
 // This is a helper function that can be used before full tag initialization
-func DetectTagTypeFromUID(uid []byte) TagType {
+func DetectTagTypeFromUID(uid []byte) pn532.TagType {
 	// This is a simplified detection based on UID patterns
 	// Real detection should use SAK and ATQA values
 
 	if len(uid) == 7 {
 		// 7-byte UID often indicates NTAG
 		if uid[0] == 0x04 {
-			return TagTypeNTAG
+			return pn532.TagTypeNTAG
 		}
 	} else if len(uid) == 4 {
 		// 4-byte UID often indicates MIFARE Classic
-		return TagTypeMIFARE
+		return pn532.TagTypeMIFARE
 	}
 
-	return TagTypeUnknown
+	return pn532.TagTypeUnknown
 }
 
 // IsNDEFCapable returns whether the tag supports NDEF
 func (t *TagOperations) IsNDEFCapable() bool {
 	switch t.tagType {
-	case TagTypeNTAG:
+	case pn532.TagTypeNTAG:
 		return true // All NTAG variants support NDEF
-	case TagTypeMIFARE:
+	case pn532.TagTypeMIFARE:
 		// MIFARE Classic can support NDEF if formatted properly
 		// Try to read block 4 (sector 1) to test NDEF capability
 		_, err := t.mifareInstance.ReadBlockAuto(4)
 		return err == nil
-	case TagTypeUnknown:
-		return false
-	default:
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return false
 	}
+	return false
 }
 
 // CompareUID compares two UIDs for equality

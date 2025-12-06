@@ -37,6 +37,7 @@ import (
 	_ "github.com/ZaparooProject/go-pn532/detection/spi"
 	_ "github.com/ZaparooProject/go-pn532/detection/uart"
 	"github.com/ZaparooProject/go-pn532/polling"
+	"github.com/ZaparooProject/go-pn532/tagops"
 	"github.com/ZaparooProject/go-pn532/transport/i2c"
 	"github.com/ZaparooProject/go-pn532/transport/spi"
 	"github.com/ZaparooProject/go-pn532/transport/uart"
@@ -173,6 +174,74 @@ func connectToDevice(ctx context.Context, cfg *config) (*pn532.Device, error) {
 	return device, nil
 }
 
+// printTagInfo prints detailed information about a detected tag
+func printTagInfo(info *tagops.TagInfo) {
+	switch info.Type {
+	case pn532.TagTypeNTAG:
+		_, _ = fmt.Printf("  NTAG variant: %s\n", info.NTAGType)
+		_, _ = fmt.Printf("  Total pages: %d, User memory: %d bytes\n", info.TotalPages, info.UserMemory)
+	case pn532.TagTypeMIFARE:
+		_, _ = fmt.Printf("  MIFARE variant: %s\n", info.MIFAREType)
+		_, _ = fmt.Printf("  Sectors: %d, Total memory: %d bytes\n", info.Sectors, info.TotalMemory)
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
+		// No additional details for these types
+	}
+}
+
+// printNDEFRecord prints a single NDEF record
+func printNDEFRecord(i int, record *pn532.NDEFRecord) {
+	switch {
+	case record.Text != "":
+		_, _ = fmt.Printf("    [%d] Text: %q\n", i, record.Text)
+	case record.URI != "":
+		_, _ = fmt.Printf("    [%d] URI: %s\n", i, record.URI)
+	default:
+		_, _ = fmt.Printf("    [%d] Type: %s\n", i, record.Type)
+	}
+}
+
+// printNDEFMessage prints NDEF message contents
+func printNDEFMessage(ndefMsg *pn532.NDEFMessage, err error) {
+	switch {
+	case err != nil:
+		_, _ = fmt.Printf("  NDEF: not readable (%v)\n", err)
+	case ndefMsg != nil && len(ndefMsg.Records) > 0:
+		_, _ = fmt.Printf("  NDEF records: %d\n", len(ndefMsg.Records))
+		for i := range ndefMsg.Records {
+			printNDEFRecord(i, &ndefMsg.Records[i])
+		}
+	default:
+		_, _ = fmt.Println("  NDEF: empty or not formatted")
+	}
+}
+
+// handleTagDetected processes a detected tag using tagops
+func handleTagDetected(ctx context.Context, ops *tagops.TagOperations, detectedTag *pn532.DetectedTag) error {
+	// Print basic tag information with human-readable type name
+	typeName := tagops.TagTypeDisplayName(detectedTag.Type)
+	_, _ = fmt.Printf("\nTag detected: UID=%s Type=%s\n", detectedTag.UID, typeName)
+
+	// Use tagops to detect and get detailed tag info
+	if err := ops.DetectTag(ctx); err != nil {
+		_, _ = fmt.Printf("  Tag type detection: %v\n", err)
+		return nil // Continue monitoring
+	}
+
+	// Get and print detailed tag information
+	info, err := ops.GetTagInfo()
+	if err != nil {
+		_, _ = fmt.Printf("  Failed to get tag info: %v\n", err)
+		return nil
+	}
+	printTagInfo(info)
+
+	// Try to read NDEF data using tagops (returns *pn532.NDEFMessage directly)
+	ndefMsg, ndefErr := ops.ReadNDEF(ctx)
+	printNDEFMessage(ndefMsg, ndefErr)
+
+	return nil
+}
+
 func runReadMode(ctx context.Context, device *pn532.Device, _ *config) error {
 	// Create session with default configuration
 	sessionConfig := polling.DefaultConfig()
@@ -187,26 +256,18 @@ func runReadMode(ctx context.Context, device *pn532.Device, _ *config) error {
 
 	_, _ = fmt.Println("Starting continuous tag monitoring. Press Ctrl+C to stop...")
 
-	// Set up tag detection callback
-	session.OnCardDetected = func(detectedTag *pn532.DetectedTag) error {
-		// Create tag interface to get detailed information
-		tag, err := device.CreateTag(detectedTag)
-		if err != nil {
-			_, _ = fmt.Printf("Failed to create tag interface: %v\n", err)
-			return nil // Continue monitoring
-		}
+	// Use tagops for high-level tag operations
+	ops := tagops.New(device)
 
-		// Print tag information
-		_, _ = fmt.Printf("Tag detected: UID=%s Type=%s\n", detectedTag.UID, detectedTag.Type)
-		_, _ = fmt.Print(tag.DebugInfo())
+	// Set up tag detection callback using the setter method
+	session.SetOnCardDetected(func(detectedTag *pn532.DetectedTag) error {
+		return handleTagDetected(ctx, ops, detectedTag)
+	})
 
-		return nil
-	}
-
-	// Set up tag removal callback
-	session.OnCardRemoved = func() {
+	// Set up tag removal callback using the setter method
+	session.SetOnCardRemoved(func() {
 		_, _ = fmt.Println("Tag removed - ready for next tag...")
-	}
+	})
 
 	// Start the session in a goroutine to allow for immediate cancellation
 	done := make(chan error, 1)

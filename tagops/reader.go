@@ -25,7 +25,6 @@ import (
 	"fmt"
 
 	"github.com/ZaparooProject/go-pn532"
-	"github.com/hsanjuan/go-ndef"
 )
 
 // ReadBlocks reads a range of blocks from the tag using the optimal method.
@@ -38,15 +37,14 @@ func (t *TagOperations) ReadBlocks(ctx context.Context, startBlock, endBlock byt
 	}
 
 	switch t.tagType {
-	case TagTypeNTAG:
+	case pn532.TagTypeNTAG:
 		return t.readNTAGBlocks(ctx, startBlock, endBlock)
-	case TagTypeMIFARE:
+	case pn532.TagTypeMIFARE:
 		return t.readMIFAREBlocks(ctx, startBlock, endBlock)
-	case TagTypeUnknown:
-		return nil, ErrUnsupportedTag
-	default:
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return nil, ErrUnsupportedTag
 	}
+	return nil, ErrUnsupportedTag
 }
 
 // ReadAll reads all available data from the tag
@@ -56,49 +54,45 @@ func (t *TagOperations) ReadAll(ctx context.Context) ([]byte, error) {
 	}
 
 	switch t.tagType {
-	case TagTypeNTAG:
+	case pn532.TagTypeNTAG:
 		// Read from page 0 to last page
 		return t.readNTAGBlocks(ctx, 0, byte(t.totalPages-1))
-	case TagTypeMIFARE:
+	case pn532.TagTypeMIFARE:
 		if t.mifareInstance.IsMIFARE4K() {
 			// MIFARE Classic 4K has 255 blocks (0-254)
 			return t.readMIFAREBlocks(ctx, 0, 254)
 		}
 		// MIFARE Classic 1K has 64 blocks (0-63)
 		return t.readMIFAREBlocks(ctx, 0, 63)
-	case TagTypeUnknown:
-		return nil, ErrUnsupportedTag
-	default:
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return nil, ErrUnsupportedTag
 	}
+	return nil, ErrUnsupportedTag
 }
 
 // ReadNDEF reads and parses NDEF data from the tag
-func (t *TagOperations) ReadNDEF(_ context.Context) (*ndef.Message, error) {
+func (t *TagOperations) ReadNDEF(_ context.Context) (*pn532.NDEFMessage, error) {
 	if t.tag == nil {
 		return nil, ErrNoTag
 	}
 
 	switch t.tagType {
-	case TagTypeNTAG:
+	case pn532.TagTypeNTAG:
 		ndefMsg, err := t.ntagInstance.ReadNDEFRobust()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read NDEF from NTAG: %w", err)
 		}
-		// Convert from pn532.NDEFMessage to ndef.Message
-		return convertNDEFMessage(ndefMsg), nil
-	case TagTypeMIFARE:
+		return ndefMsg, nil
+	case pn532.TagTypeMIFARE:
 		ndefMsg, err := t.mifareInstance.ReadNDEFRobust()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read NDEF from MIFARE: %w", err)
 		}
-		// Convert from pn532.NDEFMessage to ndef.Message
-		return convertNDEFMessage(ndefMsg), nil
-	case TagTypeUnknown:
-		return nil, ErrUnsupportedTag
-	default:
+		return ndefMsg, nil
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return nil, ErrUnsupportedTag
 	}
+	return nil, ErrUnsupportedTag
 }
 
 // readNTAGBlocks reads blocks from NTAG using fast read when possible
@@ -184,9 +178,6 @@ func (*TagOperations) trimToExpectedSize(result []byte, expectedBytes int) []byt
 // readMIFAREBlocks reads blocks from MIFARE Classic with automatic authentication
 func (t *TagOperations) readMIFAREBlocks(ctx context.Context, startBlock, endBlock byte) ([]byte, error) {
 	_ = ctx // Reserved for future timeout/cancellation support
-	// Authentication is handled automatically by ReadBlockAuto
-
-	// Ensure key provider is set
 
 	var result []byte
 
@@ -215,13 +206,13 @@ func (t *TagOperations) GetCapacityInfo() (totalBytes, usableBytes int, err erro
 	}
 
 	switch t.tagType {
-	case TagTypeNTAG:
+	case pn532.TagTypeNTAG:
 		totalBytes = t.totalPages * 4 // 4 bytes per page
 		// Usable bytes exclude UID, lock bytes, etc. (typically first 4 pages)
 		usableBytes = (t.totalPages - 4) * 4
 		return totalBytes, usableBytes, nil
 
-	case TagTypeMIFARE:
+	case pn532.TagTypeMIFARE:
 		if t.mifareInstance.IsMIFARE4K() {
 			// MIFARE Classic 4K: 40 sectors, 255 blocks total
 			totalBytes = 4096
@@ -238,42 +229,8 @@ func (t *TagOperations) GetCapacityInfo() (totalBytes, usableBytes int, err erro
 		}
 		return totalBytes, usableBytes, nil
 
-	case TagTypeUnknown:
-		return 0, 0, ErrUnsupportedTag
-	default:
+	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return 0, 0, ErrUnsupportedTag
 	}
-}
-
-// convertNDEFMessage converts from pn532.NDEFMessage to ndef.Message
-func convertNDEFMessage(pn532Msg *pn532.NDEFMessage) *ndef.Message {
-	if pn532Msg == nil {
-		return nil
-	}
-
-	records := make([]*ndef.Record, 0, len(pn532Msg.Records))
-
-	for _, pn532Rec := range pn532Msg.Records {
-		var rec *ndef.Record
-
-		// Convert based on record type
-		switch {
-		case pn532Rec.Type == pn532.NDEFTypeText && pn532Rec.Text != "":
-			// Create text record
-			rec = ndef.NewTextRecord(pn532Rec.Text, "en")
-		case pn532Rec.Type == pn532.NDEFTypeURI && pn532Rec.URI != "":
-			// Create URI record
-			rec = ndef.NewURIRecord(pn532Rec.URI)
-		case len(pn532Rec.Payload) > 0:
-			// Create a generic record with raw payload
-			// For generic records, we'll create a simple text record
-			rec = ndef.NewTextRecord(string(pn532Rec.Payload), "en")
-		}
-
-		if rec != nil {
-			records = append(records, rec)
-		}
-	}
-
-	return ndef.NewMessageFromRecords(records...)
+	return 0, 0, ErrUnsupportedTag
 }

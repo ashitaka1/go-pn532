@@ -11,34 +11,36 @@ import (
 
 // --- TagType Tests ---
 
-func TestTagType_String(t *testing.T) {
+func TestTagTypeDisplayName(t *testing.T) {
 	tests := []struct {
 		name     string
 		expected string
-		tagType  TagType
+		tagType  pn532.TagType
 	}{
-		{"Unknown tag type", "Unknown", TagTypeUnknown},
-		{"NTAG tag type", "NTAG", TagTypeNTAG},
-		{"MIFARE tag type", "MIFARE Classic", TagTypeMIFARE},
-		{"Invalid tag type", "Unknown", TagType(99)},
+		{"Unknown tag type", "Unknown", pn532.TagTypeUnknown},
+		{"NTAG tag type", "NTAG", pn532.TagTypeNTAG},
+		{"MIFARE tag type", "MIFARE Classic", pn532.TagTypeMIFARE},
+		{"Any tag type", "Unknown", pn532.TagTypeAny},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := tc.tagType.String()
+			result := TagTypeDisplayName(tc.tagType)
 			assert.Equal(t, tc.expected, result)
 		})
 	}
 }
 
 func TestTagType_Constants(t *testing.T) {
-	// Verify constants are distinct
-	assert.NotEqual(t, TagTypeUnknown, TagTypeNTAG)
-	assert.NotEqual(t, TagTypeUnknown, TagTypeMIFARE)
-	assert.NotEqual(t, TagTypeNTAG, TagTypeMIFARE)
+	// Verify constants are distinct (pn532.TagType is a string type)
+	assert.NotEqual(t, pn532.TagTypeUnknown, pn532.TagTypeNTAG)
+	assert.NotEqual(t, pn532.TagTypeUnknown, pn532.TagTypeMIFARE)
+	assert.NotEqual(t, pn532.TagTypeNTAG, pn532.TagTypeMIFARE)
 
-	// Verify TagTypeUnknown is 0 (iota starts at 0)
-	assert.Equal(t, TagTypeUnknown, TagType(0))
+	// Verify TagType values
+	assert.Equal(t, pn532.TagTypeUnknown, pn532.TagType("UNKNOWN"))
+	assert.Equal(t, pn532.TagTypeNTAG, pn532.TagType("NTAG"))
+	assert.Equal(t, pn532.TagTypeMIFARE, pn532.TagType("MIFARE"))
 }
 
 // --- DetectTagTypeFromUID Tests ---
@@ -46,38 +48,38 @@ func TestTagType_Constants(t *testing.T) {
 func TestDetectTagTypeFromUID(t *testing.T) {
 	tests := []struct {
 		name     string
+		expected pn532.TagType
 		uid      []byte
-		expected TagType
 	}{
 		{
 			name:     "7-byte UID starting with 0x04 (NTAG)",
 			uid:      []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-			expected: TagTypeNTAG,
+			expected: pn532.TagTypeNTAG,
 		},
 		{
 			name:     "4-byte UID (MIFARE)",
 			uid:      []byte{0x01, 0x02, 0x03, 0x04},
-			expected: TagTypeMIFARE,
+			expected: pn532.TagTypeMIFARE,
 		},
 		{
 			name:     "7-byte UID not starting with 0x04",
 			uid:      []byte{0x08, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-			expected: TagTypeUnknown,
+			expected: pn532.TagTypeUnknown,
 		},
 		{
 			name:     "Empty UID",
 			uid:      []byte{},
-			expected: TagTypeUnknown,
+			expected: pn532.TagTypeUnknown,
 		},
 		{
 			name:     "Single byte UID",
 			uid:      []byte{0x04},
-			expected: TagTypeUnknown,
+			expected: pn532.TagTypeUnknown,
 		},
 		{
 			name:     "10-byte UID",
 			uid:      []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09},
-			expected: TagTypeUnknown,
+			expected: pn532.TagTypeUnknown,
 		},
 	}
 
@@ -168,7 +170,7 @@ func TestTagInfo_NTAGTypes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create TagOperations with NTAG type and specified pages
 			ops := &TagOperations{
-				tagType:    TagTypeNTAG,
+				tagType:    pn532.TagTypeNTAG,
 				totalPages: tc.totalPages,
 				tag:        &pn532.DetectedTag{UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}},
 			}
@@ -184,7 +186,7 @@ func TestTagInfo_NTAGTypes(t *testing.T) {
 func TestTagInfo_MIFARE(t *testing.T) {
 	// 4-byte UID indicates 1K
 	ops := &TagOperations{
-		tagType: TagTypeMIFARE,
+		tagType: pn532.TagTypeMIFARE,
 		tag:     &pn532.DetectedTag{UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}},
 	}
 
@@ -198,7 +200,7 @@ func TestTagInfo_MIFARE(t *testing.T) {
 
 func TestTagInfo_Unknown(t *testing.T) {
 	ops := &TagOperations{
-		tagType: TagTypeUnknown,
+		tagType: pn532.TagTypeUnknown,
 		tag:     &pn532.DetectedTag{UIDBytes: []byte{0x01}},
 	}
 
@@ -237,20 +239,21 @@ func TestTagOperations_GetUID_NoTag(t *testing.T) {
 
 func TestTagOperations_GetTagType(t *testing.T) {
 	ops := &TagOperations{
-		tagType: TagTypeNTAG,
+		tagType: pn532.TagTypeNTAG,
 	}
 
-	assert.Equal(t, TagTypeNTAG, ops.GetTagType())
-	assert.Equal(t, TagTypeNTAG, ops.TagType()) // Alias method
+	assert.Equal(t, pn532.TagTypeNTAG, ops.GetTagType())
+	assert.Equal(t, pn532.TagTypeNTAG, ops.TagType()) // Alias method
 }
 
 func TestNew(t *testing.T) {
-	// New should create a TagOperations with nil tag and unknown type
+	// New should create a TagOperations with nil tag and empty type
 	ops := New(nil)
 
 	assert.NotNil(t, ops)
 	assert.Nil(t, ops.tag)
-	assert.Equal(t, TagTypeUnknown, ops.tagType)
+	// Empty string is the zero value for pn532.TagType (which is a string type)
+	assert.Equal(t, pn532.TagType(""), ops.tagType)
 }
 
 // --- Error Constants ---
