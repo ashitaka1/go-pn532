@@ -232,6 +232,15 @@ func (v *VirtualPN532) AddTag(tag *VirtualTag) {
 	v.tags = append(v.tags, tag)
 }
 
+// SetTag is a convenience method that removes all existing tags and adds a single tag.
+// Useful for test scenarios where only one tag is needed.
+func (v *VirtualPN532) SetTag(tag *VirtualTag) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.tags = []*VirtualTag{tag}
+	v.state.SelectedTarget = -1
+}
+
 // RemoveAllTags removes all virtual tags.
 func (v *VirtualPN532) RemoveAllTags() {
 	v.mu.Lock()
@@ -276,6 +285,14 @@ func (v *VirtualPN532) GetState() SimulatorState {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.state
+}
+
+// HasPendingResponse returns true if the simulator has response data waiting to be read.
+// This is useful for I2C ready status simulation.
+func (v *VirtualPN532) HasPendingResponse() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.txBuffer.Len() > 0
 }
 
 // Reset clears all state and buffers.
