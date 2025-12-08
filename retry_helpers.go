@@ -87,7 +87,7 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 //nolint:gocognit,revive // Retry logic inherently requires multiple branches for proper error handling
 func WriteNDEFWithRetry(ctx context.Context, writeFunc WriteNDEFFunc, maxRetries int, tagType string) error {
 	if maxRetries <= 0 {
-		maxRetries = 3 // Default to 3 retries
+		maxRetries = 5
 	}
 
 	// Use exponential backoff with shorter initial delays for writes
@@ -96,6 +96,8 @@ func WriteNDEFWithRetry(ctx context.Context, writeFunc WriteNDEFFunc, maxRetries
 		100 * time.Millisecond,
 		150 * time.Millisecond,
 		250 * time.Millisecond,
+		400 * time.Millisecond,
+		600 * time.Millisecond,
 	}
 
 	var lastErr error
