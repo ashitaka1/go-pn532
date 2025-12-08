@@ -517,14 +517,13 @@ func TestInSelect(t *testing.T) {
 			expectError:  false,
 		},
 		{
-			name: "Unknown_Target",
+			name: "Wrong_Context_Treated_As_Success",
 			setupMock: func(mock *MockTransport) {
 				mock.SelectTarget()
 				mock.SetResponse(0x54, []byte{0x55, 0x27})
 			},
-			targetNumber:  99,
-			expectError:   true,
-			errorContains: "unknown target number",
+			targetNumber: 99,
+			expectError:  false, // 0x27 treated as "already selected"
 		},
 		{
 			name: "Other_Failure",

@@ -113,6 +113,12 @@ func (d *Device) selectTarget(targetNumber byte) error {
 	}
 
 	if resp[1] != 0x00 {
+		if resp[1] == 0x27 {
+			// 0x27 = Wrong Context - target likely already selected by InListPassiveTarget
+			Debugf("InSelect returned 0x27 for target %d - assuming already selected", targetNumber)
+			d.setCurrentTarget(targetNumber)
+			return nil
+		}
 		return fmt.Errorf("InSelect failed with status: %02X", resp[1])
 	}
 
@@ -123,12 +129,11 @@ func (d *Device) selectTarget(targetNumber byte) error {
 }
 
 // getCurrentTarget returns the active target number (defaults to 1 if not set)
-func (*Device) getCurrentTarget() byte {
-	// LIBNFC COMPATIBILITY: Always use target number 1 for InDataExchange
-	// libnfc research shows that InDataExchange always uses hardcoded target number 1:
-	// abtCmd[0] = InDataExchange; abtCmd[1] = 1; /* target number */
-	// This is regardless of what target number was returned by InListPassiveTarget
-	return 1
+func (d *Device) getCurrentTarget() byte {
+	if d.currentTarget == 0 {
+		return 1 // Default to target 1 if not explicitly set
+	}
+	return d.currentTarget
 }
 
 // Option is a functional option for configuring a Device
