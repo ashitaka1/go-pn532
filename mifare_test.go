@@ -1080,3 +1080,313 @@ func TestMIFARETag_WriteText(t *testing.T) {
 		})
 	}
 }
+
+// Tests for mifare_extra.go functionality
+
+func TestMIFARETag_IsNDEFFormatted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock func(*MockTransport)
+		name      string
+		expected  bool
+	}{
+		{
+			name: "Not_NDEF_Formatted",
+			setupMock: func(mt *MockTransport) {
+				// MAD key authentication fails
+				mt.SetError(0x40, errors.New("authentication failed"))
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tag, _ := setupMIFARETagTest(t, tt.setupMock)
+
+			result := tag.IsNDEFFormatted(context.Background())
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestMIFARETag_FormatForNDEF(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		expectError   bool
+	}{
+		{
+			name: "Sector0_Auth_Failure",
+			setupMock: func(mt *MockTransport) {
+				// First auth attempt for sector 0 fails
+				mt.SetError(0x40, errors.New("authentication failed"))
+			},
+			expectError:   true,
+			errorContains: "failed to authenticate sector 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tag, _ := setupMIFARETagTest(t, tt.setupMock)
+			tag.SetConfig(testMIFAREConfig()) // Use fast test timing
+
+			err := tag.FormatForNDEF(context.Background())
+			checkMIFARETagError(t, err, tt.expectError, tt.errorContains)
+		})
+	}
+}
+
+func TestMIFARETag_WriteNDEFAlternative(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		message       *NDEFMessage
+		name          string
+		errorContains string
+		expectError   bool
+	}{
+		{
+			name:      "Empty_Records",
+			setupMock: func(_ *MockTransport) {},
+			message: &NDEFMessage{
+				Records: []NDEFRecord{},
+			},
+			expectError:   true,
+			errorContains: "no NDEF records to write",
+		},
+		{
+			name: "Successful_Write",
+			setupMock: func(mt *MockTransport) {
+				writeSuccess := []byte{0x41, 0x00}
+				// Auth for sector 1 + writes for NDEF data
+				for range 10 {
+					mt.QueueResponse(0x40, writeSuccess)
+				}
+			},
+			message: &NDEFMessage{
+				Records: []NDEFRecord{
+					{Type: NDEFTypeText, Text: "Test"},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "Data_Exceeds_Capacity",
+			setupMock: func(mt *MockTransport) {
+				writeSuccess := []byte{0x41, 0x00}
+				// Keep returning success so we hit the capacity limit
+				for range 100 {
+					mt.QueueResponse(0x40, writeSuccess)
+				}
+			},
+			message: &NDEFMessage{
+				Records: []NDEFRecord{
+					{Type: NDEFTypeText, Text: string(make([]byte, 2000))}, // Large message
+				},
+			},
+			expectError:   true,
+			errorContains: "exceeds tag capacity",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tag, _ := setupMIFARETagTest(t, tt.setupMock)
+			tag.SetConfig(testMIFAREConfig())
+
+			err := tag.WriteNDEFAlternative(context.Background(), tt.message)
+			checkMIFARETagError(t, err, tt.expectError, tt.errorContains)
+		})
+	}
+}
+
+func TestMIFARETag_WriteBlockAutoAlternative(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		setupTag      func(*MIFARETag)
+		name          string
+		errorContains string
+		data          []byte
+		block         uint8
+		expectError   bool
+	}{
+		{
+			name: "Auth_Required_KeyB_Succeeds",
+			setupMock: func(mt *MockTransport) {
+				// Key B auth succeeds, then write succeeds
+				mt.QueueResponses(0x40, []byte{0x41, 0x00}, []byte{0x41, 0x00})
+			},
+			setupTag:    func(_ *MIFARETag) {},
+			block:       4,
+			data:        make([]byte, 16),
+			expectError: false,
+		},
+		{
+			name: "Auth_Required_KeyB_Fails_KeyA_Succeeds",
+			setupMock: func(mt *MockTransport) {
+				// Key B fails, Key A succeeds, write succeeds
+				mt.QueueResponses(0x40,
+					[]byte{0x41, 0x14}, // Key B auth fails
+					[]byte{0x41, 0x00}, // Key A auth succeeds
+					[]byte{0x41, 0x00}, // Write succeeds
+				)
+			},
+			setupTag:    func(_ *MIFARETag) {},
+			block:       4,
+			data:        make([]byte, 16),
+			expectError: false,
+		},
+		{
+			name: "Both_Keys_Fail",
+			setupMock: func(mt *MockTransport) {
+				// Both keys fail
+				mt.SetError(0x40, errors.New("authentication failed"))
+			},
+			setupTag:      func(_ *MIFARETag) {},
+			block:         4,
+			data:          make([]byte, 16),
+			expectError:   true,
+			errorContains: "failed to authenticate to sector",
+		},
+		{
+			name: "Auth_Fails_For_Alt",
+			setupMock: func(mt *MockTransport) {
+				// Auth fails
+				mt.SetError(0x40, errors.New("auth failed"))
+			},
+			setupTag:      func(_ *MIFARETag) {},
+			block:         4,
+			data:          make([]byte, 16),
+			expectError:   true,
+			errorContains: "failed to authenticate",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tag, _ := setupMIFARETagTest(t, tt.setupMock)
+			tag.SetConfig(testMIFAREConfig())
+			tt.setupTag(tag)
+
+			err := tag.WriteBlockAutoAlternative(context.Background(), tt.block, tt.data)
+			checkMIFARETagError(t, err, tt.expectError, tt.errorContains)
+		})
+	}
+}
+
+func TestMIFARETag_authenticateForNDEFAlternative(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock             func(*MockTransport)
+		name                  string
+		expectedNDEFFormatted bool
+	}{
+		{
+			name: "NDEF_Formatted",
+			setupMock: func(mt *MockTransport) {
+				mt.SetResponse(0x40, []byte{0x41, 0x00})
+			},
+			expectedNDEFFormatted: true,
+		},
+		{
+			name: "Not_NDEF_Formatted",
+			setupMock: func(mt *MockTransport) {
+				mt.SetError(0x40, errors.New("auth failed"))
+			},
+			expectedNDEFFormatted: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tag, _ := setupMIFARETagTest(t, tt.setupMock)
+
+			result, err := tag.authenticateForNDEFAlternative(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedNDEFFormatted, result.isNDEFFormatted)
+		})
+	}
+}
+
+func TestMIFARETag_authenticateNDEFAlternative(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		keyType       byte
+		sector        uint8
+		expectError   bool
+	}{
+		{
+			name: "KeyA_Success",
+			setupMock: func(mt *MockTransport) {
+				mt.SetResponse(0x40, []byte{0x41, 0x00})
+			},
+			sector:      1,
+			keyType:     MIFAREKeyA,
+			expectError: false,
+		},
+		{
+			name: "KeyB_Success",
+			setupMock: func(mt *MockTransport) {
+				mt.SetResponse(0x40, []byte{0x41, 0x00})
+			},
+			sector:      1,
+			keyType:     MIFAREKeyB,
+			expectError: false,
+		},
+		{
+			name: "KeyA_Failure",
+			setupMock: func(mt *MockTransport) {
+				mt.SetError(0x40, errors.New("auth failed"))
+			},
+			sector:        1,
+			keyType:       MIFAREKeyA,
+			expectError:   true,
+			errorContains: "auth failed",
+		},
+		{
+			name: "Invalid_KeyType_NoOp",
+			setupMock: func(_ *MockTransport) {
+				// No setup needed - invalid key type returns nil
+			},
+			sector:      1,
+			keyType:     0x02, // Invalid key type
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tag, _ := setupMIFARETagTest(t, tt.setupMock)
+			tag.SetConfig(testMIFAREConfig())
+
+			err := tag.authenticateNDEFAlternative(context.Background(), tt.sector, tt.keyType)
+			checkMIFARETagError(t, err, tt.expectError, tt.errorContains)
+		})
+	}
+}
