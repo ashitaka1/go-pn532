@@ -467,6 +467,8 @@ func (t *Transport) waitAck() ([]byte, error) {
 // sendFrame sends a frame to the PN532 with automatic retry on ACK failures.
 // This prevents device lockup when ACK is not received due to timing issues
 // or card placement problems.
+//
+//nolint:gocognit,revive // Retry logic with frame construction inherently requires multiple branches
 func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 	const maxACKRetries = 3
 	ackRetryDelays := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}

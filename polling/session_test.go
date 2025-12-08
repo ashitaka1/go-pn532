@@ -996,3 +996,193 @@ func TestSession_WriteToNextTag(t *testing.T) {
 		assert.False(t, session.isPaused.Load()) // Should be resumed after cancelled write
 	})
 }
+
+//nolint:funlen // Test function with multiple subtests
+func TestSession_WriteToTagWithRetry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("SuccessfulWriteFirstAttempt", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Setup mock responses
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00}) // InSelect response
+		mockTransport.SetResponse(0x40, []byte{0x41, 0x00}) // DataExchange response
+
+		detectedTag := createTestDetectedTag()
+		writeCallCount := 0
+
+		err := session.WriteToTagWithRetry(
+			context.Background(), context.Background(), detectedTag, 3,
+			func(_ context.Context, tag pn532.Tag) error {
+				writeCallCount++
+				require.NotNil(t, tag)
+				return nil
+			})
+
+		require.NoError(t, err)
+		assert.Equal(t, 1, writeCallCount)
+		assert.False(t, session.isPaused.Load())
+	})
+
+	t.Run("RetriesOnTransientError", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Setup mock responses
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+		mockTransport.SetResponse(0x40, []byte{0x41, 0x00})
+
+		detectedTag := createTestDetectedTag()
+		writeCallCount := 0
+
+		err := session.WriteToTagWithRetry(
+			context.Background(), context.Background(), detectedTag, 3,
+			func(_ context.Context, _ pn532.Tag) error {
+				writeCallCount++
+				// Fail first two times with retryable error, succeed on third
+				if writeCallCount < 3 {
+					return pn532.ErrTransportTimeout // Retryable error
+				}
+				return nil
+			})
+
+		require.NoError(t, err)
+		assert.Equal(t, 3, writeCallCount)
+		assert.False(t, session.isPaused.Load())
+	})
+
+	t.Run("FailsOnPermanentError", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+
+		detectedTag := createTestDetectedTag()
+		writeCallCount := 0
+
+		err := session.WriteToTagWithRetry(
+			context.Background(), context.Background(), detectedTag, 3,
+			func(_ context.Context, _ pn532.Tag) error {
+				writeCallCount++
+				// Non-retryable error
+				return pn532.ErrDataTooLarge
+			})
+
+		require.Error(t, err)
+		assert.Equal(t, 1, writeCallCount) // Should not retry on permanent error
+		assert.False(t, session.isPaused.Load())
+	})
+
+	t.Run("DefaultMaxRetriesWhenZero", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+		mockTransport.SetResponse(0x40, []byte{0x41, 0x00})
+
+		detectedTag := createTestDetectedTag()
+		writeCallCount := 0
+
+		// Pass 0 for maxRetries - should default to 3
+		err := session.WriteToTagWithRetry(
+			context.Background(), context.Background(), detectedTag, 0,
+			func(_ context.Context, _ pn532.Tag) error {
+				writeCallCount++
+				// Always fail with retryable error
+				if writeCallCount < 3 {
+					return pn532.ErrTransportTimeout
+				}
+				return nil
+			})
+
+		require.NoError(t, err)
+		assert.Equal(t, 3, writeCallCount) // Default is 3 retries
+	})
+}
+
+func TestSession_WriteToNextTagWithRetry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("SuccessfulWriteWithRetry", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Setup mock responses for polling and tag operations
+		mockTransport.SetResponse(0x4A, []byte{
+			0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC,
+		})
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+		mockTransport.SetResponse(0x40, []byte{0x41, 0x00})
+
+		writeCallCount := 0
+		err := session.WriteToNextTagWithRetry(
+			context.Background(), context.Background(), 5*time.Second, 3,
+			func(_ context.Context, tag pn532.Tag) error {
+				writeCallCount++
+				require.NotNil(t, tag)
+				require.NotEmpty(t, tag.UID())
+				return nil
+			})
+
+		require.NoError(t, err)
+		assert.Equal(t, 1, writeCallCount)
+		assert.False(t, session.isPaused.Load())
+	})
+
+	t.Run("RetriesOnTransientErrorDuringWrite", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Setup mock responses
+		mockTransport.SetResponse(0x4A, []byte{
+			0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC,
+		})
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+		mockTransport.SetResponse(0x40, []byte{0x41, 0x00})
+
+		writeCallCount := 0
+		err := session.WriteToNextTagWithRetry(
+			context.Background(), context.Background(), 5*time.Second, 3,
+			func(_ context.Context, _ pn532.Tag) error {
+				writeCallCount++
+				// Fail first attempt with retryable error
+				if writeCallCount == 1 {
+					return pn532.ErrCommunicationFailed
+				}
+				return nil
+			})
+
+		require.NoError(t, err)
+		assert.Equal(t, 2, writeCallCount)
+	})
+
+	t.Run("ExhaustsRetriesOnPersistentError", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		mockTransport.SetResponse(0x4A, []byte{
+			0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC,
+		})
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+
+		writeCallCount := 0
+		err := session.WriteToNextTagWithRetry(
+			context.Background(), context.Background(), 5*time.Second, 2,
+			func(_ context.Context, _ pn532.Tag) error {
+				writeCallCount++
+				return pn532.ErrChecksumMismatch // Retryable error
+			})
+
+		require.Error(t, err)
+		assert.Equal(t, 2, writeCallCount) // Tried maxRetries times
+		assert.Contains(t, err.Error(), "retries")
+	})
+}

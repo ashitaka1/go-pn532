@@ -385,7 +385,7 @@ func (e *TraceableError) FormatTrace() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("[%s:%s] Wire trace (%d entries):\n", e.Transport, e.Port, len(e.Trace)))
+	_, _ = sb.WriteString(fmt.Sprintf("[%s:%s] Wire trace (%d entries):\n", e.Transport, e.Port, len(e.Trace)))
 
 	for _, entry := range e.Trace {
 		direction := ">"
@@ -394,9 +394,9 @@ func (e *TraceableError) FormatTrace() string {
 		}
 		hexData := formatHexBytes(entry.Data)
 		if entry.Note != "" {
-			sb.WriteString(fmt.Sprintf("  %s %s (%s)\n", direction, hexData, entry.Note))
+			_, _ = sb.WriteString(fmt.Sprintf("  %s %s (%s)\n", direction, hexData, entry.Note))
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s %s\n", direction, hexData))
+			_, _ = sb.WriteString(fmt.Sprintf("  %s %s\n", direction, hexData))
 		}
 	}
 

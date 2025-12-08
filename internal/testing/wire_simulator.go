@@ -180,6 +180,9 @@ type VirtualPN532 struct {
 	// Collision mode - when enabled, InListPassiveTarget returns collision error
 	// if multiple tags are present
 	collisionMode bool
+	// ACK failure simulation - number of ACKs to skip before succeeding
+	// Used to test transport retry logic
+	ackFailuresRemaining int
 }
 
 // NewVirtualPN532 creates a new wire-level PN532 simulator.
@@ -207,7 +210,7 @@ func (v *VirtualPN532) Write(data []byte) (int, error) {
 	defer v.mu.Unlock()
 
 	// Append to receive buffer
-	v.rxBuffer.Write(data)
+	_, _ = v.rxBuffer.Write(data)
 
 	// Try to process complete frames
 	if err := v.processReceivedData(); err != nil {
@@ -336,6 +339,18 @@ func (v *VirtualPN532) SetCollisionMode(enabled bool) {
 	v.collisionMode = enabled
 }
 
+// SetACKFailures configures the simulator to skip sending ACK frames for
+// the specified number of commands. After that many failures, ACKs resume.
+// This tests transport-level retry logic when ACK is not received.
+//
+// Example: SetACKFailures(2) causes the first 2 commands to not receive ACK,
+// forcing the transport to retry. The 3rd attempt will receive ACK normally.
+func (v *VirtualPN532) SetACKFailures(count int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.ackFailuresRemaining = count
+}
+
 // GetState returns the current simulator state.
 func (v *VirtualPN532) GetState() SimulatorState {
 	v.mu.Lock()
@@ -372,6 +387,7 @@ func (v *VirtualPN532) Reset() {
 	v.zombieMode = false
 	v.powerGlitchAfterBytes = 0
 	v.collisionMode = false
+	v.ackFailuresRemaining = 0
 }
 
 // processReceivedData parses frames from the receive buffer and generates responses.
@@ -565,6 +581,12 @@ func (v *VirtualPN532) processCommand(frameData []byte) error {
 		v.preACKGarbage = nil
 	}
 
+	// ACK failure simulation - skip ACK to test transport retry logic
+	if v.ackFailuresRemaining > 0 {
+		v.ackFailuresRemaining--
+		return nil // Don't send ACK or response, forcing transport to retry
+	}
+
 	// Send ACK first (unless testing ACK drop)
 	if !v.dropNextACK {
 		v.txBuffer.Write(ACKFrame)
@@ -644,7 +666,7 @@ func (v *VirtualPN532) sendResponse(cmd byte, data []byte) error {
 	}
 
 	v.lastResponse = frame
-	v.txBuffer.Write(frame)
+	_, _ = v.txBuffer.Write(frame)
 
 	return nil
 }
@@ -670,7 +692,7 @@ func (v *VirtualPN532) sendErrorFrame() error {
 	}
 
 	v.lastResponse = frame
-	v.txBuffer.Write(frame)
+	_, _ = v.txBuffer.Write(frame)
 	return nil
 }
 

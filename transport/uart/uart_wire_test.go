@@ -1797,3 +1797,165 @@ func TestIntegration_SingleTagWithMaxTgTwo(t *testing.T) {
 	assert.Len(t, tags, 1, "Should return 1 tag when only 1 present")
 	assert.Equal(t, "04112233445566", tags[0].UID)
 }
+
+// =============================================================================
+// ACK Retry Tests
+// =============================================================================
+// These tests verify the sendFrame ACK retry logic, which prevents device
+// lockup when ACK is not received due to timing issues or card placement.
+
+// TestUART_ACKRetry_SingleFailure tests successful retry after one ACK failure
+func TestUART_ACKRetry_SingleFailure(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Cause first ACK to be skipped, retry should succeed
+	sim.SetACKFailures(1)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(500 * time.Millisecond)
+
+	// Command should succeed after retry
+	resp, err := transport.SendCommand(0x02, nil) // GetFirmwareVersion
+	require.NoError(t, err, "Command should succeed after ACK retry")
+	require.NotNil(t, resp)
+
+	assert.Len(t, resp, 5)
+	assert.Equal(t, byte(0x03), resp[0], "Response code should be 0x03")
+	assert.Equal(t, byte(0x32), resp[1], "IC should be 0x32")
+}
+
+// TestUART_ACKRetry_TwoFailures tests successful retry after two ACK failures
+func TestUART_ACKRetry_TwoFailures(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Cause first two ACKs to be skipped, third attempt should succeed
+	sim.SetACKFailures(2)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(500 * time.Millisecond)
+
+	// Command should succeed on third attempt
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed after 2 ACK retries")
+	require.NotNil(t, resp)
+
+	assert.Len(t, resp, 5)
+	assert.Equal(t, byte(0x32), resp[1], "IC should be 0x32")
+}
+
+// TestUART_ACKRetry_AllRetriesExhausted tests failure when all ACK retries fail
+func TestUART_ACKRetry_AllRetriesExhausted(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Cause 3 ACK failures - maxACKRetries is 3, so all attempts fail
+	sim.SetACKFailures(3)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(200 * time.Millisecond)
+
+	// Command should fail after exhausting retries
+	_, err := transport.SendCommand(0x02, nil)
+	require.Error(t, err, "Command should fail when all ACK retries exhausted")
+	assert.Contains(t, err.Error(), "ACK retries", "Error should mention ACK retries")
+}
+
+// TestUART_ACKRetry_WithTagDetection tests ACK retry during tag detection
+func TestUART_ACKRetry_WithTagDetection(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(500 * time.Millisecond)
+
+	// Configure SAM first (without ACK failures)
+	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err)
+
+	// Now set up ACK failure for tag detection
+	sim.SetACKFailures(1)
+
+	// Tag detection should succeed after retry
+	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err, "Tag detection should succeed after ACK retry")
+	require.GreaterOrEqual(t, len(resp), 2)
+	assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
+	assert.Equal(t, byte(0x01), resp[1], "Should detect 1 tag")
+}
+
+// TestUART_ACKRetry_MultipleCommandsSequence tests ACK retry across multiple commands
+func TestUART_ACKRetry_MultipleCommandsSequence(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+	tag := virt.NewVirtualNTAG213([]byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	sim.AddTag(tag)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(500 * time.Millisecond)
+
+	// First command: GetFirmwareVersion with 1 ACK failure
+	sim.SetACKFailures(1)
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "GetFirmwareVersion should succeed after retry")
+	assert.Len(t, resp, 5)
+
+	// Second command: SAMConfiguration with no failures (ACK failures exhausted)
+	_, err = transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	require.NoError(t, err, "SAMConfiguration should succeed")
+
+	// Third command: InListPassiveTarget with 1 ACK failure
+	sim.SetACKFailures(1)
+	resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	require.NoError(t, err, "InListPassiveTarget should succeed after retry")
+	assert.Equal(t, byte(0x01), resp[1], "Should detect 1 tag")
+}
+
+// TestUART_ACKRetry_WithJitter tests ACK retry combined with jittery transport
+func TestUART_ACKRetry_WithJitter(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	// Set up 1 ACK failure
+	sim.SetACKFailures(1)
+
+	// Use jittery transport for extra stress
+	config := virt.JitterConfig{
+		MaxLatencyMs:     5,
+		FragmentReads:    true,
+		FragmentMinBytes: 2,
+		Seed:             12345,
+	}
+	transport := newJitteryTestTransport(sim, config)
+	_ = transport.SetTimeout(500 * time.Millisecond)
+
+	// Command should succeed despite both ACK failure and jitter
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "Command should succeed with ACK retry and jitter")
+	require.NotNil(t, resp)
+	assert.Len(t, resp, 5)
+}
+
+// TestUART_ACKRetry_RecoveryAfterFailure tests that subsequent commands work after retry
+func TestUART_ACKRetry_RecoveryAfterFailure(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
+
+	transport := newTestTransport(sim)
+	_ = transport.SetTimeout(500 * time.Millisecond)
+
+	// Command with ACK failures
+	sim.SetACKFailures(2)
+	resp, err := transport.SendCommand(0x02, nil)
+	require.NoError(t, err, "First command should succeed after retries")
+	assert.Len(t, resp, 5)
+
+	// Subsequent commands should work normally without any ACK issues
+	for i := range 5 {
+		resp, err = transport.SendCommand(0x02, nil)
+		require.NoError(t, err, "Command %d should succeed normally", i+1)
+		assert.Len(t, resp, 5)
+	}
+}

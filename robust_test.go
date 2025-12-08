@@ -496,7 +496,7 @@ func TestRetryHelperFunctions(t *testing.T) {
 
 // TestWriteNDEFWithRetry tests the write retry logic function
 //
-//nolint:funlen // Function length is necessary to test comprehensive retry scenarios
+//nolint:revive,funlen // Function complexity and length are necessary to test comprehensive retry scenarios
 func TestWriteNDEFWithRetry(t *testing.T) {
 	t.Parallel()
 

@@ -83,6 +83,8 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 // WriteNDEFWithRetry wraps NDEF write operations with retry logic.
 // This addresses intermittent write failures due to card placement issues or timing problems.
 // The entire write operation is retried on failure (operation-level retry).
+//
+//nolint:gocognit,revive // Retry logic inherently requires multiple branches for proper error handling
 func WriteNDEFWithRetry(ctx context.Context, writeFunc WriteNDEFFunc, maxRetries int, tagType string) error {
 	if maxRetries <= 0 {
 		maxRetries = 3 // Default to 3 retries

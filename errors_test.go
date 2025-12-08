@@ -397,6 +397,75 @@ func TestNewPN532Error(t *testing.T) {
 	}
 }
 
+//nolint:gocognit,revive // Test function with multiple field validations
+func TestNewPN532ErrorWithDetails(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		command     string
+		wantMessage string
+		bytesSent   int
+		errorCode   byte
+		target      byte
+	}{
+		{
+			name:        "timeout error with bytes sent and target",
+			errorCode:   0x01,
+			command:     "InDataExchange",
+			bytesSent:   16,
+			target:      1,
+			wantMessage: "InDataExchange error 0x01 (timeout) [sent 16 bytes, target 1]",
+		},
+		{
+			name:        "authentication error with protocol details",
+			errorCode:   0x14,
+			command:     "InCommunicateThru",
+			bytesSent:   32,
+			target:      2,
+			wantMessage: "InCommunicateThru error 0x14 (authentication error) [sent 32 bytes, target 2]",
+		},
+		{
+			name:        "CRC error with many bytes",
+			errorCode:   0x02,
+			command:     "InDataExchange",
+			bytesSent:   255,
+			target:      1,
+			wantMessage: "InDataExchange error 0x02 (CRC error) [sent 255 bytes, target 1]",
+		},
+		{
+			name:        "error with zero bytes sent (omits details)",
+			errorCode:   0x03,
+			command:     "InDataExchange",
+			bytesSent:   0,
+			target:      1,
+			wantMessage: "InDataExchange error 0x03 (parity error)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewPN532ErrorWithDetails(tt.errorCode, tt.command, tt.bytesSent, tt.target)
+
+			if err.ErrorCode != tt.errorCode {
+				t.Errorf("ErrorCode = 0x%02X, want 0x%02X", err.ErrorCode, tt.errorCode)
+			}
+			if err.Command != tt.command {
+				t.Errorf("Command = %q, want %q", err.Command, tt.command)
+			}
+			if err.BytesSent != tt.bytesSent {
+				t.Errorf("BytesSent = %d, want %d", err.BytesSent, tt.bytesSent)
+			}
+			if err.Target != tt.target {
+				t.Errorf("Target = %d, want %d", err.Target, tt.target)
+			}
+			if err.Error() != tt.wantMessage {
+				t.Errorf("Error() = %q, want %q", err.Error(), tt.wantMessage)
+			}
+		})
+	}
+}
+
 func TestPN532Error_ErrorTypeChecks(t *testing.T) {
 	t.Parallel()
 
