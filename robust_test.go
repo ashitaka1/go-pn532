@@ -50,9 +50,9 @@ func TestReadNDEFRobust_FunctionExists(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	})
 
-	_, err := ntagTag.ReadNDEFRobust()
+	_, err := ntagTag.ReadNDEFRobust(context.Background())
 	require.Error(t, err) // Should error because no NDEF data
-	t.Log("✓ NTAGTag.ReadNDEFRobust() function exists and callable")
+	t.Log("✓ NTAGTag.ReadNDEFRobust(context.Background()) function exists and callable")
 
 	// Test MIFARE ReadNDEFRobust exists
 	mifareUID := []byte{0x04, 0x12, 0x34, 0x56}
@@ -63,9 +63,9 @@ func TestReadNDEFRobust_FunctionExists(t *testing.T) {
 	// Mock auth failure (which should be retryable)
 	mockTransport.SetError(0x40, errors.New("authentication failed"))
 
-	_, err = mifareTag.ReadNDEFRobust()
+	_, err = mifareTag.ReadNDEFRobust(context.Background())
 	require.Error(t, err) // Should error because auth failed
-	t.Log("✓ MIFARETag.ReadNDEFRobust() function exists and callable")
+	t.Log("✓ MIFARETag.ReadNDEFRobust(context.Background()) function exists and callable")
 }
 
 // TestErrorTypeEnhancements verifies that the new error types exist
@@ -356,7 +356,7 @@ func TestNTAGReadNDEFRobust(t *testing.T) {
 			uid := []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB}
 			tag := NewNTAGTag(device, uid, 0x00)
 
-			_, err := tag.ReadNDEFRobust()
+			_, err := tag.ReadNDEFRobust(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -422,7 +422,7 @@ func TestMIFAREReadNDEFRobust(t *testing.T) {
 			uid := []byte{0x04, 0x12, 0x34, 0x56}
 			tag := NewMIFARETag(device, uid, 0x00)
 
-			_, err := tag.ReadNDEFRobust()
+			_, err := tag.ReadNDEFRobust(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)

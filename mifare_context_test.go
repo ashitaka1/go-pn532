@@ -53,16 +53,29 @@ func TestMIFARETag_WriteNDEFContext_Cancellation(t *testing.T) {
 		{
 			name: "successful write with context",
 			setupMock: func(mock *MockTransport) {
-				// Setup for successful NDEF write with MIFARE NDEF key
-				// Auth response
-				mock.SetResponse(0x40, []byte{0x41, 0x00})
-				// Read sector 1, block 0
-				mock.SetResponse(0x40, []byte{
-					0x41, 0x00, 0x10, 0x44, 0x03, 0x02, 0x00, 0x00,
-					0x03, 0x00, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				})
-				// Write block response
-				mock.SetResponse(0x40, []byte{0x41, 0x00})
+				// NDEF "test" encodes to: 03 0B D1 01 07 54 02 65 6E 74 65 73 74 FE (14 bytes, padded to 16)
+				ndefBlock := []byte{
+					0x03, 0x0B, 0xD1, 0x01, 0x07, 0x54, 0x02, 0x65,
+					0x6E, 0x74, 0x65, 0x73, 0x74, 0xFE, 0x00, 0x00,
+				}
+				writeSuccess := []byte{0x41, 0x00}
+				readResponse := append([]byte{0x41, 0x00}, ndefBlock...)
+
+				// Count exact operations:
+				// 1. Auth sector 1 (initial)
+				// 2. Write block 4
+				// 3-4. Write blocks 5, 6 (clearRemainingBlocks sector 1)
+				// 5-8. Auth sector 2 + Write blocks 8,9,10
+				// ... continues for sectors 3-15 (14 sectors * 4 ops = 56)
+				// Total before verification: 4 + 56 = 60
+				// Then: Auth sector 1 (verification) = 61
+				// Then: Read block 4 = 62
+				//
+				// Queue 61 writeSuccess (for ops 1-61), then readResponse (for op 62)
+				for range 61 {
+					mock.QueueResponse(0x40, writeSuccess)
+				}
+				mock.QueueResponse(0x40, readResponse)
 			},
 			cancelAfter: 1 * time.Second, // Don't cancel
 			expectError: false,
@@ -93,8 +106,8 @@ func TestMIFARETag_WriteNDEFContext_Cancellation(t *testing.T) {
 				},
 			}
 
-			// Test WriteNDEFWithContext
-			err := tag.WriteNDEFWithContext(ctx, message)
+			// Test WriteNDEF with context
+			err := tag.WriteNDEF(ctx, message)
 
 			if tt.expectError {
 				require.Error(t, err)

@@ -71,20 +71,20 @@ func (t *TagOperations) ReadAll(ctx context.Context) ([]byte, error) {
 }
 
 // ReadNDEF reads and parses NDEF data from the tag
-func (t *TagOperations) ReadNDEF(_ context.Context) (*pn532.NDEFMessage, error) {
+func (t *TagOperations) ReadNDEF(ctx context.Context) (*pn532.NDEFMessage, error) {
 	if t.tag == nil {
 		return nil, ErrNoTag
 	}
 
 	switch t.tagType {
 	case pn532.TagTypeNTAG:
-		ndefMsg, err := t.ntagInstance.ReadNDEFRobust()
+		ndefMsg, err := t.ntagInstance.ReadNDEFRobust(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read NDEF from NTAG: %w", err)
 		}
 		return ndefMsg, nil
 	case pn532.TagTypeMIFARE:
-		ndefMsg, err := t.mifareInstance.ReadNDEFRobust()
+		ndefMsg, err := t.mifareInstance.ReadNDEFRobust(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read NDEF from MIFARE: %w", err)
 		}
@@ -97,7 +97,9 @@ func (t *TagOperations) ReadNDEF(_ context.Context) (*pn532.NDEFMessage, error) 
 
 // readNTAGBlocks reads blocks from NTAG using fast read when possible
 func (t *TagOperations) readNTAGBlocks(ctx context.Context, startBlock, endBlock byte) ([]byte, error) {
-	_ = ctx // Reserved for future timeout/cancellation support
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	startPage, endPage := t.validatePageRange(startBlock, endBlock)
 	expectedBytes := (int(endPage - startPage + 1)) * 4
@@ -106,7 +108,10 @@ func (t *TagOperations) readNTAGBlocks(ctx context.Context, startBlock, endBlock
 	currentPage := startPage
 
 	for currentPage <= endPage {
-		chunkData, nextPage, err := t.readPageChunk(currentPage, endPage)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		chunkData, nextPage, err := t.readPageChunk(ctx, currentPage, endPage)
 		if err != nil {
 			return nil, err
 		}
@@ -125,35 +130,50 @@ func (t *TagOperations) validatePageRange(startBlock, endBlock byte) (validStart
 	return startBlock, endPage
 }
 
-func (t *TagOperations) readPageChunk(currentPage, endPage byte) (data []byte, nextPage byte, err error) {
+func (t *TagOperations) readPageChunk(
+	ctx context.Context, currentPage, endPage byte,
+) (data []byte, nextPage byte, err error) {
 	chunkEnd := currentPage + 15
 	if chunkEnd > endPage {
 		chunkEnd = endPage
 	}
 
-	if data, nextPage := t.tryFastRead(currentPage, chunkEnd); data != nil {
+	if data, nextPage := t.tryFastRead(ctx, currentPage, chunkEnd); data != nil {
 		return data, nextPage, nil
 	}
 
-	return t.readPagesIndividually(currentPage, chunkEnd)
+	return t.readPagesIndividually(ctx, currentPage, chunkEnd)
 }
 
-func (t *TagOperations) tryFastRead(currentPage, chunkEnd byte) (data []byte, nextPage byte) {
+func (t *TagOperations) tryFastRead(ctx context.Context, currentPage, chunkEnd byte) (data []byte, nextPage byte) {
 	if chunkEnd <= currentPage {
 		return nil, 0
 	}
 
 	cmd := []byte{0x3A, currentPage, chunkEnd}
-	if data, err := t.device.SendRawCommand(context.Background(), cmd); err == nil {
+	data, err := t.device.SendRawCommand(ctx, cmd)
+
+	// Re-select target after SendRawCommand to restore PN532 internal state
+	// SendRawCommand uses InCommunicateThru which doesn't maintain target selection
+	if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
+		pn532.Debugf("tagops tryFastRead: InSelect failed (non-fatal): %v", selectErr)
+	}
+
+	if err == nil {
 		return data, chunkEnd + 1
 	}
 
 	return nil, 0
 }
 
-func (t *TagOperations) readPagesIndividually(currentPage, chunkEnd byte) (result []byte, nextPage byte, err error) {
+func (t *TagOperations) readPagesIndividually(
+	ctx context.Context, currentPage, chunkEnd byte,
+) (result []byte, nextPage byte, err error) {
 	for page := currentPage; page <= chunkEnd; page++ {
-		pageData, err := t.device.SendDataExchange(context.Background(), []byte{0x30, page})
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		pageData, err := t.device.SendDataExchange(ctx, []byte{0x30, page})
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to read page %d: %w", page, err)
 		}
@@ -177,8 +197,6 @@ func (*TagOperations) trimToExpectedSize(result []byte, expectedBytes int) []byt
 
 // readMIFAREBlocks reads blocks from MIFARE Classic with automatic authentication
 func (t *TagOperations) readMIFAREBlocks(ctx context.Context, startBlock, endBlock byte) ([]byte, error) {
-	_ = ctx // Reserved for future timeout/cancellation support
-
 	var result []byte
 
 	for block := startBlock; block <= endBlock; block++ {
@@ -188,7 +206,7 @@ func (t *TagOperations) readMIFAREBlocks(ctx context.Context, startBlock, endBlo
 		}
 
 		// ReadBlockAuto handles authentication automatically
-		data, err := t.mifareInstance.ReadBlockAuto(block)
+		data, err := t.mifareInstance.ReadBlockAuto(ctx, block)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read block %d: %w", block, err)
 		}

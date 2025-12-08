@@ -2,6 +2,7 @@
 package tagops
 
 import (
+	"context"
 	"testing"
 
 	"github.com/ZaparooProject/go-pn532"
@@ -263,4 +264,119 @@ func TestErrors(t *testing.T) {
 	assert.Equal(t, "no tag detected", ErrNoTag.Error())
 	assert.Equal(t, "unsupported tag type", ErrUnsupportedTag.Error())
 	assert.Equal(t, "authentication failed with all known keys", ErrAuthFailed.Error())
+}
+
+// --- detectAndInitializeTag Tests ---
+
+func TestTagOperations_detectAndInitializeTag_NoTag(t *testing.T) {
+	ops := &TagOperations{
+		tag: nil,
+	}
+
+	err := ops.detectAndInitializeTag(context.TODO())
+	assert.Equal(t, ErrNoTag, err)
+}
+
+// --- TagInfo MIFARE Variants ---
+
+func TestTagInfo_MIFARE_UnknownSize(t *testing.T) {
+	// 7-byte UID results in unknown size (UID length doesn't determine card type)
+	ops := &TagOperations{
+		tagType: pn532.TagTypeMIFARE,
+		tag:     &pn532.DetectedTag{UIDBytes: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}},
+	}
+
+	info, err := ops.GetTagInfo()
+	require.NoError(t, err)
+	assert.Equal(t, mifareClassicName, info.TypeName)
+	// 7-byte UIDs result in unknown size since we can't determine from UID alone
+	assert.Contains(t, info.MIFAREType, "MIFARE Classic")
+}
+
+// --- Reader Tests ---
+
+func TestTagOperations_ReadBlocks_NoTag(t *testing.T) {
+	ops := &TagOperations{
+		tag: nil,
+	}
+
+	blocks, err := ops.ReadBlocks(context.TODO(), 0, 5)
+	require.Error(t, err)
+	assert.Nil(t, blocks)
+}
+
+func TestTagOperations_ReadBlocks_UnsupportedType(t *testing.T) {
+	ops := &TagOperations{
+		tag:     &pn532.DetectedTag{UIDBytes: []byte{0x01}},
+		tagType: pn532.TagTypeUnknown,
+	}
+
+	blocks, err := ops.ReadBlocks(context.TODO(), 0, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported tag type")
+	assert.Nil(t, blocks)
+}
+
+func TestTagOperations_ReadNDEF_NoTag(t *testing.T) {
+	ops := &TagOperations{
+		tag: nil,
+	}
+
+	message, err := ops.ReadNDEF(context.TODO())
+	require.Error(t, err)
+	assert.Nil(t, message)
+}
+
+func TestTagOperations_ReadNDEF_UnsupportedType(t *testing.T) {
+	ops := &TagOperations{
+		tag:     &pn532.DetectedTag{UIDBytes: []byte{0x01}},
+		tagType: pn532.TagTypeUnknown,
+	}
+
+	message, err := ops.ReadNDEF(context.TODO())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported tag type")
+	assert.Nil(t, message)
+}
+
+// --- Writer Tests ---
+
+func TestTagOperations_WriteBlocks_NoTag(t *testing.T) {
+	ops := &TagOperations{
+		tag: nil,
+	}
+
+	err := ops.WriteBlocks(context.TODO(), 0, []byte{0x01})
+	require.Error(t, err)
+}
+
+func TestTagOperations_WriteBlocks_UnsupportedType(t *testing.T) {
+	ops := &TagOperations{
+		tag:     &pn532.DetectedTag{UIDBytes: []byte{0x01}},
+		tagType: pn532.TagTypeUnknown,
+	}
+
+	err := ops.WriteBlocks(context.TODO(), 0, []byte{0x01})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported")
+}
+
+func TestTagOperations_WriteNDEF_NoTag(t *testing.T) {
+	ops := &TagOperations{
+		tag: nil,
+	}
+
+	err := ops.WriteNDEF(context.TODO(), &pn532.NDEFMessage{})
+	require.Error(t, err)
+}
+
+func TestTagOperations_WriteNDEF_UnsupportedType(t *testing.T) {
+	ops := &TagOperations{
+		tag:     &pn532.DetectedTag{UIDBytes: []byte{0x01}},
+		tagType: pn532.TagTypeUnknown,
+	}
+
+	err := ops.WriteNDEF(context.TODO(), &pn532.NDEFMessage{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported tag type")
 }

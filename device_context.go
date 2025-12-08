@@ -120,7 +120,7 @@ func (d *Device) handleSAMConfiguration(ctx context.Context) error {
 		strings.Contains(errStr, "clone device returned empty response") {
 		// Clone device returned wrong response format - this is common with some clones
 		// Continue without SAM config as these devices often don't support it properly
-		debugf("Warning: Clone device detected (SAM config issue: %s), continuing without SAM configuration", errStr)
+		Debugf("Warning: Clone device detected (SAM config issue: %s), continuing without SAM configuration", errStr)
 		return nil
 	}
 
@@ -165,7 +165,7 @@ func (d *Device) GetFirmwareVersion(ctx context.Context) (*FirmwareVersion, erro
 
 // debugFirmwareResponse logs the firmware response for debugging
 func (*Device) debugFirmwareResponse(res []byte) {
-	debugf("GetFirmwareVersion response: [%s] (len=%d)",
+	Debugf("GetFirmwareVersion response: [%s] (len=%d)",
 		strings.Join(func() []string {
 			strs := make([]string, len(res))
 			for i, b := range res {
@@ -208,7 +208,7 @@ func (*Device) parseStandardFirmwareResponse(res []byte) (*FirmwareVersion, erro
 func (d *Device) parseCloneFirmwareResponse(res []byte) (*FirmwareVersion, error) {
 	// Clone device returned SAM configuration response (0x15)
 	if len(res) == 1 && res[0] == 0x15 {
-		debugln("Clone device returned SAM config response (0x15) for GetFirmwareVersion")
+		Debugln("Clone device returned SAM config response (0x15) for GetFirmwareVersion")
 		return d.createDefaultFirmwareVersion(), nil
 	}
 
@@ -219,7 +219,7 @@ func (d *Device) parseCloneFirmwareResponse(res []byte) (*FirmwareVersion, error
 		}
 
 		// Fallback: Create a generic firmware version for compatibility
-		debugln("Using fallback firmware version for clone device")
+		Debugln("Using fallback firmware version for clone device")
 		return d.createDefaultFirmwareVersion(), nil
 	}
 
@@ -230,7 +230,7 @@ func (d *Device) parseCloneFirmwareResponse(res []byte) (*FirmwareVersion, error
 func (*Device) parseCloneD5Format(res []byte) *FirmwareVersion {
 	if len(res) >= 5 && res[0] == 0xD5 && res[1] == 0x03 {
 		// Some clones prefix with 0xD5 (response command byte)
-		debugln("Detected clone format with 0xD5 prefix")
+		Debugln("Detected clone format with 0xD5 prefix")
 		if len(res) >= 7 && res[2] == 0x32 {
 			return &FirmwareVersion{
 				Version:          fmt.Sprintf("%d.%d", res[3], res[4]),
@@ -389,18 +389,18 @@ func (d *Device) DetectTags(ctx context.Context, maxTags, baudRate byte) ([]*Det
 func (d *Device) detectTagsWithInListPassiveTarget(
 	ctx context.Context, maxTags, baudRate byte,
 ) ([]*DetectedTag, error) {
-	debugln("Using InListPassiveTarget strategy")
+	Debugln("Using InListPassiveTarget strategy")
 
 	// Apply transport-specific optimizations and timing
 	if err := d.prepareTransportForInListPassiveTarget(ctx); err != nil {
-		debugf("Transport preparation failed: %v", err)
+		Debugf("Transport preparation failed: %v", err)
 		return nil, fmt.Errorf("transport preparation failed: %w", err)
 	}
 
 	// Release any previously selected targets to clear HALT states
 	// This addresses intermittent "empty valid tag" issues where tags get stuck
 	if err := d.InRelease(ctx, 0); err != nil {
-		debugf("InRelease failed, continuing anyway: %v", err)
+		Debugf("InRelease failed, continuing anyway: %v", err)
 		// Don't fail the operation if InRelease fails - it's an optimization
 	}
 
@@ -743,14 +743,14 @@ func (d *Device) InListPassiveTarget(ctx context.Context, maxTg, brTy byte) ([]*
 	maxTg = d.normalizeMaxTargets(maxTg)
 	data := []byte{maxTg, brTy}
 
-	debugf("InListPassiveTarget - maxTg=%d, brTy=0x%02X, transport=%s", maxTg, brTy, d.transport.Type())
+	Debugf("InListPassiveTarget - maxTg=%d, brTy=0x%02X, transport=%s", maxTg, brTy, d.transport.Type())
 
 	res, err := d.executeInListPassiveTarget(ctx, data)
 	if err != nil {
 		return d.handleInListPassiveTargetError(ctx, err, maxTg, brTy)
 	}
 
-	debugf("InListPassiveTarget response (%d bytes): %X", len(res), res)
+	Debugf("InListPassiveTarget response (%d bytes): %X", len(res), res)
 
 	if err := d.validateInListPassiveTargetResponse(res); err != nil {
 		return nil, err
@@ -773,7 +773,7 @@ func (d *Device) InListPassiveTargetWithTimeout(
 	maxTg = d.normalizeMaxTargets(maxTg)
 	data := []byte{maxTg, brTy, mxRtyATR}
 
-	debugf("InListPassiveTargetWithTimeout - maxTg=%d, brTy=0x%02X, mxRtyATR=0x%02X, transport=%s",
+	Debugf("InListPassiveTargetWithTimeout - maxTg=%d, brTy=0x%02X, mxRtyATR=0x%02X, transport=%s",
 		maxTg, brTy, mxRtyATR, d.transport.Type())
 
 	res, err := d.executeInListPassiveTarget(ctx, data)
@@ -781,7 +781,7 @@ func (d *Device) InListPassiveTargetWithTimeout(
 		return d.handleInListPassiveTargetError(ctx, err, maxTg, brTy)
 	}
 
-	debugf("InListPassiveTargetWithTimeout response (%d bytes): %X", len(res), res)
+	Debugf("InListPassiveTargetWithTimeout response (%d bytes): %X", len(res), res)
 
 	if err := d.validateInListPassiveTargetResponse(res); err != nil {
 		return nil, err
@@ -894,12 +894,12 @@ func (*Device) getContextTimeoutOrFallback(ctx context.Context, fallback time.Du
 func (d *Device) handleInListPassiveTargetError(
 	ctx context.Context, err error, maxTg, brTy byte,
 ) ([]*DetectedTag, error) {
-	debugf("InListPassiveTarget command failed: %v", err)
+	Debugf("InListPassiveTarget command failed: %v", err)
 
 	// Check if this looks like a clone device compatibility issue
 	if strings.Contains(err.Error(), "clone device returned empty response") ||
 		strings.Contains(err.Error(), "need at least 2 bytes for status") {
-		debugln("Clone device detected - InListPassiveTarget not supported, falling back to InAutoPoll")
+		Debugln("Clone device detected - InListPassiveTarget not supported, falling back to InAutoPoll")
 		return d.fallbackToInAutoPoll(ctx, maxTg, brTy)
 	}
 
@@ -909,18 +909,18 @@ func (d *Device) handleInListPassiveTargetError(
 // validateInListPassiveTargetResponse validates the response format
 func (*Device) validateInListPassiveTargetResponse(res []byte) error {
 	if len(res) < 2 {
-		debugf("Response too short (%d bytes) - may indicate clone device timing issue", len(res))
+		Debugf("Response too short (%d bytes) - may indicate clone device timing issue", len(res))
 		return fmt.Errorf("InListPassiveTarget response too short: got %d bytes, expected at least 2", len(res))
 	}
 
 	// Check response format: should start with 0x4B (InListPassiveTarget response)
 	if res[0] != 0x4B {
-		debugf("Invalid response format - expected 0x4B response code, got: %X", res)
+		Debugf("Invalid response format - expected 0x4B response code, got: %X", res)
 		// Some clone devices may return wrapped responses - try to extract the actual PN532 response
 		if len(res) <= 2 || res[1] != 0x4B {
 			return fmt.Errorf("unexpected InListPassiveTarget response: expected 0x4B, got %v", res)
 		}
-		debugln("Detected wrapped response, adjusting offset")
+		Debugln("Detected wrapped response, adjusting offset")
 		// Modify res in place to skip the wrapper byte
 		copy(res, res[1:])
 	}
@@ -931,10 +931,10 @@ func (*Device) validateInListPassiveTargetResponse(res []byte) error {
 // parseInListPassiveTargetResponse parses the response and creates DetectedTag objects
 func (d *Device) parseInListPassiveTargetResponse(res []byte) ([]*DetectedTag, error) {
 	numTargets := res[1]
-	debugf("InListPassiveTarget found %d targets", numTargets)
+	Debugf("InListPassiveTarget found %d targets", numTargets)
 
 	if numTargets == 0 {
-		debugln("No targets detected - this may indicate clone device needs different timing or initialization")
+		Debugln("No targets detected - this may indicate clone device needs different timing or initialization")
 		return []*DetectedTag{}, nil
 	}
 
@@ -955,7 +955,7 @@ func (d *Device) parseInListPassiveTargetResponse(res []byte) ([]*DetectedTag, e
 
 // parseTargetAtOffset parses a single target from the response at the given offset
 func (d *Device) parseTargetAtOffset(res []byte, offset, targetIndex int) (*DetectedTag, int, error) {
-	debugf("Parsing target %d at offset %d", targetIndex, offset)
+	Debugf("Parsing target %d at offset %d", targetIndex, offset)
 
 	if offset >= len(res) {
 		return nil, 0, fmt.Errorf("response truncated when expecting target %d", targetIndex)
@@ -964,7 +964,7 @@ func (d *Device) parseTargetAtOffset(res []byte, offset, targetIndex int) (*Dete
 	// Target number (logical number assigned by PN532)
 	targetNumber := res[offset]
 	offset++
-	debugf("Target %d - targetNumber=%d", targetIndex, targetNumber)
+	Debugf("Target %d - targetNumber=%d", targetIndex, targetNumber)
 
 	result, err := d.parseInListTargetData(res, offset, targetIndex)
 	if err != nil {
@@ -972,7 +972,7 @@ func (d *Device) parseTargetAtOffset(res []byte, offset, targetIndex int) (*Dete
 	}
 
 	tagType := d.identifyTagType(result.atq, result.sak)
-	debugf("Target %d - Identified as %v", targetIndex, tagType)
+	Debugf("Target %d - Identified as %v", targetIndex, tagType)
 
 	tag := &DetectedTag{
 		Type:         tagType,
@@ -1003,7 +1003,7 @@ func (*Device) parseInListTargetData(res []byte, offset, targetIndex int) (*targ
 	}
 	atq := res[offset : offset+2]
 	offset += 2
-	debugf("Target %d - ATQ=%X", targetIndex, atq)
+	Debugf("Target %d - ATQ=%X", targetIndex, atq)
 
 	// SEL_RES (SAK) - 1 byte
 	if offset >= len(res) {
@@ -1011,7 +1011,7 @@ func (*Device) parseInListTargetData(res []byte, offset, targetIndex int) (*targ
 	}
 	sak := res[offset]
 	offset++
-	debugf("Target %d - SAK=0x%02X", targetIndex, sak)
+	Debugf("Target %d - SAK=0x%02X", targetIndex, sak)
 
 	// UID length and UID
 	if offset >= len(res) {
@@ -1019,14 +1019,14 @@ func (*Device) parseInListTargetData(res []byte, offset, targetIndex int) (*targ
 	}
 	uidLen := res[offset]
 	offset++
-	debugf("Target %d - UID length=%d", targetIndex, uidLen)
+	Debugf("Target %d - UID length=%d", targetIndex, uidLen)
 
 	if offset+int(uidLen) > len(res) {
 		return nil, fmt.Errorf("response truncated when expecting target %d UID", targetIndex)
 	}
 	uid := res[offset : offset+int(uidLen)]
 	offset += int(uidLen)
-	debugf("Target %d - UID=%X", targetIndex, uid)
+	Debugf("Target %d - UID=%X", targetIndex, uid)
 
 	return &targetParseResult{
 		atq:       atq,
@@ -1039,7 +1039,7 @@ func (*Device) parseInListTargetData(res []byte, offset, targetIndex int) (*targ
 // fallbackToInAutoPoll provides a fallback detection method for clone devices
 // that don't support InListPassiveTarget command properly
 func (d *Device) fallbackToInAutoPoll(ctx context.Context, maxTg, brTy byte) ([]*DetectedTag, error) {
-	debugln("Using InAutoPoll fallback for clone device compatibility")
+	Debugln("Using InAutoPoll fallback for clone device compatibility")
 
 	// Convert baudRate parameter to appropriate AutoPoll target types
 	var targetTypes []AutoPollTarget
@@ -1058,7 +1058,7 @@ func (d *Device) fallbackToInAutoPoll(ctx context.Context, maxTg, brTy byte) ([]
 	}
 
 	// Add extra stabilization delay for clone devices
-	debugln("Applying stabilization delay for clone device")
+	Debugln("Applying stabilization delay for clone device")
 	select {
 	case <-time.After(100 * time.Millisecond):
 	case <-ctx.Done():
@@ -1069,16 +1069,16 @@ func (d *Device) fallbackToInAutoPoll(ctx context.Context, maxTg, brTy byte) ([]
 	// Use period=3 (3*150ms = 450ms) for quicker response
 	results, err := d.InAutoPoll(ctx, maxTg, 3, targetTypes)
 	if err != nil {
-		debugf("InAutoPoll fallback also failed: %v", err)
+		Debugf("InAutoPoll fallback also failed: %v", err)
 		return nil, fmt.Errorf("both InListPassiveTarget and InAutoPoll failed for clone device: %w", err)
 	}
 
 	if len(results) == 0 {
-		debugln("No targets detected via InAutoPoll fallback")
+		Debugln("No targets detected via InAutoPoll fallback")
 		return []*DetectedTag{}, nil
 	}
 
-	debugf("InAutoPoll fallback detected %d targets", len(results))
+	Debugf("InAutoPoll fallback detected %d targets", len(results))
 
 	// Convert AutoPoll results to DetectedTag format
 	return d.convertAutoPollResults(ctx, results, maxTg)

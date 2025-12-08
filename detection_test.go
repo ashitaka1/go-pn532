@@ -488,3 +488,416 @@ func TestDevice_SelectTag(t *testing.T) {
 		assert.Contains(t, err.Error(), "nil")
 	})
 }
+
+// TestHandleDetectionError tests the error counting and threshold behavior
+func TestHandleDetectionError(t *testing.T) {
+	t.Parallel()
+
+	device := &Device{}
+
+	t.Run("First_Few_Errors_Logged", func(t *testing.T) {
+		t.Parallel()
+		errorCount := 0
+		for i := range 3 {
+			err := device.handleDetectionError(&errorCount, errors.New("test error"))
+			require.NoError(t, err)
+			assert.Equal(t, i+1, errorCount)
+		}
+	})
+
+	t.Run("Too_Many_Errors_Returns_Error", func(t *testing.T) {
+		t.Parallel()
+		errorCount := 10 // Start at max
+		err := device.handleDetectionError(&errorCount, errors.New("final error"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "too many detection errors")
+	})
+}
+
+// TestPauseWithContext tests the pauseWithContext function
+func TestPauseWithContext(t *testing.T) {
+	t.Parallel()
+
+	device := &Device{}
+
+	t.Run("Normal_Pause", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		start := time.Now()
+		err := device.pauseWithContext(ctx, 50*time.Millisecond)
+		elapsed := time.Since(start)
+
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, elapsed, 45*time.Millisecond)
+	})
+
+	t.Run("Context_Cancelled", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		err := device.pauseWithContext(ctx, 1*time.Second)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+}
+
+// TestMatchesUIDFilter tests the UID filtering logic
+func TestMatchesUIDFilter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		tagUID     []byte
+		filterUID  []byte
+		shouldPass bool
+	}{
+		{
+			name:       "Empty_Filter_Always_Matches",
+			tagUID:     []byte{0x04, 0x12, 0x34, 0x56},
+			filterUID:  nil,
+			shouldPass: true,
+		},
+		{
+			name:       "Exact_Match",
+			tagUID:     []byte{0x04, 0x12, 0x34, 0x56},
+			filterUID:  []byte{0x04, 0x12, 0x34, 0x56},
+			shouldPass: true,
+		},
+		{
+			name:       "Partial_Prefix_Match",
+			tagUID:     []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			filterUID:  []byte{0x04, 0x12},
+			shouldPass: true,
+		},
+		{
+			name:       "Partial_No_Match",
+			tagUID:     []byte{0x04, 0x12, 0x34, 0x56},
+			filterUID:  []byte{0x04, 0x99},
+			shouldPass: false,
+		},
+		{
+			name:       "Filter_Longer_Than_UID",
+			tagUID:     []byte{0x04, 0x12},
+			filterUID:  []byte{0x04, 0x12, 0x34, 0x56},
+			shouldPass: false,
+		},
+		{
+			name:       "Single_Byte_Filter_Match",
+			tagUID:     []byte{0x04, 0x12, 0x34, 0x56},
+			filterUID:  []byte{0x04},
+			shouldPass: true,
+		},
+		{
+			name:       "Single_Byte_Filter_No_Match",
+			tagUID:     []byte{0x04, 0x12, 0x34, 0x56},
+			filterUID:  []byte{0x05},
+			shouldPass: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tag := &DetectedTag{UIDBytes: tt.tagUID}
+			result := matchesUIDFilter(tag, tt.filterUID)
+			assert.Equal(t, tt.shouldPass, result)
+		})
+	}
+}
+
+// TestShouldIncludeTag tests the combined tag filtering logic
+func TestShouldIncludeTag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		tag        *DetectedTag
+		tagType    TagType
+		uid        []byte
+		shouldPass bool
+	}{
+		{
+			name:       "Any_Type_No_UID_Filter",
+			tag:        &DetectedTag{Type: TagTypeNTAG, UIDBytes: []byte{0x04, 0x12}},
+			tagType:    TagTypeAny,
+			uid:        nil,
+			shouldPass: true,
+		},
+		{
+			name:       "Matching_Type_No_UID_Filter",
+			tag:        &DetectedTag{Type: TagTypeNTAG, UIDBytes: []byte{0x04, 0x12}},
+			tagType:    TagTypeNTAG,
+			uid:        nil,
+			shouldPass: true,
+		},
+		{
+			name:       "Non_Matching_Type",
+			tag:        &DetectedTag{Type: TagTypeMIFARE, UIDBytes: []byte{0x04, 0x12}},
+			tagType:    TagTypeNTAG,
+			uid:        nil,
+			shouldPass: false,
+		},
+		{
+			name:       "Matching_Type_And_UID",
+			tag:        &DetectedTag{Type: TagTypeNTAG, UIDBytes: []byte{0x04, 0x12, 0x34}},
+			tagType:    TagTypeNTAG,
+			uid:        []byte{0x04, 0x12},
+			shouldPass: true,
+		},
+		{
+			name:       "Matching_Type_Non_Matching_UID",
+			tag:        &DetectedTag{Type: TagTypeNTAG, UIDBytes: []byte{0x04, 0x12, 0x34}},
+			tagType:    TagTypeNTAG,
+			uid:        []byte{0x99, 0x99},
+			shouldPass: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := shouldIncludeTag(tt.tag, tt.tagType, tt.uid)
+			assert.Equal(t, tt.shouldPass, result)
+		})
+	}
+}
+
+// TestIdentifyTagType tests tag type identification from ATQ and SAK
+func TestIdentifyTagType(t *testing.T) {
+	t.Parallel()
+
+	mock := NewMockTransport()
+	mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+	mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
+	device, _ := New(mock)
+
+	tests := []struct {
+		name         string
+		expectedType TagType
+		atq          []byte
+		sak          byte
+	}{
+		// NTAG patterns
+		{name: "NTAG_Standard_SAK00", expectedType: TagTypeNTAG, atq: []byte{0x00, 0x44}, sak: 0x00},
+		{name: "NTAG_Swapped_SAK00", expectedType: TagTypeNTAG, atq: []byte{0x44, 0x00}, sak: 0x00},
+		{name: "NTAG_Standard_SAK04", expectedType: TagTypeNTAG, atq: []byte{0x00, 0x44}, sak: 0x04},
+		{name: "NTAG_Alternative_0101", expectedType: TagTypeNTAG, atq: []byte{0x01, 0x01}, sak: 0x00},
+		{name: "NTAG_Additional_0100_44", expectedType: TagTypeNTAG, atq: []byte{0x01, 0x00}, sak: 0x44},
+		{name: "NTAG_Additional_0004_00", expectedType: TagTypeNTAG, atq: []byte{0x00, 0x04}, sak: 0x00},
+		{name: "NTAG_Additional_0400_00", expectedType: TagTypeNTAG, atq: []byte{0x04, 0x00}, sak: 0x00},
+
+		// MIFARE patterns
+		{name: "MIFARE_Classic_1K", expectedType: TagTypeMIFARE, atq: []byte{0x00, 0x04}, sak: 0x08},
+		{name: "MIFARE_Classic_4K", expectedType: TagTypeMIFARE, atq: []byte{0x00, 0x02}, sak: 0x18},
+		{name: "MIFARE_Compatible", expectedType: TagTypeMIFARE, atq: []byte{0x01, 0x00}, sak: 0x04},
+
+		// Unknown patterns
+		{name: "Unknown_Invalid_ATQ", expectedType: TagTypeUnknown, atq: []byte{0x00}, sak: 0x00},
+		{name: "Unknown_No_Match", expectedType: TagTypeUnknown, atq: []byte{0x99, 0x99}, sak: 0x99},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := device.identifyTagType(tt.atq, tt.sak)
+			assert.Equal(t, tt.expectedType, result)
+		})
+	}
+}
+
+// TestCreateTag tests tag creation for different tag types
+//
+//nolint:funlen // Table-driven test with multiple test cases
+func TestCreateTag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		detected      *DetectedTag
+		expectedType  string
+		expectError   bool
+	}{
+		{
+			name: "Create_NTAG",
+			setupMock: func(mock *MockTransport) {
+				mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00})
+			},
+			detected: &DetectedTag{
+				Type:         TagTypeNTAG,
+				UIDBytes:     []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+				SAK:          0x00,
+				TargetNumber: 1,
+			},
+			expectedType: "*pn532.NTAGTag",
+			expectError:  false,
+		},
+		{
+			name: "Create_MIFARE",
+			setupMock: func(mock *MockTransport) {
+				mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00})
+			},
+			detected: &DetectedTag{
+				Type:         TagTypeMIFARE,
+				UIDBytes:     []byte{0x12, 0x34, 0x56, 0x78},
+				SAK:          0x08,
+				TargetNumber: 1,
+			},
+			expectedType: "*pn532.MIFARETag",
+			expectError:  false,
+		},
+		{
+			name:      "Create_Unknown_Tag_Fails",
+			setupMock: func(_ *MockTransport) {},
+			detected: &DetectedTag{
+				Type:         TagTypeUnknown,
+				UIDBytes:     []byte{0x12, 0x34, 0x56, 0x78},
+				TargetNumber: 1,
+			},
+			expectError:   true,
+			errorContains: "",
+		},
+		{
+			name:      "Create_TagTypeAny_Fails",
+			setupMock: func(_ *MockTransport) {},
+			detected: &DetectedTag{
+				Type:         TagTypeAny,
+				UIDBytes:     []byte{0x12, 0x34, 0x56, 0x78},
+				TargetNumber: 1,
+			},
+			expectError:   true,
+			errorContains: "",
+		},
+		{
+			name: "Create_From_InAutoPoll_Skips_Select",
+			setupMock: func(_ *MockTransport) {
+				// No InSelect call expected
+			},
+			detected: &DetectedTag{
+				Type:           TagTypeNTAG,
+				UIDBytes:       []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+				SAK:            0x00,
+				TargetNumber:   1,
+				FromInAutoPoll: true, // This skips InSelect
+			},
+			expectedType: "*pn532.NTAGTag",
+			expectError:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock := NewMockTransport()
+			mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+			mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
+			tt.setupMock(mock)
+			mock.SelectTarget()
+
+			device, err := New(mock)
+			require.NoError(t, err)
+
+			tag, err := device.CreateTag(tt.detected)
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Nil(t, tag)
+			} else {
+				require.NoError(t, err)
+				assert.NotNil(t, tag)
+				// Verify tag type matches expected
+				tagTypeName := typeName(tag)
+				assert.Equal(t, tt.expectedType, tagTypeName)
+			}
+		})
+	}
+}
+
+// typeName returns the type name of any value
+func typeName(v any) string {
+	if v == nil {
+		return "nil"
+	}
+	return "*pn532." + string(v.(Tag).Type()) + "Tag"
+}
+
+// TestHandleTargetSelection tests target selection handling
+func TestHandleTargetSelection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("FromInAutoPoll_Skips_InSelect", func(t *testing.T) {
+		t.Parallel()
+
+		mock := NewMockTransport()
+		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+		mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
+		mock.SelectTarget()
+
+		device, _ := New(mock)
+
+		detected := &DetectedTag{
+			Type:           TagTypeNTAG,
+			TargetNumber:   1,
+			FromInAutoPoll: true,
+		}
+
+		err := device.handleTargetSelection(detected)
+		require.NoError(t, err)
+		// Verify InSelect was NOT called
+		assert.Equal(t, 0, mock.GetCallCount(testutil.CmdInSelect))
+	})
+
+	t.Run("Standard_Detection_Calls_InSelect", func(t *testing.T) {
+		t.Parallel()
+
+		mock := NewMockTransport()
+		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+		mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
+		mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00})
+		mock.SelectTarget()
+
+		device, _ := New(mock)
+
+		detected := &DetectedTag{
+			Type:           TagTypeNTAG,
+			TargetNumber:   1,
+			FromInAutoPoll: false, // Standard detection
+		}
+
+		err := device.handleTargetSelection(detected)
+		require.NoError(t, err)
+		// Verify InSelect WAS called
+		assert.Equal(t, 1, mock.GetCallCount(testutil.CmdInSelect))
+	})
+}
+
+// TestInitiatorListPassiveTargets tests the InitiatorListPassiveTargets method
+func TestInitiatorListPassiveTargets(t *testing.T) {
+	t.Parallel()
+
+	mock := NewMockTransport()
+	mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+	mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
+	mock.SetResponse(testutil.CmdInListPassiveTarget,
+		testutil.BuildTagDetectionResponse("NTAG213", testutil.TestNTAG213UID))
+
+	device, err := New(mock)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Test with no filters
+	tags, err := device.InitiatorListPassiveTargets(ctx, 1, TagTypeAny, nil)
+	require.NoError(t, err)
+	assert.Len(t, tags, 1)
+
+	// Test with type filter that doesn't match
+	tags, err = device.InitiatorListPassiveTargets(ctx, 1, TagTypeFeliCa, nil)
+	require.NoError(t, err)
+	assert.Empty(t, tags)
+}

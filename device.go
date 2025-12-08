@@ -93,10 +93,10 @@ func (d *Device) selectTarget(targetNumber byte) error {
 	if err != nil {
 		// Check if this is the specific clone device empty response issue
 		if strings.Contains(err.Error(), "clone device returned empty response") {
-			debugln("InSelect failed due to clone device compatibility issue, falling back to direct target usage")
+			Debugln("InSelect failed due to clone device compatibility issue, falling back to direct target usage")
 			// Fall back to direct target usage like non-InSelect devices
 			d.setCurrentTarget(targetNumber)
-			debugf("Using target %d directly without InSelect (clone device fallback)", targetNumber)
+			Debugf("Using target %d directly without InSelect (clone device fallback)", targetNumber)
 			return nil
 		}
 		return fmt.Errorf("InSelect failed: %w", err)
@@ -118,7 +118,7 @@ func (d *Device) selectTarget(targetNumber byte) error {
 
 	// Set the current target after successful selection
 	d.setCurrentTarget(targetNumber)
-	debugf("InSelect successful for target %d", targetNumber)
+	Debugf("InSelect successful for target %d", targetNumber)
 	return nil
 }
 

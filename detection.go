@@ -58,7 +58,7 @@ func (*Device) handleDetectionError(errorCount *int, err error) error {
 
 	// Log first few errors for debugging
 	if *errorCount <= errorThreshold {
-		debugf("Tag detection error #%d: %v", *errorCount, err)
+		Debugf("Tag detection error #%d: %v", *errorCount, err)
 	}
 
 	// Give up after too many errors
@@ -84,7 +84,7 @@ func (d *Device) attemptDetection(ctx context.Context, errorCount *int) (*Detect
 		// ErrNoTagDetected is expected during polling, not a real error
 		if errors.Is(err, ErrNoTagDetected) {
 			if *errorCount == 0 {
-				debugln("No tag detected, continuing to poll...")
+				Debugln("No tag detected, continuing to poll...")
 			}
 			return nil, ErrNoTagDetected
 		}
@@ -93,13 +93,13 @@ func (d *Device) attemptDetection(ctx context.Context, errorCount *int) (*Detect
 	}
 
 	if detectedTag != nil {
-		debugf("Tag detected successfully: UID=%s Type=%s", detectedTag.UID, detectedTag.Type)
+		Debugf("Tag detected successfully: UID=%s Type=%s", detectedTag.UID, detectedTag.Type)
 		return detectedTag, nil
 	}
 
 	// This shouldn't happen - DetectTag should return ErrNoTagDetected when no tag found
 	if *errorCount == 0 {
-		debugln("No tag detected, continuing to poll...")
+		Debugln("No tag detected, continuing to poll...")
 	}
 	return nil, ErrNoTagDetected
 }
@@ -149,7 +149,7 @@ func (d *Device) SimplePoll(ctx context.Context, interval time.Duration) (*Detec
 			tags, err := d.InListPassiveTarget(ctx, 1, 0x00)
 			if err != nil {
 				// Continue polling on errors (device might be temporarily busy)
-				debugf("Polling error (continuing): %v", err)
+				Debugf("Polling error (continuing): %v", err)
 				continue
 			}
 
@@ -243,7 +243,7 @@ func (d *Device) identifyTagType(atq []byte, sak byte) TagType {
 
 // isNTAGPattern checks if the ATQ and SAK match known NTAG patterns
 func (*Device) isNTAGPattern(atq []byte, sak byte) bool {
-	debugf("isNTAGPattern - checking ATQ=%X, SAK=0x%02X", atq, sak)
+	Debugf("isNTAGPattern - checking ATQ=%X, SAK=0x%02X", atq, sak)
 
 	if isStandardNTAGPattern(atq, sak) {
 		return true
@@ -253,19 +253,19 @@ func (*Device) isNTAGPattern(atq []byte, sak byte) bool {
 		return true
 	}
 
-	debugln("No NTAG pattern matched")
+	Debugln("No NTAG pattern matched")
 	return false
 }
 
 // isStandardNTAGPattern checks standard NTAG patterns (ISO14443-3A compliant)
 func isStandardNTAGPattern(atq []byte, sak byte) bool {
 	if sak == 0x00 && isStandardNTAGATQPattern(atq) {
-		debugln("NTAG pattern matched (SAK=0x00)")
+		Debugln("NTAG pattern matched (SAK=0x00)")
 		return true
 	}
 
 	if sak == 0x04 && isStandardATQPattern(atq) {
-		debugln("NTAG pattern matched (SAK=0x04)")
+		Debugln("NTAG pattern matched (SAK=0x04)")
 		return true
 	}
 
@@ -290,7 +290,7 @@ func isAdditionalNTAGPattern(atq []byte, sak byte) bool {
 	if (atq[0] == 0x01 && atq[1] == 0x00 && sak == 0x44) ||
 		(atq[0] == 0x00 && atq[1] == 0x04 && sak == 0x00) || // Some NTAG215 variants
 		(atq[0] == 0x04 && atq[1] == 0x00 && sak == 0x00) { // Byte-swapped variant
-		debugln("NTAG pattern matched (additional patterns)")
+		Debugln("NTAG pattern matched (additional patterns)")
 		return true
 	}
 	return false
@@ -298,27 +298,27 @@ func isAdditionalNTAGPattern(atq []byte, sak byte) bool {
 
 // isMIFAREPattern checks if the ATQ and SAK match known MIFARE patterns
 func (*Device) isMIFAREPattern(atq []byte, sak byte) bool {
-	debugf("isMIFAREPattern - checking ATQ=%X, SAK=0x%02X", atq, sak)
+	Debugf("isMIFAREPattern - checking ATQ=%X, SAK=0x%02X", atq, sak)
 
 	// MIFARE Classic 1K identification
 	if atq[0] == 0x00 && atq[1] == 0x04 && sak == 0x08 {
-		debugln("MIFARE pattern matched (Classic 1K)")
+		Debugln("MIFARE pattern matched (Classic 1K)")
 		return true
 	}
 	// MIFARE Classic 4K identification
 	if atq[0] == 0x00 && atq[1] == 0x02 && sak == 0x18 {
-		debugln("MIFARE pattern matched (Classic 4K)")
+		Debugln("MIFARE pattern matched (Classic 4K)")
 		return true
 	}
 
 	// Additional MIFARE-compatible patterns that may work with MIFARE commands
 	// ATQ=0100, SAK=0x04 - seen on some MIFARE-compatible cards
 	if atq[0] == 0x01 && atq[1] == 0x00 && sak == 0x04 {
-		debugln("MIFARE pattern matched (compatible variant)")
+		Debugln("MIFARE pattern matched (compatible variant)")
 		return true
 	}
 
-	debugln("No MIFARE pattern matched")
+	Debugln("No MIFARE pattern matched")
 	return false
 }
 
@@ -328,14 +328,14 @@ func (d *Device) handleTargetSelection(detected *DetectedTag) error {
 
 	if isFromInAutoPoll {
 		// Skip InSelect for tags detected via InAutoPoll - InAutoPoll handles target selection internally
-		debugf("InAutoPoll detected tag - skipping InSelect for target %d (InAutoPoll handles selection)",
+		Debugf("InAutoPoll detected tag - skipping InSelect for target %d (InAutoPoll handles selection)",
 			detected.TargetNumber)
 		d.setCurrentTarget(detected.TargetNumber)
 		return nil
 	}
 
 	// Standard devices: Always use InSelect for proper target selection
-	debugf("Standard device - performing InSelect for target %d", detected.TargetNumber)
+	Debugf("Standard device - performing InSelect for target %d", detected.TargetNumber)
 	return d.selectTargetWithError(detected.TargetNumber)
 }
 

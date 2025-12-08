@@ -21,6 +21,7 @@
 package pn532
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -213,7 +214,7 @@ func TestBaseTag_ReadBlock(t *testing.T) {
 	t.Parallel()
 
 	tag := &BaseTag{}
-	data, err := tag.ReadBlock(4)
+	data, err := tag.ReadBlock(context.Background(), 4)
 
 	require.Error(t, err)
 	assert.Nil(t, data)
@@ -224,7 +225,7 @@ func TestBaseTag_WriteBlock(t *testing.T) {
 	t.Parallel()
 
 	tag := &BaseTag{}
-	err := tag.WriteBlock(4, []byte{0x01, 0x02, 0x03, 0x04})
+	err := tag.WriteBlock(context.Background(), 4, []byte{0x01, 0x02, 0x03, 0x04})
 
 	require.Error(t, err)
 	assert.Equal(t, ErrNotImplemented, err)
@@ -234,7 +235,7 @@ func TestBaseTag_ReadNDEF(t *testing.T) {
 	t.Parallel()
 
 	tag := &BaseTag{}
-	data, err := tag.ReadNDEF()
+	data, err := tag.ReadNDEF(context.Background())
 
 	require.Error(t, err)
 	assert.Nil(t, data)
@@ -250,7 +251,7 @@ func TestBaseTag_WriteNDEF(t *testing.T) {
 			{Type: NDEFTypeText, Text: "Hello"},
 		},
 	}
-	err := tag.WriteNDEF(message)
+	err := tag.WriteNDEF(context.Background(), message)
 
 	require.Error(t, err)
 	assert.Equal(t, ErrNotImplemented, err)
@@ -271,7 +272,7 @@ func TestBaseTag_ReadText(t *testing.T) {
 	}
 
 	// Test ReadText calls ReadNDEF (which will return ErrNotImplemented)
-	text, err := tag.ReadText()
+	text, err := tag.ReadText(context.Background())
 	require.Error(t, err)
 	assert.Empty(t, text)
 	assert.Equal(t, ErrNotImplemented, err)
@@ -292,7 +293,7 @@ func TestBaseTag_WriteText(t *testing.T) {
 	}
 
 	// Test WriteText calls WriteNDEF (which will return ErrNotImplemented)
-	err = tag.WriteText("Hello, World!")
+	err = tag.WriteText(context.Background(), "Hello, World!")
 	require.Error(t, err)
 	assert.Equal(t, ErrNotImplemented, err)
 }

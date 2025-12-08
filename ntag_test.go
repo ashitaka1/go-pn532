@@ -18,9 +18,11 @@
 // along with go-pn532; if not, write to the Free Software Foundation,
 // Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
+//nolint:dupl // Test file - similar test patterns are acceptable
 package pn532
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -152,7 +154,7 @@ func TestNTAGTag_ReadBlock(t *testing.T) {
 
 			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 
-			data, err := tag.ReadBlock(tt.block)
+			data, err := tag.ReadBlock(context.Background(), tt.block)
 
 			if tt.expectError {
 				checkReadBlockError(t, err, tt.errorContains, data)
@@ -235,7 +237,7 @@ func TestNTAGTag_WriteBlock(t *testing.T) {
 
 			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 
-			err := tag.WriteBlock(tt.block, tt.data)
+			err := tag.WriteBlock(context.Background(), tt.block, tt.data)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -409,7 +411,7 @@ func TestNTAGTag_FastRead(t *testing.T) {
 
 			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 
-			data, err := tag.FastRead(tt.startBlock, tt.endBlock)
+			data, err := tag.FastRead(context.Background(), tt.startBlock, tt.endBlock)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -471,7 +473,7 @@ func TestNTAG215LargeDataCrash(t *testing.T) {
 	// 3. Potential buffer overflow when totalBytes exceeds expected bounds
 
 	// With our fixes, this should now fail gracefully with proper error handling
-	_, err := tag.ReadNDEF()
+	_, err := tag.ReadNDEF(context.Background())
 
 	// Verify our fixes work:
 	// 1. No crash occurs (test completes)
@@ -520,7 +522,7 @@ func TestNTAG215BlockByBlockBufferOverflow(t *testing.T) {
 	}
 
 	// With our fixes, this should now use proper tag capacity bounds instead of hardcoded limits
-	_, err := tag.ReadNDEF()
+	_, err := tag.ReadNDEF(context.Background())
 
 	// With our fixes, this could either:
 	// 1. Succeed by properly reading within tag bounds (if mock data is valid)
@@ -660,13 +662,13 @@ func TestNTAG_GetVersionDoesNotBreakSubsequentReads(t *testing.T) {
 
 	// Call DetectType which internally calls GetVersion (via InCommunicateThru)
 	// and then InSelect to restore target selection state
-	err := tag.DetectType()
+	err := tag.DetectType(context.Background())
 	require.NoError(t, err, "DetectType should succeed")
 	assert.Equal(t, NTAGType215, tag.tagType, "Should detect NTAG215 from version info")
 
 	// Now verify that subsequent reads work (this would fail without the InSelect fix)
 	// ReadBlock uses InDataExchange which requires proper target selection
-	data, err := tag.ReadBlock(4)
+	data, err := tag.ReadBlock(context.Background(), 4)
 	require.NoError(t, err, "ReadBlock after DetectType should succeed - "+
 		"if this fails with timeout error 01, the InSelect fix is not working")
 	assert.NotNil(t, data, "ReadBlock should return data")
@@ -699,14 +701,772 @@ func TestNTAG_GetVersionFailureStillAllowsReads(t *testing.T) {
 	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
 
 	// DetectType should succeed using CC-based fallback
-	err := tag.DetectType()
+	err := tag.DetectType(context.Background())
 	require.NoError(t, err, "DetectType should succeed with CC-based fallback")
 	assert.Equal(t, NTAGType213, tag.tagType, "Should detect NTAG213 from CC size field")
 
 	// Subsequent reads should still work
-	data, err := tag.ReadBlock(4)
+	data, err := tag.ReadBlock(context.Background(), 4)
 	require.NoError(t, err, "ReadBlock after failed GetVersion should succeed")
 	assert.NotNil(t, data)
+}
+
+// TestNTAGTag_ContextCancellation tests that context cancellation is respected
+func TestNTAGTag_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	device, _ := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+
+	// Create a cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("ReadBlock_CancelledContext", func(t *testing.T) {
+		t.Parallel()
+		_, err := tag.ReadBlock(ctx, 4)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("WriteBlock_CancelledContext", func(t *testing.T) {
+		t.Parallel()
+		err := tag.WriteBlock(ctx, 4, []byte{0x01, 0x02, 0x03, 0x04})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("ReadNDEF_CancelledContext", func(t *testing.T) {
+		t.Parallel()
+		_, err := tag.ReadNDEF(ctx)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("FastRead_CancelledContext", func(t *testing.T) {
+		t.Parallel()
+		_, err := tag.FastRead(ctx, 4, 10)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("DetectType_CancelledContext", func(t *testing.T) {
+		t.Parallel()
+		err := tag.DetectType(ctx)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+}
+
+// TestNTAGTag_WriteNDEF tests NDEF writing functionality
+func TestNTAGTag_WriteNDEF(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		message       *NDEFMessage
+		name          string
+		errorContains string
+		expectError   bool
+	}{
+		{
+			name: "Empty_Message",
+			setupMock: func(_ *MockTransport) {
+				// No setup needed - validation happens before transport call
+			},
+			message: &NDEFMessage{
+				Records: []NDEFRecord{},
+			},
+			expectError:   true,
+			errorContains: "no NDEF records to write",
+		},
+		{
+			name: "Write_Failure",
+			setupMock: func(mt *MockTransport) {
+				mt.SetError(0x40, errors.New("write failed"))
+			},
+			message: &NDEFMessage{
+				Records: []NDEFRecord{
+					{Type: NDEFTypeText, Text: "Test"},
+				},
+			},
+			expectError:   true,
+			errorContains: "tag write failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, mockTransport := createMockDeviceWithTransport(t)
+			tt.setupMock(mockTransport)
+
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag.tagType = NTAGType215
+
+			err := tag.WriteNDEF(context.Background(), tt.message)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestNTAGTag_WriteText tests the convenience WriteText method - error case
+func TestNTAGTag_WriteText(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	// Mock write error
+	mockTransport.SetError(0x40, errors.New("write failed"))
+
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag.tagType = NTAGType215
+
+	err := tag.WriteText(context.Background(), "Hi")
+	assert.Error(t, err)
+}
+
+// TestNTAGTag_FastRead_InvalidRange tests FastRead with invalid address range
+func TestNTAGTag_FastRead_InvalidRange(t *testing.T) {
+	t.Parallel()
+
+	device, _ := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+
+	// Test invalid range (start > end)
+	_, err := tag.FastRead(context.Background(), 10, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid address range")
+}
+
+// TestNTAGTag_GetUserMemoryRange tests the memory range calculation for different tag types
+func TestNTAGTag_GetUserMemoryRange(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		tagType       NTAGType
+		expectedStart uint8
+		expectedEnd   uint8
+	}{
+		{"NTAG213", NTAGType213, 4, 39},
+		{"NTAG215", NTAGType215, 4, 129},
+		{"NTAG216", NTAGType216, 4, 225},
+		{"Unknown", NTAGTypeUnknown, 4, 39}, // Defaults to smallest
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, _ := createMockDeviceWithTransport(t)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag.tagType = tt.tagType
+
+			start, end := tag.GetUserMemoryRange()
+			assert.Equal(t, tt.expectedStart, start)
+			assert.Equal(t, tt.expectedEnd, end)
+		})
+	}
+}
+
+// TestNTAGTag_GetConfigPage tests configuration page addresses
+func TestNTAGTag_GetConfigPage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		tagType      NTAGType
+		expectedPage uint8
+	}{
+		{"NTAG213", NTAGType213, 41},
+		{"NTAG215", NTAGType215, 131},
+		{"NTAG216", NTAGType216, 227},
+		{"Unknown", NTAGTypeUnknown, 41}, // Defaults to NTAG213
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, _ := createMockDeviceWithTransport(t)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag.tagType = tt.tagType
+
+			page := tag.GetConfigPage()
+			assert.Equal(t, tt.expectedPage, page)
+		})
+	}
+}
+
+// TestNTAGTag_GetPasswordPage tests password page addresses
+func TestNTAGTag_GetPasswordPage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		tagType      NTAGType
+		expectedPage uint8
+	}{
+		{"NTAG213", NTAGType213, 43},
+		{"NTAG215", NTAGType215, 133},
+		{"NTAG216", NTAGType216, 229},
+		{"Unknown", NTAGTypeUnknown, 43},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, _ := createMockDeviceWithTransport(t)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag.tagType = tt.tagType
+
+			page := tag.GetPasswordPage()
+			assert.Equal(t, tt.expectedPage, page)
+		})
+	}
+}
+
+// TestNTAGTag_GetTotalPages tests total page count
+func TestNTAGTag_GetTotalPages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		tagType       NTAGType
+		expectedPages uint8
+	}{
+		{"NTAG213", NTAGType213, 45},
+		{"NTAG215", NTAGType215, 135},
+		{"NTAG216", NTAGType216, 231},
+		{"Unknown", NTAGTypeUnknown, 45},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, _ := createMockDeviceWithTransport(t)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag.tagType = tt.tagType
+
+			pages := tag.GetTotalPages()
+			assert.Equal(t, tt.expectedPages, pages)
+		})
+	}
+}
+
+// TestNTAGVersion_GetStorageSize tests storage size calculation
+func TestNTAGVersion_GetStorageSize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		storageSize  uint8
+		expectedSize int
+	}{
+		{"NTAG213", 0x0F, 144},
+		{"NTAG215", 0x11, 504},
+		{"NTAG216", 0x13, 888},
+		{"Unknown_Even", 0x10, 256}, // 2^8
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			version := &NTAGVersion{StorageSize: tt.storageSize}
+			size := version.GetStorageSize()
+			assert.Equal(t, tt.expectedSize, size)
+		})
+	}
+}
+
+// TestNTAGVersion_GetNTAGType tests NTAG type detection from version
+func TestNTAGVersion_GetNTAGType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		version      *NTAGVersion
+		name         string
+		expectedType NTAGType
+	}{
+		{
+			name:         "NTAG213",
+			version:      &NTAGVersion{VendorID: 0x04, ProductType: 0x04, StorageSize: 0x0F},
+			expectedType: NTAGType213,
+		},
+		{
+			name:         "NTAG215",
+			version:      &NTAGVersion{VendorID: 0x04, ProductType: 0x04, StorageSize: 0x11},
+			expectedType: NTAGType215,
+		},
+		{
+			name:         "NTAG216",
+			version:      &NTAGVersion{VendorID: 0x04, ProductType: 0x04, StorageSize: 0x13},
+			expectedType: NTAGType216,
+		},
+		{
+			name:         "Invalid_Vendor",
+			version:      &NTAGVersion{VendorID: 0x00, ProductType: 0x04, StorageSize: 0x11},
+			expectedType: NTAGTypeUnknown,
+		},
+		{
+			name:         "Invalid_Product",
+			version:      &NTAGVersion{VendorID: 0x04, ProductType: 0x00, StorageSize: 0x11},
+			expectedType: NTAGTypeUnknown,
+		},
+		{
+			name:         "Unknown_Storage",
+			version:      &NTAGVersion{VendorID: 0x04, ProductType: 0x04, StorageSize: 0x20},
+			expectedType: NTAGTypeUnknown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ntagType := tt.version.GetNTAGType()
+			assert.Equal(t, tt.expectedType, ntagType)
+		})
+	}
+}
+
+// TestNTAGTag_PwdAuth tests password authentication
+func TestNTAGTag_PwdAuth(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		password      []byte
+		expectError   bool
+	}{
+		{
+			name: "Successful_Auth",
+			setupMock: func(mt *MockTransport) {
+				// PWD_AUTH returns 2-byte PACK on success
+				mt.SetResponse(0x40, []byte{0x41, 0x00, 0xAB, 0xCD})
+			},
+			password:    []byte{0x01, 0x02, 0x03, 0x04},
+			expectError: false,
+		},
+		{
+			name: "Invalid_Password_Length",
+			setupMock: func(_ *MockTransport) {
+				// No setup needed
+			},
+			password:      []byte{0x01, 0x02, 0x03}, // Only 3 bytes
+			expectError:   true,
+			errorContains: "password must be 4 bytes",
+		},
+		{
+			name: "Auth_Failure",
+			setupMock: func(mt *MockTransport) {
+				mt.SetError(0x40, errors.New("authentication failed"))
+			},
+			password:      []byte{0x01, 0x02, 0x03, 0x04},
+			expectError:   true,
+			errorContains: "PWD_AUTH failed",
+		},
+		{
+			name: "Invalid_PACK_Response",
+			setupMock: func(mt *MockTransport) {
+				// Response with only 1 byte PACK (should be 2)
+				mt.SetResponse(0x40, []byte{0x41, 0x00, 0xAB})
+			},
+			password:      []byte{0x01, 0x02, 0x03, 0x04},
+			expectError:   true,
+			errorContains: "invalid PACK response length",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, mockTransport := createMockDeviceWithTransport(t)
+			tt.setupMock(mockTransport)
+
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+
+			pack, err := tag.PwdAuth(tt.password)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+				assert.Nil(t, pack)
+			} else {
+				require.NoError(t, err)
+				assert.Len(t, pack, 2)
+			}
+		})
+	}
+}
+
+// TestNTAGTag_SetPasswordProtection tests password protection configuration
+func TestNTAGTag_SetPasswordProtection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		password      []byte
+		pack          []byte
+		tagType       NTAGType
+		auth0         uint8
+		expectError   bool
+	}{
+		{
+			name: "Invalid_Password_Length",
+			setupMock: func(_ *MockTransport) {
+				// No setup needed
+			},
+			password:      []byte{0x01, 0x02, 0x03}, // Only 3 bytes
+			pack:          []byte{0x00, 0x00},
+			auth0:         0x04,
+			tagType:       NTAGType215,
+			expectError:   true,
+			errorContains: "password must be 4 bytes",
+		},
+		{
+			name: "Invalid_PACK_Length",
+			setupMock: func(_ *MockTransport) {
+				// No setup needed
+			},
+			password:      []byte{0x01, 0x02, 0x03, 0x04},
+			pack:          []byte{0x00}, // Only 1 byte
+			auth0:         0x04,
+			tagType:       NTAGType215,
+			expectError:   true,
+			errorContains: "pack must be 2 bytes",
+		},
+		{
+			name: "Unknown_Tag_Type",
+			setupMock: func(_ *MockTransport) {
+				// No setup needed
+			},
+			password:      []byte{0x01, 0x02, 0x03, 0x04},
+			pack:          []byte{0x00, 0x00},
+			auth0:         0x04,
+			tagType:       NTAGTypeUnknown,
+			expectError:   true,
+			errorContains: "unknown NTAG type",
+		},
+		{
+			name: "Write_Password_Fails",
+			setupMock: func(mt *MockTransport) {
+				mt.SetError(0x40, errors.New("write failed"))
+			},
+			password:      []byte{0x01, 0x02, 0x03, 0x04},
+			pack:          []byte{0xAB, 0xCD},
+			auth0:         0x04,
+			tagType:       NTAGType213, // Use NTAG213 for smaller address space
+			expectError:   true,
+			errorContains: "failed to set password",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, mockTransport := createMockDeviceWithTransport(t)
+			tt.setupMock(mockTransport)
+
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag.tagType = tt.tagType
+
+			err := tag.SetPasswordProtection(context.Background(), tt.password, tt.pack, tt.auth0)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestNTAGTag_LockPage tests page locking
+func TestNTAGTag_LockPage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		tagType       NTAGType
+		page          uint8
+		expectError   bool
+	}{
+		{
+			name:          "Cannot_Lock_System_Page",
+			setupMock:     func(_ *MockTransport) {},
+			page:          2, // System page
+			tagType:       NTAGType213,
+			expectError:   true,
+			errorContains: "cannot lock system pages",
+		},
+		{
+			name: "Lock_Static_Page_Read_Fails",
+			setupMock: func(mt *MockTransport) {
+				// Read current lock bytes fails
+				mt.SetError(0x40, errors.New("read failed"))
+			},
+			page:          5,
+			tagType:       NTAGType213,
+			expectError:   true,
+			errorContains: "tag read failed",
+		},
+		{
+			name:          "Unknown_Tag_Type_Dynamic",
+			setupMock:     func(_ *MockTransport) {},
+			page:          20,
+			tagType:       NTAGTypeUnknown,
+			expectError:   true,
+			errorContains: "unknown NTAG type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, mockTransport := createMockDeviceWithTransport(t)
+			tt.setupMock(mockTransport)
+
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag.tagType = tt.tagType
+
+			err := tag.LockPage(context.Background(), tt.page)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestNTAGTag_SetAccessControl tests access control configuration
+func TestNTAGTag_SetAccessControl(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		setupMock     func(*MockTransport)
+		name          string
+		errorContains string
+		config        AccessControlConfig
+		tagType       NTAGType
+		expectError   bool
+	}{
+		{
+			name:    "Invalid_AuthFailureLimit",
+			config:  AccessControlConfig{AuthFailureLimit: 10},
+			tagType: NTAGType213,
+			setupMock: func(_ *MockTransport) {
+				// No setup needed
+			},
+			expectError:   true,
+			errorContains: "authFailureLimit must be 0-7",
+		},
+		{
+			name:    "Unknown_Tag_Type",
+			config:  AccessControlConfig{},
+			tagType: NTAGTypeUnknown,
+			setupMock: func(_ *MockTransport) {
+				// No setup needed
+			},
+			expectError:   true,
+			errorContains: "unknown NTAG type",
+		},
+		{
+			name: "Read_CFG0_Fails",
+			config: AccessControlConfig{
+				Protection:       true,
+				ConfigLock:       true,
+				AuthFailureLimit: 3,
+			},
+			tagType: NTAGType213,
+			setupMock: func(mt *MockTransport) {
+				mt.SetError(0x40, errors.New("read failed"))
+			},
+			expectError:   true,
+			errorContains: "tag read failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, mockTransport := createMockDeviceWithTransport(t)
+			tt.setupMock(mockTransport)
+
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag.tagType = tt.tagType
+
+			err := tag.SetAccessControl(context.Background(), tt.config)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestNTAGTag_detectTypeFromCapabilityContainer tests CC-based type detection
+func TestNTAGTag_detectTypeFromCapabilityContainer(t *testing.T) {
+	t.Parallel()
+
+	device, _ := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+
+	tests := []struct {
+		name         string
+		ccData       []byte
+		expectedType NTAGType
+	}{
+		{"NTAG213_CC", []byte{0xE1, 0x10, 0x12, 0x00}, NTAGType213},
+		{"NTAG215_CC", []byte{0xE1, 0x10, 0x3E, 0x00}, NTAGType215},
+		{"NTAG216_CC", []byte{0xE1, 0x10, 0x6D, 0x00}, NTAGType216},
+		{"Unknown_Small", []byte{0xE1, 0x10, 0x15, 0x00}, NTAGType213},  // <= 0x20
+		{"Unknown_Medium", []byte{0xE1, 0x10, 0x40, 0x00}, NTAGType215}, // 0x20 < x <= 0x50
+		{"Unknown_Large", []byte{0xE1, 0x10, 0x70, 0x00}, NTAGType216},  // > 0x50
+		{"Too_Short", []byte{0xE1, 0x10}, NTAGTypeUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := tag.detectTypeFromCapabilityContainer(tt.ccData)
+			assert.Equal(t, tt.expectedType, result)
+		})
+	}
+}
+
+// TestNTAGTag_DebugInfo tests debug info generation
+func TestNTAGTag_DebugInfo(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	// Mock for ReadNDEFRobust called by DebugInfoWithNDEF
+	mockTransport.SetError(0x40, errors.New("read error"))
+
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag.tagType = NTAGType215
+
+	info := tag.DebugInfo()
+	assert.NotEmpty(t, info)
+	assert.Contains(t, info, "NTAG")
+}
+
+// TestNTAGTag_calculateReadRange tests read range calculation edge cases
+func TestNTAGTag_calculateReadRange(t *testing.T) {
+	t.Parallel()
+
+	device, _ := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag.tagType = NTAGType215
+
+	tests := []struct {
+		name          string
+		totalBytes    int
+		expectedStart uint8
+	}{
+		{"Normal_Range", 100, 4},
+		{"Negative_Bytes", -10, 4},
+		{"Excessive_Bytes", 20000, 4},
+		{"Zero_Bytes", 0, 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := tag.calculateReadRange(tt.totalBytes)
+			assert.Equal(t, tt.expectedStart, result.startPage)
+			// Just verify it doesn't panic and returns reasonable values
+			assert.True(t, result.endPage >= result.startPage || tt.totalBytes <= 0)
+		})
+	}
+}
+
+// TestNTAGTag_isRetryableError tests retry logic
+func TestNTAGTag_isRetryableError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		err           error
+		name          string
+		expectedRetry bool
+	}{
+		{name: "Nil_Error", err: nil, expectedRetry: false},
+		{name: "TagReadFailed", err: ErrTagReadFailed, expectedRetry: true},
+		{name: "Generic_Error", err: errors.New("some error"), expectedRetry: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := isRetryableError(tt.err)
+			assert.Equal(t, tt.expectedRetry, result)
+		})
+	}
+}
+
+// TestCalculateStaticLockPosition tests lock bit position calculation
+func TestCalculateStaticLockPosition(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		page         uint8
+		expectedByte byte
+		expectedBit  byte
+	}{
+		{"Page_3", 3, 2, 0},
+		{"Page_9", 9, 2, 6},
+		{"Page_15", 15, 2, 7},
+		{"Page_10", 10, 3, 0},
+		{"Page_14", 14, 3, 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			lockByte, lockBit := calculateStaticLockPosition(tt.page)
+			assert.Equal(t, tt.expectedByte, lockByte)
+			assert.Equal(t, tt.expectedBit, lockBit)
+		})
+	}
 }
 
 // NDEF Message Tests

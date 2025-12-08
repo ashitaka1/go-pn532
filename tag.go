@@ -56,25 +56,22 @@ type Tag interface {
 	UIDBytes() []byte
 
 	// ReadBlock reads a block of data from the tag
-	ReadBlock(block uint8) ([]byte, error)
+	ReadBlock(ctx context.Context, block uint8) ([]byte, error)
 
 	// WriteBlock writes a block of data to the tag
-	WriteBlock(block uint8, data []byte) error
+	WriteBlock(ctx context.Context, block uint8, data []byte) error
 
 	// ReadNDEF reads NDEF data from the tag
-	ReadNDEF() (*NDEFMessage, error)
+	ReadNDEF(ctx context.Context) (*NDEFMessage, error)
 
 	// WriteNDEF writes NDEF data to the tag
-	WriteNDEF(message *NDEFMessage) error
-
-	// WriteNDEFWithContext writes NDEF data to the tag with context support
-	WriteNDEFWithContext(ctx context.Context, message *NDEFMessage) error
+	WriteNDEF(ctx context.Context, message *NDEFMessage) error
 
 	// ReadText reads the first text record from the tag's NDEF data
-	ReadText() (string, error)
+	ReadText(ctx context.Context) (string, error)
 
 	// WriteText writes a simple text record to the tag
-	WriteText(text string) error
+	WriteText(ctx context.Context, text string) error
 
 	// DebugInfo returns detailed debug information about the tag
 	DebugInfo() string
@@ -115,49 +112,40 @@ func (t *BaseTag) IsMIFARE4K() bool {
 
 // ReadBlock provides a default implementation that returns an error
 // Specific tag types should override this method
-func (*BaseTag) ReadBlock(_ uint8) ([]byte, error) {
+func (*BaseTag) ReadBlock(_ context.Context, _ uint8) ([]byte, error) {
 	return nil, ErrNotImplemented
 }
 
 // WriteBlock provides a default implementation that returns an error
 // Specific tag types should override this method
-func (*BaseTag) WriteBlock(_ uint8, _ []byte) error {
+func (*BaseTag) WriteBlock(_ context.Context, _ uint8, _ []byte) error {
 	return ErrNotImplemented
 }
 
 // ReadNDEF provides a default implementation that returns an error
 // Specific tag types should override this method
-func (*BaseTag) ReadNDEF() (*NDEFMessage, error) {
+func (*BaseTag) ReadNDEF(_ context.Context) (*NDEFMessage, error) {
 	return nil, ErrNotImplemented
 }
 
 // WriteNDEF provides a default implementation that returns an error
 // Specific tag types should override this method
-func (*BaseTag) WriteNDEF(_ *NDEFMessage) error {
-	return ErrNotImplemented
-}
-
-// WriteNDEFWithContext provides a default implementation that returns an error
-// Specific tag types should override this method
-func (*BaseTag) WriteNDEFWithContext(_ context.Context, _ *NDEFMessage) error {
+func (*BaseTag) WriteNDEF(_ context.Context, _ *NDEFMessage) error {
 	return ErrNotImplemented
 }
 
 // ReadText reads the first text record from the tag's NDEF data
 // This is a convenience method that handles the common case of reading simple text
-func (t *BaseTag) ReadText() (string, error) {
-	// This is a default implementation that will be overridden by specific tag types
-	// that support validation
-	ndef, err := t.ReadNDEF()
+func (t *BaseTag) ReadText(ctx context.Context) (string, error) {
+	ndef, err := t.ReadNDEF(ctx)
 	if err != nil {
 		return "", err
 	}
 
 	if ndef == nil || len(ndef.Records) == 0 {
-		return "", ErrNoTagDetected // Reuse existing error
+		return "", ErrNoTagDetected
 	}
 
-	// Find the first text record
 	for _, record := range ndef.Records {
 		if record.Type == NDEFTypeText && record.Text != "" {
 			return record.Text, nil
@@ -169,9 +157,7 @@ func (t *BaseTag) ReadText() (string, error) {
 
 // WriteText writes a simple text record to the tag
 // This is a convenience method that handles the common case of writing simple text
-func (t *BaseTag) WriteText(text string) error {
-	// This is a default implementation that will be overridden by specific tag types
-	// that support validation
+func (t *BaseTag) WriteText(ctx context.Context, text string) error {
 	message := &NDEFMessage{
 		Records: []NDEFRecord{
 			{
@@ -181,7 +167,7 @@ func (t *BaseTag) WriteText(text string) error {
 		},
 	}
 
-	return t.WriteNDEF(message)
+	return t.WriteNDEF(ctx, message)
 }
 
 // Summary returns a brief summary of the tag
@@ -202,7 +188,10 @@ func (t *BaseTag) DebugInfo() string {
 }
 
 // DebugInfoWithNDEF returns detailed debug information about the tag with NDEF support
-func (t *BaseTag) DebugInfoWithNDEF(ndefReader interface{ ReadNDEF() (*NDEFMessage, error) }) string {
+func (t *BaseTag) DebugInfoWithNDEF(ndefReader interface {
+	ReadNDEF(context.Context) (*NDEFMessage, error)
+},
+) string {
 	info := "=== Tag Debug Info ===\n"
 	info += fmt.Sprintf("Type: %v\n", t.tagType)
 	info += fmt.Sprintf("UID: %s\n", t.UID())
@@ -210,7 +199,7 @@ func (t *BaseTag) DebugInfoWithNDEF(ndefReader interface{ ReadNDEF() (*NDEFMessa
 	info += fmt.Sprintf("SAK: %02X\n", t.sak)
 
 	// Try to read NDEF for additional info
-	if ndef, err := ndefReader.ReadNDEF(); err == nil && ndef != nil {
+	if ndef, err := ndefReader.ReadNDEF(context.Background()); err == nil && ndef != nil {
 		info += fmt.Sprintf("NDEF Records: %d\n", len(ndef.Records))
 		for i, record := range ndef.Records {
 			info += fmt.Sprintf("  Record %d: Type=%s", i+1, record.Type)

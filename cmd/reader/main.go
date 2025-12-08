@@ -333,8 +333,8 @@ func runWriteMode(ctx context.Context, device *pn532.Device, cfg *config) error 
 			},
 		}
 
-		// Write the NDEF message to the tag with context support
-		if err := tag.WriteNDEFWithContext(ctx, message); err != nil {
+		// Write the NDEF message to the tag
+		if err := tag.WriteNDEF(ctx, message); err != nil {
 			return fmt.Errorf("failed to write NDEF message: %w", err)
 		}
 

@@ -36,17 +36,17 @@ func init() {
 	}
 }
 
-// debugf prints debug information only when debug mode is enabled
+// Debugf prints debug information only when debug mode is enabled
 // This eliminates the performance overhead of fmt.Printf in production
-func debugf(format string, args ...any) {
+func Debugf(format string, args ...any) {
 	if debugEnabled {
 		_, _ = fmt.Printf("DEBUG: "+format+"\n", args...)
 	}
 }
 
-// debugln prints debug information only when debug mode is enabled
+// Debugln prints debug information only when debug mode is enabled
 // This eliminates the performance overhead of fmt.Printf in production
-func debugln(args ...any) {
+func Debugln(args ...any) {
 	if debugEnabled {
 		_, _ = fmt.Print("DEBUG: ")
 		_, _ = fmt.Println(args...)

@@ -333,8 +333,6 @@ func verifyNDEFRecords(t *testing.T, original, parsed []NDEFRecord) {
 
 // MIFARE Classic Tests
 
-// TestMIFAREConfig returns test-friendly MIFARE configuration with minimal delays
-// This should only be used in tests to speed up test execution
 // testMIFAREConfig returns test-friendly MIFARE configuration with minimal delays
 // This should only be used in tests to speed up test execution
 func testMIFAREConfig() *MIFAREConfig {

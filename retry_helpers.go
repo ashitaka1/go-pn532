@@ -47,7 +47,7 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 		if err != nil {
 			// Hard error during read - check if we should retry
 			if i < maxRetries-1 && isRetryable(err) {
-				debugf("%s NDEF read attempt %d failed (retrying): %v", tagType, i+1, err)
+				Debugf("%s NDEF read attempt %d failed (retrying): %v", tagType, i+1, err)
 				time.Sleep(retryDelay)
 				continue
 			}
@@ -57,19 +57,19 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 		// Check if we got valid, non-empty data
 		if msg != nil && len(msg.Records) > 0 {
 			// Success! We got valid data
-			debugf("%s NDEF read successful on attempt %d", tagType, i+1)
+			Debugf("%s NDEF read successful on attempt %d", tagType, i+1)
 			return msg, nil
 		}
 
 		// We got a valid response but it's empty - this is the "empty valid tag" issue
 		if i < maxRetries-1 {
-			debugf("%s NDEF read attempt %d returned empty data (retrying)", tagType, i+1)
+			Debugf("%s NDEF read attempt %d returned empty data (retrying)", tagType, i+1)
 			time.Sleep(retryDelay)
 			continue
 		}
 
 		// All retries exhausted with empty data - this is the "empty valid tag" issue
-		debugf("%s NDEF read exhausted retries with empty data", tagType)
+		Debugf("%s NDEF read exhausted retries with empty data", tagType)
 		if msg == nil || len(msg.Records) == 0 {
 			return nil, ErrTagEmptyData
 		}
@@ -110,7 +110,7 @@ func WriteNDEFWithRetry(ctx context.Context, writeFunc WriteNDEFFunc, maxRetries
 		err := writeFunc(ctx)
 		if err == nil {
 			if i > 0 {
-				debugf("%s NDEF write successful on attempt %d", tagType, i+1)
+				Debugf("%s NDEF write successful on attempt %d", tagType, i+1)
 			}
 			return nil
 		}
@@ -119,7 +119,7 @@ func WriteNDEFWithRetry(ctx context.Context, writeFunc WriteNDEFFunc, maxRetries
 
 		// Check if error is retryable
 		if !IsRetryable(err) {
-			debugf("%s NDEF write failed with non-retryable error: %v", tagType, err)
+			Debugf("%s NDEF write failed with non-retryable error: %v", tagType, err)
 			return err
 		}
 
@@ -128,7 +128,7 @@ func WriteNDEFWithRetry(ctx context.Context, writeFunc WriteNDEFFunc, maxRetries
 			break
 		}
 
-		debugf("%s NDEF write attempt %d failed (retrying): %v", tagType, i+1, err)
+		Debugf("%s NDEF write attempt %d failed (retrying): %v", tagType, i+1, err)
 
 		// Wait before retry with exponential backoff
 		delay := retryDelays[0]
