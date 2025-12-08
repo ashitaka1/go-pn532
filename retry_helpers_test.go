@@ -160,7 +160,7 @@ func TestWriteNDEFWithRetry_DefaultMaxRetries(t *testing.T) {
 	err := WriteNDEFWithRetry(context.Background(), writeFunc, 0, "TEST")
 
 	require.Error(t, err)
-	assert.Equal(t, 3, callCount, "should default to 3 retries when maxRetries is 0")
+	assert.Equal(t, 5, callCount, "should default to 5 retries when maxRetries is 0")
 }
 
 func TestWriteNDEFWithRetry_ExponentialBackoffTiming(t *testing.T) {

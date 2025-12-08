@@ -261,6 +261,24 @@ func (s *Session) pauseWithAck(ctx context.Context) error {
 	}
 }
 
+// executeWriteToTag creates a tag from detected tag and executes the write function.
+// Clears transport state on write error for recovery.
+func (s *Session) executeWriteToTag(
+	writeCtx context.Context,
+	detectedTag *pn532.DetectedTag,
+	writeFn func(context.Context, pn532.Tag) error,
+) error {
+	tag, tagErr := s.device.CreateTag(detectedTag)
+	if tagErr != nil {
+		return fmt.Errorf("failed to create tag: %w", tagErr)
+	}
+	writeErr := writeFn(writeCtx, tag)
+	if writeErr != nil {
+		_ = s.device.ClearTransportState()
+	}
+	return writeErr
+}
+
 // WriteToNextTag waits for the next tag detection and performs a write operation
 // This method blocks until a tag is detected or timeout occurs
 // sessionCtx controls session lifetime, writeCtx controls write operation lifetime
@@ -292,16 +310,10 @@ func (s *Session) WriteToNextTag(
 		// Attempt to detect a tag
 		detectedTag, err := s.performSinglePoll(timeoutCtx)
 		if err == nil {
-			// Tag found - create Tag object and call write function
-			tag, tagErr := s.device.CreateTag(detectedTag)
-			if tagErr != nil {
-				return fmt.Errorf("failed to create tag: %w", tagErr)
-			}
-			return writeFn(writeCtx, tag)
+			return s.executeWriteToTag(writeCtx, detectedTag, writeFn)
 		}
 
 		if !errors.Is(err, ErrNoTagInPoll) {
-			// Real error occurred
 			return fmt.Errorf("tag detection failed: %w", err)
 		}
 
@@ -337,14 +349,7 @@ func (s *Session) WriteToTag(
 	}
 	defer s.Resume()
 
-	// Create tag from detected tag
-	tag, err := s.device.CreateTag(detectedTag)
-	if err != nil {
-		return fmt.Errorf("failed to create tag: %w", err)
-	}
-
-	// Execute the write function with the write context
-	return writeFn(writeCtx, tag)
+	return s.executeWriteToTag(writeCtx, detectedTag, writeFn)
 }
 
 // WriteToNextTagWithRetry waits for the next tag detection and performs a write operation

@@ -1088,12 +1088,12 @@ func TestSession_WriteToTagWithRetry(t *testing.T) {
 		detectedTag := createTestDetectedTag()
 		writeCallCount := 0
 
-		// Pass 0 for maxRetries - should default to 3
+		// Pass 0 for maxRetries - should default to 5
 		err := session.WriteToTagWithRetry(
 			context.Background(), context.Background(), detectedTag, 0,
 			func(_ context.Context, _ pn532.Tag) error {
 				writeCallCount++
-				// Always fail with retryable error
+				// Fail first 2 attempts, succeed on 3rd
 				if writeCallCount < 3 {
 					return pn532.ErrTransportTimeout
 				}
@@ -1101,7 +1101,7 @@ func TestSession_WriteToTagWithRetry(t *testing.T) {
 			})
 
 		require.NoError(t, err)
-		assert.Equal(t, 3, writeCallCount) // Default is 3 retries
+		assert.Equal(t, 3, writeCallCount) // Succeeds on 3rd attempt (within default 5 retries)
 	})
 }
 
