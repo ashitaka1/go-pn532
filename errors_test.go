@@ -351,28 +351,28 @@ func TestNewPN532Error(t *testing.T) {
 			errorCode:   0x01,
 			command:     "InDataExchange",
 			context:     "",
-			wantMessage: "PN532 error 0x01: InDataExchange",
+			wantMessage: "InDataExchange error 0x01 (timeout)",
 		},
 		{
 			name:        "authentication error with context",
 			errorCode:   0x14,
 			command:     "InDataExchange",
 			context:     "authentication failure",
-			wantMessage: "PN532 error 0x14 (InDataExchange): authentication failure",
+			wantMessage: "InDataExchange error 0x14 (authentication error): authentication failure",
 		},
 		{
 			name:        "command not supported",
 			errorCode:   0x81,
 			command:     "InCommunicateThru",
 			context:     "",
-			wantMessage: "PN532 error 0x81: InCommunicateThru",
+			wantMessage: "InCommunicateThru error 0x81 (command not supported)",
 		},
 		{
 			name:        "error with detailed context",
 			errorCode:   0x02,
 			command:     "InListPassiveTarget",
 			context:     "no targets found in field",
-			wantMessage: "PN532 error 0x02 (InListPassiveTarget): no targets found in field",
+			wantMessage: "InListPassiveTarget error 0x02 (CRC error): no targets found in field",
 		},
 	}
 

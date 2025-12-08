@@ -21,12 +21,16 @@
 package pn532
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
 
 // ReadNDEFFunc defines a function that reads NDEF data from a tag
 type ReadNDEFFunc func() (*NDEFMessage, error)
+
+// WriteNDEFFunc defines a function that writes NDEF data to a tag
+type WriteNDEFFunc func(ctx context.Context) error
 
 // IsRetryableFunc defines a function that determines if an error is retryable
 type IsRetryableFunc func(error) bool
@@ -74,4 +78,68 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 
 	// This should never be reached, but just in case
 	return nil, fmt.Errorf("failed to read %s NDEF data after %d retries", tagType, maxRetries)
+}
+
+// WriteNDEFWithRetry wraps NDEF write operations with retry logic.
+// This addresses intermittent write failures due to card placement issues or timing problems.
+// The entire write operation is retried on failure (operation-level retry).
+func WriteNDEFWithRetry(ctx context.Context, writeFunc WriteNDEFFunc, maxRetries int, tagType string) error {
+	if maxRetries <= 0 {
+		maxRetries = 3 // Default to 3 retries
+	}
+
+	// Use exponential backoff with shorter initial delays for writes
+	// since card placement is usually the issue
+	retryDelays := []time.Duration{
+		100 * time.Millisecond,
+		150 * time.Millisecond,
+		250 * time.Millisecond,
+	}
+
+	var lastErr error
+	for i := range maxRetries {
+		// Check context before each attempt
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		err := writeFunc(ctx)
+		if err == nil {
+			if i > 0 {
+				debugf("%s NDEF write successful on attempt %d", tagType, i+1)
+			}
+			return nil
+		}
+
+		lastErr = err
+
+		// Check if error is retryable
+		if !IsRetryable(err) {
+			debugf("%s NDEF write failed with non-retryable error: %v", tagType, err)
+			return err
+		}
+
+		// Don't retry on last attempt
+		if i >= maxRetries-1 {
+			break
+		}
+
+		debugf("%s NDEF write attempt %d failed (retrying): %v", tagType, i+1, err)
+
+		// Wait before retry with exponential backoff
+		delay := retryDelays[0]
+		if i < len(retryDelays) {
+			delay = retryDelays[i]
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+
+	return fmt.Errorf("failed to write %s NDEF data after %d retries: %w", tagType, maxRetries, lastErr)
 }

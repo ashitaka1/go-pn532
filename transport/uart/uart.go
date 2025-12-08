@@ -464,12 +464,12 @@ func (t *Transport) waitAck() ([]byte, error) {
 	}
 }
 
-// sendFrame sends a frame to the PN532
+// sendFrame sends a frame to the PN532 with automatic retry on ACK failures.
+// This prevents device lockup when ACK is not received due to timing issues
+// or card placement problems.
 func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
-	// Flush any stale data from the input buffer before starting
-	if t.port != nil {
-		_ = t.port.ResetInputBuffer()
-	}
+	const maxACKRetries = 3
+	ackRetryDelays := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
 
 	// Calculate total frame size
 	dataLen := 2 + len(args) // hostToPn532 + cmd + args
@@ -509,27 +509,55 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 	finalFrame := make([]byte, totalFrameSize)
 	copy(finalFrame, frm[:totalFrameSize])
 
-	// Wake up and write frame
-	if err := t.wakeUp(); err != nil {
-		return nil, err
+	var lastErr error
+	for attempt := range maxACKRetries {
+		// Flush any stale data from the input buffer before each attempt
+		if t.port != nil {
+			_ = t.port.ResetInputBuffer()
+		}
+
+		// Wake up and write frame
+		if err := t.wakeUp(); err != nil {
+			return nil, err
+		}
+
+		t.traceTX(finalFrame, fmt.Sprintf("Cmd 0x%02X (attempt %d)", cmd, attempt+1))
+		n, err := t.port.Write(finalFrame)
+		if err != nil {
+			return nil, fmt.Errorf("UART send frame write failed: %w", err)
+		} else if n != len(finalFrame) {
+			return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
+		}
+
+		// Give Windows serial drivers time to process the write
+		windowsPostWriteDelay()
+
+		if drainErr := t.drainWithRetry("send frame"); drainErr != nil {
+			return nil, drainErr
+		}
+
+		ackData, err := t.waitAck()
+		if err == nil {
+			return ackData, nil
+		}
+
+		lastErr = err
+
+		// Only retry on transient errors (ACK timeout, NACK, frame corruption, etc.)
+		if !pn532.IsRetryable(err) {
+			return nil, err
+		}
+
+		// Clear buffer and wait before retry
+		if t.port != nil {
+			_ = t.port.ResetInputBuffer()
+		}
+		if attempt < maxACKRetries-1 {
+			time.Sleep(ackRetryDelays[attempt])
+		}
 	}
 
-	t.traceTX(finalFrame, fmt.Sprintf("Cmd 0x%02X", cmd))
-	n, err := t.port.Write(finalFrame)
-	if err != nil {
-		return nil, fmt.Errorf("UART send frame write failed: %w", err)
-	} else if n != len(finalFrame) {
-		return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
-	}
-
-	// Give Windows serial drivers time to process the write
-	windowsPostWriteDelay()
-
-	if err := t.drainWithRetry("send frame"); err != nil {
-		return nil, err
-	}
-
-	return t.waitAck()
+	return nil, fmt.Errorf("send frame failed after %d ACK retries: %w", maxACKRetries, lastErr)
 }
 
 // receiveFrame reads a frame from the PN532

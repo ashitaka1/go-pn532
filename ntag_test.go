@@ -396,7 +396,7 @@ func TestNTAGTag_FastRead(t *testing.T) {
 			startBlock:    4,
 			endBlock:      7,
 			expectError:   true,
-			errorContains: "error: 01",
+			errorContains: "error 0x01",
 		},
 	}
 

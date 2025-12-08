@@ -185,7 +185,7 @@ func getDataExchangeErrorCases() []struct {
 			},
 			inputData:      []byte{0x01, 0x02},
 			expectError:    true,
-			errorSubstring: "PN532 error 0x01",
+			errorSubstring: "InDataExchange error 0x01",
 		},
 		{
 			name: "Invalid_Response_Format",
@@ -203,7 +203,7 @@ func getDataExchangeErrorCases() []struct {
 			},
 			inputData:      []byte{0x01, 0x02},
 			expectError:    true,
-			errorSubstring: "data exchange error: 01",
+			errorSubstring: "InDataExchange error 0x01",
 		},
 		{
 			name: "Short_Response",
@@ -325,7 +325,7 @@ func getRawCommandErrorCases() []struct {
 			},
 			inputData:      []byte{0x30, 0x00},
 			expectError:    true,
-			errorSubstring: "PN532 error 0x02",
+			errorSubstring: "InCommunicateThru error 0x02",
 		},
 		{
 			name: "Invalid_Response_Format",
@@ -343,7 +343,7 @@ func getRawCommandErrorCases() []struct {
 			},
 			inputData:      []byte{0x30, 0x00},
 			expectError:    true,
-			errorSubstring: "InCommunicateThru error: 01",
+			errorSubstring: "InCommunicateThru error 0x01",
 		},
 		{
 			name: "Short_Response",

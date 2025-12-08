@@ -347,6 +347,50 @@ func (s *Session) WriteToTag(
 	return writeFn(writeCtx, tag)
 }
 
+// WriteToNextTagWithRetry waits for the next tag detection and performs a write operation
+// with automatic retry on transient errors. This is useful for handling intermittent
+// write failures due to card placement issues or timing problems.
+// sessionCtx controls session lifetime, writeCtx controls write operation lifetime.
+// maxRetries specifies how many times to retry the write operation (default 3 if <= 0).
+func (s *Session) WriteToNextTagWithRetry(
+	sessionCtx context.Context,
+	writeCtx context.Context,
+	timeout time.Duration,
+	maxRetries int,
+	writeFn func(context.Context, pn532.Tag) error,
+) error {
+	// Wrap the write function with retry logic
+	wrappedFn := func(ctx context.Context, tag pn532.Tag) error {
+		return pn532.WriteNDEFWithRetry(ctx, func(innerCtx context.Context) error {
+			return writeFn(innerCtx, tag)
+		}, maxRetries, string(tag.Type()))
+	}
+
+	return s.WriteToNextTag(sessionCtx, writeCtx, timeout, wrappedFn)
+}
+
+// WriteToTagWithRetry performs a thread-safe write operation to a detected tag
+// with automatic retry on transient errors. This is useful for handling intermittent
+// write failures due to card placement issues or timing problems.
+// sessionCtx controls session lifetime, writeCtx controls write operation lifetime.
+// maxRetries specifies how many times to retry the write operation (default 3 if <= 0).
+func (s *Session) WriteToTagWithRetry(
+	sessionCtx context.Context,
+	writeCtx context.Context,
+	detectedTag *pn532.DetectedTag,
+	maxRetries int,
+	writeFn func(context.Context, pn532.Tag) error,
+) error {
+	// Wrap the write function with retry logic
+	wrappedFn := func(ctx context.Context, tag pn532.Tag) error {
+		return pn532.WriteNDEFWithRetry(ctx, func(innerCtx context.Context) error {
+			return writeFn(innerCtx, tag)
+		}, maxRetries, string(tag.Type()))
+	}
+
+	return s.WriteToTag(sessionCtx, writeCtx, detectedTag, wrappedFn)
+}
+
 // continuousPolling runs continuous InAutoPoll monitoring
 func (s *Session) continuousPolling(ctx context.Context) error {
 	// Configure PN532 hardware polling retries to reduce host-side polling frequency
