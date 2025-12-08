@@ -1088,7 +1088,7 @@ func TestSession_WriteToTagWithRetry(t *testing.T) {
 		detectedTag := createTestDetectedTag()
 		writeCallCount := 0
 
-		// Pass 0 for maxRetries - should default to 5
+		// Pass 0 for maxRetries - should default to 3
 		err := session.WriteToTagWithRetry(
 			context.Background(), context.Background(), detectedTag, 0,
 			func(_ context.Context, _ pn532.Tag) error {
@@ -1101,7 +1101,7 @@ func TestSession_WriteToTagWithRetry(t *testing.T) {
 			})
 
 		require.NoError(t, err)
-		assert.Equal(t, 3, writeCallCount) // Succeeds on 3rd attempt (within default 5 retries)
+		assert.Equal(t, 3, writeCallCount) // Succeeds on 3rd attempt (default 3 retries)
 	})
 }
 
@@ -1184,5 +1184,90 @@ func TestSession_WriteToNextTagWithRetry(t *testing.T) {
 		require.Error(t, err)
 		assert.Equal(t, 2, writeCallCount) // Tried maxRetries times
 		assert.Contains(t, err.Error(), "retries")
+	})
+}
+
+func TestSession_HandlePollingError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("IgnoresDeadlineExceeded", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Should not panic or cause issues
+		session.handlePollingError(context.DeadlineExceeded)
+	})
+
+	t.Run("IgnoresContextCanceled", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Should not panic or cause issues
+		session.handlePollingError(context.Canceled)
+	})
+
+	t.Run("HandlesOtherErrors_CallsInRelease", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Set up InRelease response
+		mockTransport.SetResponse(0x52, []byte{0x53, 0x00}) // InRelease response
+
+		// Should call InRelease and handleCardRemoval
+		session.handlePollingError(errors.New("some transport error"))
+
+		// No panic means success - InRelease was called
+	})
+}
+
+func TestSession_HandleCardRemoval(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NoOpWhenSessionClosed", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+		session.closed.Store(true)
+
+		// Should return early without panic
+		session.handleCardRemoval()
+	})
+
+	t.Run("NoOpWhenCardNotPresent", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Card not present, should not call InRelease or callback
+		session.handleCardRemoval()
+		assert.False(t, session.state.Present)
+	})
+
+	t.Run("CallsInReleaseAndCallback_WhenCardWasPresent", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Set up InRelease response
+		mockTransport.SetResponse(0x52, []byte{0x53, 0x00}) // InRelease response
+
+		// Simulate card was present
+		session.stateMutex.Lock()
+		session.state.Present = true
+		session.state.LastUID = "04123456789ABC"
+		session.stateMutex.Unlock()
+
+		var callbackCalled bool
+		session.SetOnCardRemoved(func() {
+			callbackCalled = true
+		})
+
+		session.handleCardRemoval()
+
+		assert.True(t, callbackCalled, "OnCardRemoved callback should be called")
+		assert.False(t, session.state.Present, "Card should no longer be present")
 	})
 }

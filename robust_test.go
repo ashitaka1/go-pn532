@@ -621,7 +621,7 @@ func TestWriteNDEFWithRetry(t *testing.T) {
 
 		err := WriteNDEFWithRetry(context.Background(), writeFunc, 0, "TEST")
 		require.Error(t, err)
-		assert.Equal(t, int32(5), atomic.LoadInt32(&attempts), "Should default to 5 retries when 0 provided")
+		assert.Equal(t, int32(3), atomic.LoadInt32(&attempts), "Should default to 3 retries when 0 provided")
 	})
 
 	t.Run("ACK error is retried", func(t *testing.T) {

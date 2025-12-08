@@ -659,12 +659,16 @@ func (d *Device) InSelect(ctx context.Context, targetNumber byte) error {
 
 	// Check status byte
 	if res[1] == 0x27 {
-		return fmt.Errorf("InSelect failed: unknown target number %02x", targetNumber)
+		// 0x27 = Wrong Context - target likely already selected by InListPassiveTarget
+		Debugf("InSelect returned 0x27 for target %d - assuming already selected", targetNumber)
+		d.setCurrentTarget(targetNumber)
+		return nil
 	}
 	if res[1] != 0x00 {
 		return fmt.Errorf("InSelect failed with status: %02x", res[1])
 	}
 
+	d.setCurrentTarget(targetNumber)
 	return nil
 }
 
