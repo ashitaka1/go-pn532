@@ -487,6 +487,47 @@ func TestDevice_SelectTag(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "nil")
 	})
+
+	t.Run("WrongContext_TreatedAsSuccess", func(t *testing.T) {
+		t.Parallel()
+		mock := NewMockTransport()
+		defer func() { _ = mock.Close() }()
+
+		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+		mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x27}) // 0x27 = Wrong Context
+		mock.SelectTarget()
+
+		device, err := New(mock)
+		require.NoError(t, err)
+
+		tag := &DetectedTag{TargetNumber: 2}
+		err = device.SelectTag(context.Background(), tag)
+		assert.NoError(t, err, "0x27 should be treated as success (target already selected)")
+	})
+
+	t.Run("SelectTag_SetsCurrentTarget", func(t *testing.T) {
+		t.Parallel()
+		mock := NewMockTransport()
+		defer func() { _ = mock.Close() }()
+
+		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+		mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00}) // Success
+		mock.SelectTarget()
+
+		device, err := New(mock)
+		require.NoError(t, err)
+
+		// Initially currentTarget should default to 1
+		assert.Equal(t, byte(1), device.getCurrentTarget())
+
+		// Select target 2
+		tag := &DetectedTag{TargetNumber: 2}
+		err = device.SelectTag(context.Background(), tag)
+		require.NoError(t, err)
+
+		// Now currentTarget should be 2
+		assert.Equal(t, byte(2), device.getCurrentTarget())
+	})
 }
 
 // TestHandleDetectionError tests the error counting and threshold behavior
