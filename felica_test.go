@@ -21,6 +21,7 @@
 package pn532
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -275,7 +276,7 @@ func TestFeliCaTag_ReadBlockExtended(t *testing.T) {
 			tag, err := NewFeliCaTag(device, targetData)
 			require.NoError(t, err)
 
-			data, err := tag.ReadBlockExtended(tt.block)
+			data, err := tag.ReadBlockExtended(context.Background(), tt.block)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -349,7 +350,7 @@ func TestFeliCaTag_WriteBlockExtended(t *testing.T) {
 			tag, err := NewFeliCaTag(device, targetData)
 			require.NoError(t, err)
 
-			err = tag.WriteBlockExtended(tt.block, tt.data)
+			err = tag.WriteBlockExtended(context.Background(), tt.block, tt.data)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -416,7 +417,7 @@ func TestFeliCaTag_RequestService(t *testing.T) {
 			tag, err := NewFeliCaTag(device, targetData)
 			require.NoError(t, err)
 
-			_, err = tag.RequestService(tt.serviceCodes)
+			_, err = tag.RequestService(context.Background(), tt.serviceCodes)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -671,7 +672,7 @@ func TestFeliCaTag_ReadBlock_UsesReadBlockExtended(t *testing.T) {
 	require.NoError(t, err)
 
 	// ReadBlock should delegate to ReadBlockExtended
-	data, err := tag.ReadBlock(5)
+	data, err := tag.ReadBlock(context.Background(), 5)
 	require.NoError(t, err)
 	assert.Len(t, data, 16)
 }
@@ -688,7 +689,7 @@ func TestFeliCaTag_WriteBlock_UsesWriteBlockExtended(t *testing.T) {
 	require.NoError(t, err)
 
 	// WriteBlock should delegate to WriteBlockExtended
-	err = tag.WriteBlock(5, make([]byte, 16))
+	err = tag.WriteBlock(context.Background(), 5, make([]byte, 16))
 	require.NoError(t, err)
 }
 

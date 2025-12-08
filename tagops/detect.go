@@ -22,6 +22,7 @@ package tagops
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 
 	"github.com/ZaparooProject/go-pn532"
@@ -131,14 +132,14 @@ func DetectTagTypeFromUID(uid []byte) pn532.TagType {
 }
 
 // IsNDEFCapable returns whether the tag supports NDEF
-func (t *TagOperations) IsNDEFCapable() bool {
+func (t *TagOperations) IsNDEFCapable(ctx context.Context) bool {
 	switch t.tagType {
 	case pn532.TagTypeNTAG:
 		return true // All NTAG variants support NDEF
 	case pn532.TagTypeMIFARE:
 		// MIFARE Classic can support NDEF if formatted properly
 		// Try to read block 4 (sector 1) to test NDEF capability
-		_, err := t.mifareInstance.ReadBlockAuto(4)
+		_, err := t.mifareInstance.ReadBlockAuto(ctx, 4)
 		return err == nil
 	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:
 		return false

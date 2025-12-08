@@ -21,6 +21,7 @@
 package pn532
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -152,7 +153,7 @@ func TestNTAGTag_ReadBlock(t *testing.T) {
 
 			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 
-			data, err := tag.ReadBlock(tt.block)
+			data, err := tag.ReadBlock(context.Background(), tt.block)
 
 			if tt.expectError {
 				checkReadBlockError(t, err, tt.errorContains, data)
@@ -235,7 +236,7 @@ func TestNTAGTag_WriteBlock(t *testing.T) {
 
 			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 
-			err := tag.WriteBlock(tt.block, tt.data)
+			err := tag.WriteBlock(context.Background(), tt.block, tt.data)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -409,7 +410,7 @@ func TestNTAGTag_FastRead(t *testing.T) {
 
 			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 
-			data, err := tag.FastRead(tt.startBlock, tt.endBlock)
+			data, err := tag.FastRead(context.Background(), tt.startBlock, tt.endBlock)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -471,7 +472,7 @@ func TestNTAG215LargeDataCrash(t *testing.T) {
 	// 3. Potential buffer overflow when totalBytes exceeds expected bounds
 
 	// With our fixes, this should now fail gracefully with proper error handling
-	_, err := tag.ReadNDEF()
+	_, err := tag.ReadNDEF(context.Background())
 
 	// Verify our fixes work:
 	// 1. No crash occurs (test completes)
@@ -520,7 +521,7 @@ func TestNTAG215BlockByBlockBufferOverflow(t *testing.T) {
 	}
 
 	// With our fixes, this should now use proper tag capacity bounds instead of hardcoded limits
-	_, err := tag.ReadNDEF()
+	_, err := tag.ReadNDEF(context.Background())
 
 	// With our fixes, this could either:
 	// 1. Succeed by properly reading within tag bounds (if mock data is valid)
@@ -660,13 +661,13 @@ func TestNTAG_GetVersionDoesNotBreakSubsequentReads(t *testing.T) {
 
 	// Call DetectType which internally calls GetVersion (via InCommunicateThru)
 	// and then InSelect to restore target selection state
-	err := tag.DetectType()
+	err := tag.DetectType(context.Background())
 	require.NoError(t, err, "DetectType should succeed")
 	assert.Equal(t, NTAGType215, tag.tagType, "Should detect NTAG215 from version info")
 
 	// Now verify that subsequent reads work (this would fail without the InSelect fix)
 	// ReadBlock uses InDataExchange which requires proper target selection
-	data, err := tag.ReadBlock(4)
+	data, err := tag.ReadBlock(context.Background(), 4)
 	require.NoError(t, err, "ReadBlock after DetectType should succeed - "+
 		"if this fails with timeout error 01, the InSelect fix is not working")
 	assert.NotNil(t, data, "ReadBlock should return data")
@@ -699,12 +700,12 @@ func TestNTAG_GetVersionFailureStillAllowsReads(t *testing.T) {
 	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
 
 	// DetectType should succeed using CC-based fallback
-	err := tag.DetectType()
+	err := tag.DetectType(context.Background())
 	require.NoError(t, err, "DetectType should succeed with CC-based fallback")
 	assert.Equal(t, NTAGType213, tag.tagType, "Should detect NTAG213 from CC size field")
 
 	// Subsequent reads should still work
-	data, err := tag.ReadBlock(4)
+	data, err := tag.ReadBlock(context.Background(), 4)
 	require.NoError(t, err, "ReadBlock after failed GetVersion should succeed")
 	assert.NotNil(t, data)
 }

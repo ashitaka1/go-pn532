@@ -66,7 +66,7 @@ func (t *TagOperations) DetectTag(ctx context.Context) error {
 	t.tag = tag
 
 	// Determine tag type and initialize appropriate handler
-	return t.detectAndInitializeTag()
+	return t.detectAndInitializeTag(ctx)
 }
 
 // GetTagType returns the detected tag type
@@ -88,14 +88,14 @@ func (t *TagOperations) GetUID() []byte {
 }
 
 // detectAndInitializeTag determines the tag type and sets up the appropriate handler
-func (t *TagOperations) detectAndInitializeTag() error {
+func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 	if t.tag == nil {
 		return ErrNoTag
 	}
 
 	// Try NTAG detection first
 	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK)
-	if err := ntag.DetectType(); err == nil {
+	if err := ntag.DetectType(ctx); err == nil {
 		t.tagType = pn532.TagTypeNTAG
 		t.ntagInstance = ntag
 		t.totalPages = int(ntag.GetTotalPages())
@@ -105,7 +105,7 @@ func (t *TagOperations) detectAndInitializeTag() error {
 	// Try MIFARE detection
 	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
 	// Try to authenticate with common keys to verify it's MIFARE
-	if t.tryMIFAREAuth(mifare) {
+	if t.tryMIFAREAuth(ctx, mifare) {
 		t.tagType = pn532.TagTypeMIFARE
 		t.mifareInstance = mifare
 		return nil
@@ -115,9 +115,9 @@ func (t *TagOperations) detectAndInitializeTag() error {
 }
 
 // tryMIFAREAuth attempts to read a block to verify MIFARE functionality
-func (*TagOperations) tryMIFAREAuth(mifare *pn532.MIFARETag) bool {
+func (*TagOperations) tryMIFAREAuth(ctx context.Context, mifare *pn532.MIFARETag) bool {
 	// Try to read block 4 (first block of sector 1) using automatic authentication
 	// This will use the built-in NDEF key authentication
-	_, err := mifare.ReadBlockAuto(4)
+	_, err := mifare.ReadBlockAuto(ctx, 4)
 	return err == nil
 }

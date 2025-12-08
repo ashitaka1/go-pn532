@@ -21,6 +21,7 @@
 package pn532
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -78,12 +79,12 @@ var (
 // Returns true if the tag appears to be NDEF formatted, false otherwise.
 // This method checks sector 0 with the MAD key as per MIFARE Application Directory
 // standards rather than sector 1 with the NDEF key.
-func (t *MIFARETag) IsNDEFFormatted() bool {
+func (t *MIFARETag) IsNDEFFormatted(ctx context.Context) bool {
 	madKeyBytes := make([]byte, len(madKey))
 	copy(madKeyBytes, madKey)
 	defer clear(madKeyBytes)
 
-	return t.Authenticate(0, MIFAREKeyA, madKeyBytes) == nil
+	return t.Authenticate(ctx, 0, MIFAREKeyA, madKeyBytes) == nil
 }
 
 // FormatForNDEF formats a blank MIFARE Classic tag for NDEF data storage.
@@ -96,39 +97,39 @@ func (t *MIFARETag) IsNDEFFormatted() bool {
 // NDEF read/write operations.
 //
 // Returns an error if formatting fails at any step.
-func (t *MIFARETag) FormatForNDEF() error {
+func (t *MIFARETag) FormatForNDEF(ctx context.Context) error {
 	// Authenticate with sector 0 using factory key
-	if err := t.AuthenticateRobust(0, MIFAREKeyA, factoryKey); err != nil {
+	if err := t.AuthenticateRobust(ctx, 0, MIFAREKeyA, factoryKey); err != nil {
 		return fmt.Errorf("failed to authenticate sector 0: %w", err)
 	}
 
 	// Write MAD directory structure to sector 0
-	if err := t.WriteBlock(1, madBlock1); err != nil {
+	if err := t.WriteBlock(ctx, 1, madBlock1); err != nil {
 		return fmt.Errorf("failed to write MAD block 1: %w", err)
 	}
-	if err := t.WriteBlock(2, madBlock2); err != nil {
+	if err := t.WriteBlock(ctx, 2, madBlock2); err != nil {
 		return fmt.Errorf("failed to write MAD block 2: %w", err)
 	}
-	if err := t.WriteBlock(3, madTrailerBlock); err != nil {
+	if err := t.WriteBlock(ctx, 3, madTrailerBlock); err != nil {
 		return fmt.Errorf("failed to write MAD trailer block: %w", err)
 	}
 
 	// Format remaining sectors for NDEF
 	for sector := uint8(1); sector < maxSectors; sector++ {
 		// Try to authenticate with factory key - skip if not accessible
-		if err := t.AuthenticateRobust(sector, MIFAREKeyA, factoryKey); err != nil {
+		if err := t.AuthenticateRobust(ctx, sector, MIFAREKeyA, factoryKey); err != nil {
 			continue
 		}
 
 		// Write NDEF header to first block of sector
 		headerBlock := sector * 4
-		if err := t.WriteBlock(headerBlock, ndefHeaderBlock); err != nil {
+		if err := t.WriteBlock(ctx, headerBlock, ndefHeaderBlock); err != nil {
 			return fmt.Errorf("failed to write NDEF header block %d: %w", headerBlock, err)
 		}
 
 		// Write NDEF trailer with keys and access control bits
 		trailerBlock := sector*4 + 3
-		if err := t.WriteBlock(trailerBlock, ndefTrailerBlock); err != nil {
+		if err := t.WriteBlock(ctx, trailerBlock, ndefTrailerBlock); err != nil {
 			return fmt.Errorf("failed to write NDEF trailer block %d: %w", trailerBlock, err)
 		}
 	}
@@ -141,11 +142,11 @@ func (t *MIFARETag) FormatForNDEF() error {
 // authenticateForNDEFAlternative checks if the tag is NDEF formatted using the
 // specific formatting scheme created by FormatForNDEF. This is used internally
 // by the alternative NDEF writing methods.
-func (t *MIFARETag) authenticateForNDEFAlternative() (*authenticationResult, error) {
+func (t *MIFARETag) authenticateForNDEFAlternative(ctx context.Context) (*authenticationResult, error) {
 	result := &authenticationResult{}
 
 	// Try to authenticate with NDEF key on sector 1
-	err := t.AuthenticateRobust(1, MIFAREKeyA, ndefKey)
+	err := t.AuthenticateRobust(ctx, 1, MIFAREKeyA, ndefKey)
 	if err == nil {
 		result.isNDEFFormatted = true
 		return result, nil
@@ -163,7 +164,7 @@ func (t *MIFARETag) authenticateForNDEFAlternative() (*authenticationResult, err
 // not work correctly with tags formatted by other applications.
 //
 // Use the standard WriteNDEF method for general compatibility.
-func (t *MIFARETag) WriteNDEFAlternative(message *NDEFMessage) error {
+func (t *MIFARETag) WriteNDEFAlternative(ctx context.Context, message *NDEFMessage) error {
 	if len(message.Records) == 0 {
 		return errors.New("no NDEF records to write")
 	}
@@ -175,18 +176,18 @@ func (t *MIFARETag) WriteNDEFAlternative(message *NDEFMessage) error {
 	}
 
 	// Verify tag is formatted correctly
-	_, err = t.authenticateForNDEFAlternative()
+	_, err = t.authenticateForNDEFAlternative(ctx)
 	if err != nil {
 		return err
 	}
 
 	// Write NDEF data using optimized method
-	return t.writeNDEFDataAlternative(data)
+	return t.writeNDEFDataAlternative(ctx, data)
 }
 
 // writeNDEFDataAlternative writes NDEF data to the tag starting from block 4,
 // skipping trailer blocks and handling sector boundaries.
-func (t *MIFARETag) writeNDEFDataAlternative(data []byte) error {
+func (t *MIFARETag) writeNDEFDataAlternative(ctx context.Context, data []byte) error {
 	block := uint8(4) // Start after MAD sector
 
 	for i := 0; i < len(data); i += mifareBlockSize {
@@ -200,7 +201,7 @@ func (t *MIFARETag) writeNDEFDataAlternative(data []byte) error {
 			return errors.New("NDEF data exceeds tag capacity")
 		}
 
-		if err := t.writeDataBlockAlternative(block, data, i); err != nil {
+		if err := t.writeDataBlockAlternative(ctx, block, data, i); err != nil {
 			return err
 		}
 		block++
@@ -210,20 +211,20 @@ func (t *MIFARETag) writeNDEFDataAlternative(data []byte) error {
 
 // writeDataBlockAlternative handles writing a single block of NDEF data,
 // including padding for partial blocks at the end of the message.
-func (t *MIFARETag) writeDataBlockAlternative(block uint8, data []byte, offset int) error {
+func (t *MIFARETag) writeDataBlockAlternative(ctx context.Context, block uint8, data []byte, offset int) error {
 	end := offset + mifareBlockSize
 	if end > len(data) {
 		// Pad partial block with zeros
 		blockData := make([]byte, mifareBlockSize)
 		copy(blockData, data[offset:])
-		return t.writeBlockWithErrorAlternative(block, blockData)
+		return t.writeBlockWithErrorAlternative(ctx, block, blockData)
 	}
-	return t.writeBlockWithErrorAlternative(block, data[offset:end])
+	return t.writeBlockWithErrorAlternative(ctx, block, data[offset:end])
 }
 
 // writeBlockWithErrorAlternative wraps block writing with error handling.
-func (t *MIFARETag) writeBlockWithErrorAlternative(block uint8, data []byte) error {
-	if err := t.WriteBlockAutoAlternative(block, data); err != nil {
+func (t *MIFARETag) writeBlockWithErrorAlternative(ctx context.Context, block uint8, data []byte) error {
+	if err := t.WriteBlockAutoAlternative(ctx, block, data); err != nil {
 		return fmt.Errorf("failed to write block %d: %w", block, err)
 	}
 	return nil
@@ -231,33 +232,33 @@ func (t *MIFARETag) writeBlockWithErrorAlternative(block uint8, data []byte) err
 
 // WriteBlockAutoAlternative writes a block with automatic sector authentication.
 // It handles authentication caching and tries both Key A and Key B as needed.
-func (t *MIFARETag) WriteBlockAutoAlternative(block uint8, data []byte) error {
+func (t *MIFARETag) WriteBlockAutoAlternative(ctx context.Context, block uint8, data []byte) error {
 	sector := block / mifareSectorSize
 
 	// Check if we need to authenticate to this sector
 	if t.lastAuthSector != int(sector) {
 		// For write operations, try Key B first (typically required for writes)
-		err := t.authenticateNDEFAlternative(sector, MIFAREKeyB)
+		err := t.authenticateNDEFAlternative(ctx, sector, MIFAREKeyB)
 		if err != nil {
 			// Fallback to Key A
-			err = t.authenticateNDEFAlternative(sector, MIFAREKeyA)
+			err = t.authenticateNDEFAlternative(ctx, sector, MIFAREKeyA)
 			if err != nil {
 				return fmt.Errorf("failed to authenticate to sector %d: %w", sector, err)
 			}
 		}
 	}
 
-	return t.WriteBlock(block, data)
+	return t.WriteBlock(ctx, block, data)
 }
 
 // authenticateNDEFAlternative handles authentication for the alternative NDEF methods.
 // It uses the known key layout from FormatForNDEF to optimize authentication.
-func (t *MIFARETag) authenticateNDEFAlternative(sector uint8, keyType byte) error {
+func (t *MIFARETag) authenticateNDEFAlternative(ctx context.Context, sector uint8, keyType byte) error {
 	switch keyType {
 	case MIFAREKeyA:
-		return t.AuthenticateRobust(sector, keyType, ndefKey)
+		return t.AuthenticateRobust(ctx, sector, keyType, ndefKey)
 	case MIFAREKeyB:
-		return t.AuthenticateRobust(sector, keyType, factoryKey)
+		return t.AuthenticateRobust(ctx, sector, keyType, factoryKey)
 	}
 	return nil
 }

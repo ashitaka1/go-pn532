@@ -51,14 +51,15 @@ var (
 	ErrCommandNotSupported = errors.New("command not supported by device")
 
 	// Tag errors - generally not retryable
-	ErrTagNotFound    = errors.New("tag not found")
-	ErrTagAuthFailed  = errors.New("tag authentication failed")
-	ErrTagReadFailed  = errors.New("tag read failed")
-	ErrTagWriteFailed = errors.New("tag write failed")
-	ErrTagUnsupported = errors.New("tag type not supported")
-	ErrTagEmptyData   = errors.New("tag detected but returned empty data")
-	ErrTagDataCorrupt = errors.New("tag data appears corrupted")
-	ErrTagUnreliable  = errors.New("tag readings are inconsistent")
+	ErrTagNotFound             = errors.New("tag not found")
+	ErrTagAuthFailed           = errors.New("tag authentication failed")
+	ErrTagReadFailed           = errors.New("tag read failed")
+	ErrTagWriteFailed          = errors.New("tag write failed")
+	ErrTagUnsupported          = errors.New("tag type not supported")
+	ErrTagEmptyData            = errors.New("tag detected but returned empty data")
+	ErrTagDataCorrupt          = errors.New("tag data appears corrupted")
+	ErrTagUnreliable           = errors.New("tag readings are inconsistent")
+	ErrWriteVerificationFailed = errors.New("write verification failed: data mismatch")
 
 	// Data errors - not retryable
 	ErrInvalidParameter = errors.New("invalid parameter")

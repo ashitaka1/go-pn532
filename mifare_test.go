@@ -21,6 +21,7 @@
 package pn532
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -182,7 +183,7 @@ func TestMIFARETag_ReadBlock(t *testing.T) {
 			tag := newTestMIFARETag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x08)
 			tt.setupAuth(tag)
 
-			data, err := tag.ReadBlock(tt.block)
+			data, err := tag.ReadBlock(context.Background(), tt.block)
 
 			if tt.expectError {
 				checkReadBlockError(t, err, tt.errorContains, data)
@@ -208,7 +209,7 @@ func TestMIFARETag_WriteBlock(t *testing.T) {
 			tag := newTestMIFARETag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x08)
 			tt.setupAuth(tag)
 
-			err := tag.WriteBlock(tt.block, tt.data)
+			err := tag.WriteBlock(context.Background(), tt.block, tt.data)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -382,7 +383,7 @@ func TestMIFARETag_Authenticate(t *testing.T) {
 
 			tag := newTestMIFARETag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x08)
 
-			err := tag.Authenticate(tt.sector, tt.keyType, tt.key)
+			err := tag.Authenticate(context.Background(), tt.sector, tt.keyType, tt.key)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -568,7 +569,7 @@ func TestMIFARETag_ReadBlockDirect(t *testing.T) {
 
 			tag := newTestMIFARETag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x08)
 
-			data, err := tag.ReadBlockDirect(tt.block)
+			data, err := tag.ReadBlockDirect(context.Background(), tt.block)
 
 			if tt.expectError {
 				checkReadBlockError(t, err, tt.errorContains, data)
@@ -600,7 +601,7 @@ func TestMIFARETag_WriteBlockDirect(t *testing.T) {
 			tag := newTestMIFARETag(device, uid, 0x08) // MIFARE Classic 1K SAK
 
 			// Test WriteBlockDirect
-			err := tag.WriteBlockDirect(tt.block, tt.data)
+			err := tag.WriteBlockDirect(context.Background(), tt.block, tt.data)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -779,7 +780,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 			tag := newTestMIFARETag(device, uid, 0x08)
 
 			// Test ReadNDEF
-			message, err := tag.ReadNDEF()
+			message, err := tag.ReadNDEF(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -882,10 +883,20 @@ func getMIFAREWriteNDEFTestCases() []struct {
 		{
 			name: "Valid_Small_Message",
 			setupMock: func(mt *MockTransport) {
-				authData := []byte{0x41, 0x00}
-				mt.SetResponse(0x40, authData)
-				writeData := []byte{0x41, 0x00}
-				mt.SetResponse(0x40, writeData)
+				// NDEF "Hi" encodes to: 03 09 D1 01 05 54 02 65 6E 48 69 FE (12 bytes, padded to 16)
+				ndefBlock := []byte{
+					0x03, 0x09, 0xD1, 0x01, 0x05, 0x54, 0x02, 0x65,
+					0x6E, 0x48, 0x69, 0xFE, 0x00, 0x00, 0x00, 0x00,
+				}
+				// Queue auth responses (success)
+				writeSuccess := []byte{0x41, 0x00}
+				mt.QueueResponses(0x40,
+					writeSuccess, // Auth
+					writeSuccess, // Write block
+				)
+				// Set fallback for verification reads - returns the NDEF data
+				readResponse := append([]byte{0x41, 0x00}, ndefBlock...)
+				mt.SetResponse(0x40, readResponse)
 			},
 			message: &NDEFMessage{
 				Records: []NDEFRecord{
@@ -912,7 +923,7 @@ func TestMIFARETag_WriteNDEF(t *testing.T) {
 			tag, _ := setupMIFARETagTest(t, tt.setupMock)
 
 			// Test WriteNDEF
-			err := tag.WriteNDEF(tt.message)
+			err := tag.WriteNDEF(context.Background(), tt.message)
 			checkMIFARETagError(t, err, tt.expectError, tt.errorContains)
 		})
 	}
@@ -965,7 +976,7 @@ func TestMIFARETag_ResetAuthState(t *testing.T) {
 			tag.lastAuthKeyType = 0x01
 
 			// Test ResetAuthState
-			err := tag.ResetAuthState()
+			err := tag.ResetAuthState(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -995,9 +1006,33 @@ func TestMIFARETag_WriteText(t *testing.T) {
 		{
 			name: "Successful_Text_Write",
 			setupMock: func(mt *MockTransport) {
-				// Setup authentication and write success
-				successData := []byte{0x41, 0x00}
-				mt.SetResponse(0x40, successData)
+				// NDEF "Hello World" is 21 bytes, spans 2 blocks
+				// Block 4: 03 12 D1 01 0E 54 02 65 6E 48 65 6C 6C 6F 20 57
+				// Block 5: 6F 72 6C 64 FE + padding
+				ndefBlock4 := []byte{
+					0x03, 0x12, 0xD1, 0x01, 0x0E, 0x54, 0x02, 0x65,
+					0x6E, 0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57,
+				}
+				ndefBlock5 := []byte{
+					0x6F, 0x72, 0x6C, 0x64, 0xFE, 0x00, 0x00, 0x00,
+					0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				}
+				writeSuccess := []byte{0x41, 0x00}
+
+				// Queue writeSuccess responses for:
+				// - 1 auth (authenticateForNDEF with NDEF key succeeds)
+				// - 2 writes (blocks 4, 5)
+				// - 57 clearRemainingBlocks ops: block 6 + sectors 2-15 (1 + 14*4)
+				// - 1 verification auth
+				// Total: 61 writeSuccess, then 2 reads
+				for range 61 {
+					mt.QueueResponse(0x40, writeSuccess)
+				}
+
+				// Queue read responses for verification (block 4, then block 5)
+				readResponse4 := append([]byte{0x41, 0x00}, ndefBlock4...)
+				readResponse5 := append([]byte{0x41, 0x00}, ndefBlock5...)
+				mt.QueueResponses(0x40, readResponse4, readResponse5)
 			},
 			text: "Hello World",
 		},
@@ -1013,8 +1048,21 @@ func TestMIFARETag_WriteText(t *testing.T) {
 		{
 			name: "Empty_Text",
 			setupMock: func(mt *MockTransport) {
-				successData := []byte{0x41, 0x00}
-				mt.SetResponse(0x40, successData)
+				// Empty NDEF "" encodes to: 03 07 D1 01 03 54 02 65 6E FE (10 bytes, padded to 16)
+				ndefBlock := []byte{
+					0x03, 0x07, 0xD1, 0x01, 0x03, 0x54, 0x02, 0x65,
+					0x6E, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				}
+				writeSuccess := []byte{0x41, 0x00}
+
+				// Queue 61 writeSuccess for auth + MAD writes + NDEF write + clearRemainingBlocks
+				for range 61 {
+					mt.QueueResponse(0x40, writeSuccess)
+				}
+
+				// Queue read response for verification
+				readResponse := append([]byte{0x41, 0x00}, ndefBlock...)
+				mt.QueueResponse(0x40, readResponse)
 			},
 			text: "", // Empty text should still work
 		},
@@ -1027,7 +1075,7 @@ func TestMIFARETag_WriteText(t *testing.T) {
 			tag, _ := setupMIFARETagTest(t, tt.setupMock)
 
 			// Test WriteText
-			err := tag.WriteText(tt.text)
+			err := tag.WriteText(context.Background(), tt.text)
 			checkMIFARETagError(t, err, tt.expectError, tt.errorContains)
 		})
 	}

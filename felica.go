@@ -148,12 +148,12 @@ func (f *FeliCaTag) SetServiceCode(serviceCode uint16) {
 // ReadBlock reads a single block from the FeliCa tag
 // For FeliCa, block numbers are 16-bit, but we use uint8 for interface compatibility
 // TODO: Consider extending interface for 16-bit block addressing
-func (f *FeliCaTag) ReadBlock(block uint8) ([]byte, error) {
-	return f.ReadBlockExtended(uint16(block))
+func (f *FeliCaTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
+	return f.ReadBlockExtended(ctx, uint16(block))
 }
 
 // ReadBlockExtended reads a single block using 16-bit block addressing
-func (f *FeliCaTag) ReadBlockExtended(block uint16) ([]byte, error) {
+func (f *FeliCaTag) ReadBlockExtended(ctx context.Context, block uint16) ([]byte, error) {
 	// FeliCa Read Without Encryption command structure:
 	// Command: 0x06
 	// IDm: 8 bytes (card identifier)
@@ -176,7 +176,7 @@ func (f *FeliCaTag) ReadBlockExtended(block uint16) ([]byte, error) {
 		0x80|byte((block>>8)&0x0F), byte(block&0xFF), 0x00)
 
 	// Send command via data exchange
-	response, err := f.device.SendDataExchange(context.Background(), cmd)
+	response, err := f.device.SendDataExchange(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("FeliCa read command failed: %w", err)
 	}
@@ -218,12 +218,12 @@ func (f *FeliCaTag) ReadBlockExtended(block uint16) ([]byte, error) {
 
 // WriteBlock writes a single block to the FeliCa tag
 // For FeliCa, block numbers are 16-bit, but we use uint8 for interface compatibility
-func (f *FeliCaTag) WriteBlock(block uint8, data []byte) error {
-	return f.WriteBlockExtended(uint16(block), data)
+func (f *FeliCaTag) WriteBlock(ctx context.Context, block uint8, data []byte) error {
+	return f.WriteBlockExtended(ctx, uint16(block), data)
 }
 
 // WriteBlockExtended writes a single block using 16-bit block addressing
-func (f *FeliCaTag) WriteBlockExtended(block uint16, data []byte) error {
+func (f *FeliCaTag) WriteBlockExtended(ctx context.Context, block uint16, data []byte) error {
 	// Validate data length
 	if len(data) != feliCaBlockSize {
 		return fmt.Errorf("FeliCa block data must be exactly %d bytes, got %d", feliCaBlockSize, len(data))
@@ -255,7 +255,7 @@ func (f *FeliCaTag) WriteBlockExtended(block uint16, data []byte) error {
 	cmd = append(cmd, data...)
 
 	// Send command via data exchange
-	response, err := f.device.SendDataExchange(context.Background(), cmd)
+	response, err := f.device.SendDataExchange(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("FeliCa write command failed: %w", err)
 	}
@@ -288,7 +288,7 @@ func (f *FeliCaTag) WriteBlockExtended(block uint16, data []byte) error {
 
 // ReadNDEF reads NDEF data from the FeliCa tag
 // Uses system code 0x12FC and service code 0x000B for NFC Forum Type 3 compliance
-func (f *FeliCaTag) ReadNDEF() (*NDEFMessage, error) {
+func (f *FeliCaTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 	// Switch to NDEF system code and read service code
 	originalSystemCode := f.systemCode
 	originalServiceCode := f.serviceCode
@@ -303,7 +303,7 @@ func (f *FeliCaTag) ReadNDEF() (*NDEFMessage, error) {
 	}()
 
 	// Step 1: Read Attribute Information Block (Block 0)
-	aibData, err := f.ReadBlockExtended(0)
+	aibData, err := f.ReadBlockExtended(ctx, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read attribute information block: %w", err)
 	}
@@ -345,7 +345,7 @@ func (f *FeliCaTag) ReadNDEF() (*NDEFMessage, error) {
 	ndefData := make([]byte, 0, blocksNeeded*feliCaBlockSize)
 
 	for block := uint16(1); uint32(block) <= blocksNeeded; block++ {
-		blockData, err := f.ReadBlockExtended(block)
+		blockData, err := f.ReadBlockExtended(ctx, block)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read NDEF block %d: %w", block, err)
 		}
@@ -365,7 +365,7 @@ func (f *FeliCaTag) ReadNDEF() (*NDEFMessage, error) {
 
 // WriteNDEF writes NDEF data to the FeliCa tag
 // Uses system code 0x12FC and service code 0x0009 for NFC Forum Type 3 compliance
-func (f *FeliCaTag) WriteNDEF(message *NDEFMessage) error {
+func (f *FeliCaTag) WriteNDEF(ctx context.Context, message *NDEFMessage) error {
 	if message == nil {
 		return errors.New("NDEF message cannot be nil")
 	}
@@ -375,13 +375,7 @@ func (f *FeliCaTag) WriteNDEF(message *NDEFMessage) error {
 	f.systemCode = feliCaSystemCodeNDEF
 	defer f.restoreSystemCodes(originalSystemCode, originalServiceCode)
 
-	return f.executeNDEFWrite(message)
-}
-
-// WriteNDEFWithContext writes NDEF data to the FeliCa tag with context support
-func (f *FeliCaTag) WriteNDEFWithContext(_ context.Context, message *NDEFMessage) error {
-	// TODO: Add context cancellation checks at appropriate points during the write operation
-	return f.WriteNDEF(message)
+	return f.executeNDEFWrite(ctx, message)
 }
 
 // restoreSystemCodes restores the original system and service codes
@@ -391,9 +385,9 @@ func (f *FeliCaTag) restoreSystemCodes(systemCode, serviceCode uint16) {
 }
 
 // executeNDEFWrite performs the NDEF write operation
-func (f *FeliCaTag) executeNDEFWrite(message *NDEFMessage) error {
+func (f *FeliCaTag) executeNDEFWrite(ctx context.Context, message *NDEFMessage) error {
 	// Step 1: Read and validate current AIB
-	currentAIB, err := f.readAndValidateAIB()
+	currentAIB, err := f.readAndValidateAIB(ctx)
 	if err != nil {
 		return err
 	}
@@ -410,18 +404,18 @@ func (f *FeliCaTag) executeNDEFWrite(message *NDEFMessage) error {
 	}
 
 	// Step 4: Write NDEF data to blocks
-	if err := f.writeNDEFDataToBlocks(ndefData); err != nil {
+	if err := f.writeNDEFDataToBlocks(ctx, ndefData); err != nil {
 		return err
 	}
 
 	// Step 5: Update AIB with new length
-	return f.updateAIBWithNDEFLength(currentAIB, len(ndefData))
+	return f.updateAIBWithNDEFLength(ctx, currentAIB, len(ndefData))
 }
 
 // readAndValidateAIB reads and validates the Attribute Information Block
-func (f *FeliCaTag) readAndValidateAIB() ([]byte, error) {
+func (f *FeliCaTag) readAndValidateAIB(ctx context.Context) ([]byte, error) {
 	f.serviceCode = feliCaServiceCodeNDEFRead
-	currentAIB, err := f.ReadBlockExtended(0)
+	currentAIB, err := f.ReadBlockExtended(ctx, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read current attribute information block: %w", err)
 	}
@@ -455,7 +449,7 @@ func (f *FeliCaTag) buildAndValidateNDEFData(message *NDEFMessage, currentAIB []
 }
 
 // writeNDEFDataToBlocks writes NDEF data to the FeliCa blocks
-func (f *FeliCaTag) writeNDEFDataToBlocks(ndefData []byte) error {
+func (f *FeliCaTag) writeNDEFDataToBlocks(ctx context.Context, ndefData []byte) error {
 	// Pad NDEF data to block boundary
 	paddedLength := ((len(ndefData) + feliCaBlockSize - 1) / feliCaBlockSize) * feliCaBlockSize
 	paddedData := make([]byte, paddedLength)
@@ -463,17 +457,17 @@ func (f *FeliCaTag) writeNDEFDataToBlocks(ndefData []byte) error {
 
 	// Write NDEF data blocks
 	f.serviceCode = feliCaServiceCodeNDEFWrite
-	return f.writeNDEFBlocks(paddedData)
+	return f.writeNDEFBlocks(ctx, paddedData)
 }
 
 // updateAIBWithNDEFLength updates and writes the AIB with new NDEF length
-func (f *FeliCaTag) updateAIBWithNDEFLength(currentAIB []byte, ndefDataLen int) error {
+func (f *FeliCaTag) updateAIBWithNDEFLength(ctx context.Context, currentAIB []byte, ndefDataLen int) error {
 	if ndefDataLen < 0 || ndefDataLen > 0xFFFFFF {
 		return fmt.Errorf("NDEF data length out of range: %d bytes (must be 0-16777215)", ndefDataLen)
 	}
 
 	newAIB := f.updateAIBWithLength(currentAIB, uint32(ndefDataLen))
-	if err := f.WriteBlockExtended(0, newAIB); err != nil {
+	if err := f.WriteBlockExtended(ctx, 0, newAIB); err != nil {
 		return fmt.Errorf("failed to write updated attribute information block: %w", err)
 	}
 
@@ -482,7 +476,7 @@ func (f *FeliCaTag) updateAIBWithNDEFLength(currentAIB []byte, ndefDataLen int) 
 
 // Polling performs a FeliCa polling operation to detect and initialize the tag
 // This is a FeliCa-specific operation for card detection and system code discovery
-func (f *FeliCaTag) Polling(systemCode uint16) error {
+func (f *FeliCaTag) Polling(ctx context.Context, systemCode uint16) error {
 	// FeliCa Polling command structure:
 	// Command: 0x00
 	// System Code: 2 bytes (big endian)
@@ -499,7 +493,7 @@ func (f *FeliCaTag) Polling(systemCode uint16) error {
 	)
 
 	// Send command via data exchange
-	response, err := f.device.SendDataExchange(context.Background(), cmd)
+	response, err := f.device.SendDataExchange(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("FeliCa polling command failed: %w", err)
 	}
@@ -538,7 +532,7 @@ func (f *FeliCaTag) Polling(systemCode uint16) error {
 
 // RequestService requests service information from the FeliCa tag
 // This is used to check if specific service codes are available
-func (f *FeliCaTag) RequestService(serviceCodes []uint16) ([]byte, error) {
+func (f *FeliCaTag) RequestService(ctx context.Context, serviceCodes []uint16) ([]byte, error) {
 	if len(serviceCodes) == 0 || len(serviceCodes) > 32 {
 		return nil, fmt.Errorf("invalid service code count: %d (must be 1-32)", len(serviceCodes))
 	}
@@ -563,7 +557,7 @@ func (f *FeliCaTag) RequestService(serviceCodes []uint16) ([]byte, error) {
 	}
 
 	// Send command via data exchange
-	response, err := f.device.SendDataExchange(context.Background(), cmd)
+	response, err := f.device.SendDataExchange(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("FeliCa request service command failed: %w", err)
 	}
@@ -626,7 +620,7 @@ func (*FeliCaTag) validateDataSize(ndefData []byte, maxBytes uint32) error {
 }
 
 // writeNDEFBlocks writes the NDEF data blocks to the tag
-func (f *FeliCaTag) writeNDEFBlocks(paddedData []byte) error {
+func (f *FeliCaTag) writeNDEFBlocks(ctx context.Context, paddedData []byte) error {
 	blocksToWrite := len(paddedData) / feliCaBlockSize
 	if blocksToWrite > 0xFFFE {
 		return fmt.Errorf("NDEF data too large: requires %d blocks but maximum is %d", blocksToWrite, 0xFFFE)
@@ -638,7 +632,7 @@ func (f *FeliCaTag) writeNDEFBlocks(paddedData []byte) error {
 			return fmt.Errorf("block index too large: %d", block)
 		}
 		blockIndex := uint16(block) + 1 //nolint:gosec // Already bounds-checked above
-		writeErr := f.WriteBlockExtended(blockIndex, blockData)
+		writeErr := f.WriteBlockExtended(ctx, blockIndex, blockData)
 		if writeErr != nil {
 			return fmt.Errorf("failed to write NDEF block %d: %w", block+1, writeErr)
 		}
@@ -693,7 +687,7 @@ func (f *FeliCaTag) DebugInfo() string {
 }
 
 // WriteText writes a simple text record to the FeliCa tag
-func (f *FeliCaTag) WriteText(text string) error {
+func (f *FeliCaTag) WriteText(ctx context.Context, text string) error {
 	message := &NDEFMessage{
 		Records: []NDEFRecord{
 			{
@@ -703,5 +697,5 @@ func (f *FeliCaTag) WriteText(text string) error {
 		},
 	}
 
-	return f.WriteNDEF(message)
+	return f.WriteNDEF(ctx, message)
 }

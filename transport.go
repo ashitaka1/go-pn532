@@ -103,6 +103,7 @@ const (
 // MockTransport provides a mock implementation of Transport for testing
 type MockTransport struct {
 	responses      map[byte][]byte
+	responseQueue  map[byte][][]byte // Queue of responses for sequential calls
 	callCount      map[byte]int
 	errorMap       map[byte]error
 	timeout        time.Duration
@@ -120,6 +121,7 @@ func NewMockTransport() *MockTransport {
 		connected:      true,
 		timeout:        time.Second,
 		responses:      make(map[byte][]byte),
+		responseQueue:  make(map[byte][][]byte),
 		callCount:      make(map[byte]int),
 		delay:          0,
 		errorMap:       make(map[byte]error),
@@ -163,7 +165,15 @@ func (m *MockTransport) SendCommand(cmd byte, data []byte) ([]byte, error) {
 	// Update state based on command
 	m.updateState(cmd, data)
 
-	// Return configured response
+	// Check queue first (for sequential different responses)
+	if queue, exists := m.responseQueue[cmd]; exists && len(queue) > 0 {
+		response := queue[0]
+		m.responseQueue[cmd] = queue[1:] // Pop from queue
+		m.mu.Unlock()
+		return response, nil
+	}
+
+	// Return configured response (fallback/default)
 	if response, exists := m.responses[cmd]; exists {
 		m.mu.Unlock()
 		return response, nil
@@ -219,7 +229,15 @@ func (m *MockTransport) SendCommandWithContext(ctx context.Context, cmd byte, da
 	// Update state based on command
 	m.updateState(cmd, data)
 
-	// Return configured response
+	// Check queue first (for sequential different responses)
+	if queue, exists := m.responseQueue[cmd]; exists && len(queue) > 0 {
+		response := queue[0]
+		m.responseQueue[cmd] = queue[1:] // Pop from queue
+		m.mu.Unlock()
+		return response, nil
+	}
+
+	// Return configured response (fallback/default)
 	if response, exists := m.responses[cmd]; exists {
 		m.mu.Unlock()
 		return response, nil
@@ -265,6 +283,22 @@ func (*MockTransport) Type() TransportType {
 func (m *MockTransport) SetResponse(cmd byte, response []byte) {
 	m.mu.Lock()
 	m.responses[cmd] = response
+	m.mu.Unlock()
+}
+
+// QueueResponse adds a response to the queue for a specific command.
+// Queued responses are returned in FIFO order for sequential calls to the same command.
+// Once the queue is empty, SetResponse fallback is used.
+func (m *MockTransport) QueueResponse(cmd byte, response []byte) {
+	m.mu.Lock()
+	m.responseQueue[cmd] = append(m.responseQueue[cmd], response)
+	m.mu.Unlock()
+}
+
+// QueueResponses adds multiple responses to the queue for a specific command.
+func (m *MockTransport) QueueResponses(cmd byte, responses ...[]byte) {
+	m.mu.Lock()
+	m.responseQueue[cmd] = append(m.responseQueue[cmd], responses...)
 	m.mu.Unlock()
 }
 

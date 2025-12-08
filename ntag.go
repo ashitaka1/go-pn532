@@ -165,12 +165,18 @@ func NewNTAGTag(device *Device, uid []byte, sak byte) *NTAGTag {
 }
 
 // ReadBlock reads a block from the NTAG tag
-func (t *NTAGTag) ReadBlock(block uint8) ([]byte, error) {
-	data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, block})
+//
+//nolint:dupl // Similar pattern to MIFARETag.ReadBlockDirect but different error handling and block sizes
+func (t *NTAGTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, block})
 	if err != nil {
 		// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
 		if IsPN532AuthenticationError(err) {
-			return t.readBlockCommunicateThru(block)
+			return t.readBlockCommunicateThru(ctx, block)
 		}
 		return nil, fmt.Errorf("%w (block %d): %w", ErrTagReadFailed, block, err)
 	}
@@ -185,20 +191,24 @@ func (t *NTAGTag) ReadBlock(block uint8) ([]byte, error) {
 }
 
 // WriteBlock writes a block to the NTAG tag
-func (t *NTAGTag) WriteBlock(block uint8, data []byte) error {
+func (t *NTAGTag) WriteBlock(ctx context.Context, block uint8, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if len(data) != ntagBlockSize {
 		return fmt.Errorf("invalid block size: expected %d, got %d", ntagBlockSize, len(data))
 	}
 
 	// Validate write boundary to catch counterfeit tags
-	if err := t.validateWriteBoundary(block); err != nil {
+	if err := t.validateWriteBoundary(ctx, block); err != nil {
 		return err
 	}
 
 	cmd := []byte{ntagCmdWrite, block}
 	cmd = append(cmd, data...)
 
-	_, err := t.device.SendDataExchange(context.Background(), cmd)
+	_, err := t.device.SendDataExchange(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 	}
@@ -208,9 +218,9 @@ func (t *NTAGTag) WriteBlock(block uint8, data []byte) error {
 
 // ReadNDEFRobust reads NDEF data with retry logic to handle intermittent empty data issues
 // This addresses the "empty valid tag" problem where tags are detected but return no data
-func (t *NTAGTag) ReadNDEFRobust() (*NDEFMessage, error) {
+func (t *NTAGTag) ReadNDEFRobust(ctx context.Context) (*NDEFMessage, error) {
 	return readNDEFWithRetry(func() (*NDEFMessage, error) {
-		return t.ReadNDEF()
+		return t.ReadNDEF(ctx)
 	}, isRetryableError, "NDEF")
 }
 
@@ -227,8 +237,12 @@ func isRetryableError(err error) bool {
 }
 
 // ReadNDEF reads NDEF data from the NTAG tag using FastRead for optimal performance
-func (t *NTAGTag) ReadNDEF() (*NDEFMessage, error) {
-	header, err := t.readNDEFHeader()
+func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	header, err := t.readNDEFHeader(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -242,9 +256,9 @@ func (t *NTAGTag) ReadNDEF() (*NDEFMessage, error) {
 			totalBytes, header.headerSize, header.ndefLength)
 	}
 
-	_ = t.ensureTagTypeDetected() // Ignore error, use conservative approach
+	_ = t.ensureTagTypeDetected(ctx) // Ignore error, use conservative approach
 
-	data, err := t.readNDEFDataWithFastRead(header, totalBytes)
+	data, err := t.readNDEFDataWithFastRead(ctx, header, totalBytes)
 	if err != nil {
 		// CRITICAL: Clear transport state after failed InCommunicateThru operation
 		// This prevents firmware lockup when switching to InDataExchange protocol
@@ -252,11 +266,11 @@ func (t *NTAGTag) ReadNDEF() (*NDEFMessage, error) {
 		if runtime.GOOS == "windows" && t.isUARTTransport() {
 			fallbackReason = "FastRead failed (Windows UART has size limits to prevent PN532 firmware lockup)"
 		}
-		debugf("NTAG %s, clearing transport state before fallback: %v", fallbackReason, err)
+		Debugf("NTAG %s, clearing transport state before fallback: %v", fallbackReason, err)
 		if clearErr := t.device.ClearTransportState(); clearErr != nil {
-			debugf("NTAG transport state clearing failed: %v", clearErr)
+			Debugf("NTAG transport state clearing failed: %v", clearErr)
 		}
-		return t.readNDEFBlockByBlock()
+		return t.readNDEFBlockByBlock(ctx)
 	}
 
 	if len(data) > totalBytes {
@@ -271,8 +285,8 @@ type ndefHeader struct {
 	headerSize int
 }
 
-func (t *NTAGTag) readNDEFHeader() (*ndefHeader, error) {
-	block4, err := t.ReadBlock(ntagUserMemStart)
+func (t *NTAGTag) readNDEFHeader(ctx context.Context) (*ndefHeader, error) {
+	block4, err := t.ReadBlock(ctx, ntagUserMemStart)
 	if err != nil {
 		return nil, fmt.Errorf("%w (NDEF header): %w", ErrTagReadFailed, err)
 	}
@@ -305,7 +319,7 @@ func (t *NTAGTag) readNDEFHeader() (*ndefHeader, error) {
 	}
 
 	// Validate against tag capacity if we know the tag type
-	if err := t.validateNDEFLengthAgainstCapacity(header.ndefLength); err != nil {
+	if err := t.validateNDEFLengthAgainstCapacity(ctx, header.ndefLength); err != nil {
 		return nil, err
 	}
 
@@ -313,9 +327,9 @@ func (t *NTAGTag) readNDEFHeader() (*ndefHeader, error) {
 }
 
 // validateNDEFLengthAgainstCapacity checks if the NDEF length is reasonable for the tag type
-func (t *NTAGTag) validateNDEFLengthAgainstCapacity(ndefLength int) error {
+func (t *NTAGTag) validateNDEFLengthAgainstCapacity(ctx context.Context, ndefLength int) error {
 	// Ensure tag type detection has been attempted
-	_ = t.ensureTagTypeDetected() // Ignore error, use conservative bounds
+	_ = t.ensureTagTypeDetected(ctx) // Ignore error, use conservative bounds
 
 	var maxUserBytes int
 	switch t.tagType {
@@ -343,9 +357,9 @@ func (t *NTAGTag) validateNDEFLengthAgainstCapacity(ndefLength int) error {
 	return nil
 }
 
-func (t *NTAGTag) ensureTagTypeDetected() error {
+func (t *NTAGTag) ensureTagTypeDetected(ctx context.Context) error {
 	if t.tagType == NTAGTypeUnknown {
-		return t.DetectType()
+		return t.DetectType(ctx)
 	}
 	return nil
 }
@@ -358,7 +372,7 @@ func (t *NTAGTag) getMaxFastReadPages() uint8 {
 		// Bounds check to prevent integer overflow and ensure reasonable limits
 		switch {
 		case t.device.config.MaxFastReadPages > 255:
-			debugf("NTAG MaxFastReadPages %d exceeds uint8 limit, capping to 255", t.device.config.MaxFastReadPages)
+			Debugf("NTAG MaxFastReadPages %d exceeds uint8 limit, capping to 255", t.device.config.MaxFastReadPages)
 			return 255
 		default:
 			// #nosec G115 - bounds checked above
@@ -372,11 +386,11 @@ func (t *NTAGTag) getMaxFastReadPages() uint8 {
 		if t.isUARTTransport() {
 			// 16 pages = 64 bytes - safe limit that avoids PN532 firmware lockups on Windows UART
 			// Based on research showing InCommunicateThru becomes unreliable beyond 64 bytes
-			debugf("NTAG applying Windows UART FastRead limit: 16 pages (64 bytes) to prevent firmware lockup")
-			debugf("NTAG tip: set config.MaxFastReadPages to override this Windows-specific safety limit")
+			Debugf("NTAG applying Windows UART FastRead limit: 16 pages (64 bytes) to prevent firmware lockup")
+			Debugf("NTAG tip: set config.MaxFastReadPages to override this Windows-specific safety limit")
 			return 16
 		}
-		debugf("NTAG Windows detected but non-UART transport, using default FastRead limits")
+		Debugf("NTAG Windows detected but non-UART transport, using default FastRead limits")
 	}
 
 	// Default: no limit (use original behavior)
@@ -393,25 +407,29 @@ func (t *NTAGTag) isUARTTransport() bool {
 	return true
 }
 
-func (t *NTAGTag) readNDEFDataWithFastRead(_ *ndefHeader, totalBytes int) ([]byte, error) {
+func (t *NTAGTag) readNDEFDataWithFastRead(ctx context.Context, _ *ndefHeader, totalBytes int) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if t.fastReadSupported != nil && !*t.fastReadSupported {
-		debugf("NTAG FastRead disabled - using block-by-block fallback")
+		Debugf("NTAG FastRead disabled - using block-by-block fallback")
 		return nil, errors.New("fastread not supported")
 	}
 
-	debugf("NTAG attempting FastRead for NDEF data (%d bytes)", totalBytes)
+	Debugf("NTAG attempting FastRead for NDEF data (%d bytes)", totalBytes)
 	readRange := t.calculateReadRange(totalBytes)
 
 	maxPagesPerRead := t.getMaxFastReadPages()
 
 	if readRange.endPage-readRange.startPage+1 <= maxPagesPerRead {
-		debugf("NTAG using single FastRead for pages %d-%d", readRange.startPage, readRange.endPage)
-		return t.performSingleFastRead(readRange.startPage, readRange.endPage)
+		Debugf("NTAG using single FastRead for pages %d-%d", readRange.startPage, readRange.endPage)
+		return t.performSingleFastRead(ctx, readRange.startPage, readRange.endPage)
 	}
 
-	debugf("NTAG using multiple FastReads for pages %d-%d (max %d pages per read)",
+	Debugf("NTAG using multiple FastReads for pages %d-%d (max %d pages per read)",
 		readRange.startPage, readRange.endPage, maxPagesPerRead)
-	return t.performMultipleFastReads(readRange.startPage, readRange.endPage, maxPagesPerRead)
+	return t.performMultipleFastReads(ctx, readRange.startPage, readRange.endPage, maxPagesPerRead)
 }
 
 type readRange struct {
@@ -424,11 +442,11 @@ func (t *NTAGTag) calculateReadRange(totalBytes int) readRange {
 
 	// Validate totalBytes input
 	if totalBytes < 0 {
-		debugf("NTAG calculateReadRange: negative totalBytes %d, using 0", totalBytes)
+		Debugf("NTAG calculateReadRange: negative totalBytes %d, using 0", totalBytes)
 		totalBytes = 0
 	}
 	if totalBytes > 10000 { // Sanity check against unreasonable values
-		debugf("NTAG calculateReadRange: excessive totalBytes %d, capping to 10000", totalBytes)
+		Debugf("NTAG calculateReadRange: excessive totalBytes %d, capping to 10000", totalBytes)
 		totalBytes = 10000
 	}
 
@@ -440,13 +458,13 @@ func (t *NTAGTag) calculateReadRange(totalBytes int) readRange {
 
 	// Validate blocksNeeded against actual tag capacity
 	if blocksNeeded > maxBlocksForTag {
-		debugf("NTAG calculateReadRange: blocks needed %d exceeds tag capacity %d for %s, capping to tag capacity",
+		Debugf("NTAG calculateReadRange: blocks needed %d exceeds tag capacity %d for %s, capping to tag capacity",
 			blocksNeeded, maxBlocksForTag, t.getTagTypeName())
 		blocksNeeded = maxBlocksForTag
 	}
 
 	if blocksNeeded > 255 {
-		debugf("NTAG calculateReadRange: blocks needed %d exceeds uint8 limit, capping to 255", blocksNeeded)
+		Debugf("NTAG calculateReadRange: blocks needed %d exceeds uint8 limit, capping to 255", blocksNeeded)
 		blocksNeeded = 255
 	}
 	if blocksNeeded < 0 {
@@ -459,18 +477,18 @@ func (t *NTAGTag) calculateReadRange(totalBytes int) readRange {
 
 	// Final bounds check against user memory range
 	if endPage > userEnd {
-		debugf("NTAG calculateReadRange: endPage %d exceeds userEnd %d, adjusting", endPage, userEnd)
+		Debugf("NTAG calculateReadRange: endPage %d exceeds userEnd %d, adjusting", endPage, userEnd)
 		endPage = userEnd
 	}
 
-	debugf("NTAG calculateReadRange: totalBytes=%d, blocks=%d, range=%d-%d (%s)",
+	Debugf("NTAG calculateReadRange: totalBytes=%d, blocks=%d, range=%d-%d (%s)",
 		totalBytes, blocksNeeded, startPage, endPage, t.getTagTypeName())
 
 	return readRange{startPage: startPage, endPage: endPage}
 }
 
-func (t *NTAGTag) performSingleFastRead(startPage, endPage uint8) ([]byte, error) {
-	data, err := t.FastRead(startPage, endPage)
+func (t *NTAGTag) performSingleFastRead(ctx context.Context, startPage, endPage uint8) ([]byte, error) {
+	data, err := t.FastRead(ctx, startPage, endPage)
 	if err != nil {
 		if t.isFastReadNotSupportedError(err) {
 			t.markFastReadAsUnsupported()
@@ -481,17 +499,23 @@ func (t *NTAGTag) performSingleFastRead(startPage, endPage uint8) ([]byte, error
 	return data, nil
 }
 
-func (t *NTAGTag) performMultipleFastReads(startPage, endPage, maxPagesPerRead uint8) ([]byte, error) {
+func (t *NTAGTag) performMultipleFastReads(
+	ctx context.Context, startPage, endPage, maxPagesPerRead uint8,
+) ([]byte, error) {
 	data := make([]byte, 0, int(endPage-startPage+1)*ntagBlockSize)
 	currentPage := startPage
 
 	for currentPage <= endPage {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		readEnd := currentPage + maxPagesPerRead - 1
 		if readEnd > endPage {
 			readEnd = endPage
 		}
 
-		chunk, err := t.FastRead(currentPage, readEnd)
+		chunk, err := t.FastRead(ctx, currentPage, readEnd)
 		if err != nil {
 			if t.isFastReadNotSupportedError(err) {
 				t.markFastReadAsUnsupported()
@@ -512,23 +536,23 @@ func (*NTAGTag) isFastReadNotSupportedError(err error) bool {
 }
 
 func (t *NTAGTag) markFastReadAsUnsupported() {
-	debugf("NTAG marking FastRead as unsupported - will use block-by-block reads")
+	Debugf("NTAG marking FastRead as unsupported - will use block-by-block reads")
 	supported := false
 	t.fastReadSupported = &supported
 }
 
 // readNDEFBlockByBlock is the fallback method using block-by-block reads
-func (t *NTAGTag) readNDEFBlockByBlock() (*NDEFMessage, error) {
-	debugf("NTAG reading NDEF data using block-by-block method (FastRead unavailable)")
+func (t *NTAGTag) readNDEFBlockByBlock(ctx context.Context) (*NDEFMessage, error) {
+	Debugf("NTAG reading NDEF data using block-by-block method (FastRead unavailable)")
 
 	// Ensure tag type is detected for proper bounds
-	_ = t.ensureTagTypeDetected()
+	_ = t.ensureTagTypeDetected(ctx)
 
 	// Get the actual user memory range for this tag type
 	userStart, userEnd := t.GetUserMemoryRange()
 	maxBlocks := int(userEnd) + 1 // +1 to include userEnd block
 
-	debugf("NTAG block-by-block reading from block %d to %d (%s)", userStart, userEnd, t.getTagTypeName())
+	Debugf("NTAG block-by-block reading from block %d to %d (%s)", userStart, userEnd, t.getTagTypeName())
 
 	// Allocate buffer based on actual tag capacity
 	estimatedCapacity := (maxBlocks - int(userStart)) * ntagBlockSize
@@ -537,14 +561,18 @@ func (t *NTAGTag) readNDEFBlockByBlock() (*NDEFMessage, error) {
 	maxEmptyBlocks := 3
 
 	for i := int(userStart); i < maxBlocks; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		if i > 255 {
 			break // Prevent overflow - should not happen with valid NTAG tags
 		}
 
 		// Safe conversion: i is checked to be <= 255
-		blockData, err := t.readBlockWithRetry(uint8(i)) // #nosec G115
+		blockData, err := t.readBlockWithRetry(ctx, uint8(i)) // #nosec G115
 		if err != nil {
-			debugf("NTAG block-by-block read failed at block %d: %v", i, err)
+			Debugf("NTAG block-by-block read failed at block %d: %v", i, err)
 			break
 		}
 
@@ -552,7 +580,7 @@ func (t *NTAGTag) readNDEFBlockByBlock() (*NDEFMessage, error) {
 		if bytes.Equal(blockData, make([]byte, len(blockData))) {
 			emptyBlocks++
 			if emptyBlocks >= maxEmptyBlocks {
-				debugf("NTAG stopping block-by-block read after %d empty blocks", maxEmptyBlocks)
+				Debugf("NTAG stopping block-by-block read after %d empty blocks", maxEmptyBlocks)
 				break
 			}
 		} else {
@@ -563,19 +591,23 @@ func (t *NTAGTag) readNDEFBlockByBlock() (*NDEFMessage, error) {
 
 		// Check if we've found the NDEF end marker
 		if bytes.Contains(data, ndefEnd) {
-			debugf("NTAG found NDEF end marker, stopping block-by-block read")
+			Debugf("NTAG found NDEF end marker, stopping block-by-block read")
 			break
 		}
 	}
 
-	debugf("NTAG block-by-block read completed: %d bytes", len(data))
+	Debugf("NTAG block-by-block read completed: %d bytes", len(data))
 	return ParseNDEFMessage(data)
 }
 
-// WriteNDEF writes NDEF data to the NTAG tag
-func (t *NTAGTag) WriteNDEF(message *NDEFMessage) error {
+// WriteNDEF writes NDEF data to the NTAG tag with final verification
+func (t *NTAGTag) WriteNDEF(ctx context.Context, message *NDEFMessage) error {
 	if len(message.Records) == 0 {
 		return errors.New("no NDEF records to write")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	data, err := BuildNDEFMessageEx(message.Records)
@@ -583,49 +615,20 @@ func (t *NTAGTag) WriteNDEF(message *NDEFMessage) error {
 		return fmt.Errorf("failed to build NDEF message: %w", err)
 	}
 
-	userStart, userEnd, err := t.validateAndGetMemoryRange(data)
+	userStart, userEnd, err := t.validateAndGetMemoryRange(ctx, data)
 	if err != nil {
 		return err
 	}
 
-	return t.writeDataToBlocks(data, userStart, userEnd)
-}
-
-// WriteNDEFWithContext writes NDEF data to the NTAG tag with context support
-func (t *NTAGTag) WriteNDEFWithContext(ctx context.Context, message *NDEFMessage) error {
-	if len(message.Records) == 0 {
-		return errors.New("no NDEF records to write")
-	}
-
-	// Check context cancellation before starting
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-
-	data, err := BuildNDEFMessageEx(message.Records)
-	if err != nil {
-		return fmt.Errorf("failed to build NDEF message: %w", err)
-	}
-
-	// Check context cancellation after building message
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-
-	userStart, userEnd, err := t.validateAndGetMemoryRange(data)
-	if err != nil {
+	if err := t.writeDataToBlocks(ctx, data, userStart, userEnd); err != nil {
 		return err
 	}
 
-	// Check context cancellation before starting block writes
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-
-	return t.writeDataToBlocksWithContext(ctx, data, userStart, userEnd)
+	// Verify write by reading back and comparing
+	return t.verifyWrittenData(ctx, data, userStart)
 }
 
-func (t *NTAGTag) validateAndGetMemoryRange(data []byte) (userStart, userEnd uint8, err error) {
+func (t *NTAGTag) validateAndGetMemoryRange(ctx context.Context, data []byte) (userStart, userEnd uint8, err error) {
 	userStart, userEnd = t.GetUserMemoryRange()
 	maxBytes := int(userEnd-userStart+1) * ntagBlockSize
 
@@ -635,7 +638,7 @@ func (t *NTAGTag) validateAndGetMemoryRange(data []byte) (userStart, userEnd uin
 
 	// Try to detect tag type if not already known
 	if t.tagType == NTAGTypeUnknown {
-		if err := t.DetectType(); err == nil {
+		if err := t.DetectType(ctx); err == nil {
 			userStart, userEnd = t.GetUserMemoryRange()
 			maxBytes = int(userEnd-userStart+1) * ntagBlockSize
 		}
@@ -648,29 +651,11 @@ func (t *NTAGTag) validateAndGetMemoryRange(data []byte) (userStart, userEnd uin
 	return userStart, userEnd, nil
 }
 
-func (t *NTAGTag) writeDataToBlocks(data []byte, userStart, userEnd uint8) error {
+func (t *NTAGTag) writeDataToBlocks(ctx context.Context, data []byte, userStart, userEnd uint8) error {
 	block := userStart
 	for i := 0; i < len(data); i += ntagBlockSize {
-		if block > userEnd {
-			return errors.New("NDEF data exceeds tag memory capacity")
-		}
-
-		blockData := t.prepareBlockData(data, i)
-		if err := t.WriteBlock(block, blockData); err != nil {
-			return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
-		}
-		block++
-	}
-	return nil
-}
-
-// writeDataToBlocksWithContext writes data to NTAG blocks with context cancellation support
-func (t *NTAGTag) writeDataToBlocksWithContext(ctx context.Context, data []byte, userStart, userEnd uint8) error {
-	block := userStart
-	for i := 0; i < len(data); i += ntagBlockSize {
-		// Check for context cancellation before each block write
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
 		if block > userEnd {
@@ -678,7 +663,7 @@ func (t *NTAGTag) writeDataToBlocksWithContext(ctx context.Context, data []byte,
 		}
 
 		blockData := t.prepareBlockData(data, i)
-		if err := t.WriteBlock(block, blockData); err != nil {
+		if err := t.WriteBlock(ctx, block, blockData); err != nil {
 			return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 		}
 		block++
@@ -697,23 +682,73 @@ func (*NTAGTag) prepareBlockData(data []byte, startIndex int) []byte {
 	return data[startIndex:end]
 }
 
+// verifyWrittenData reads back written data and compares it to the original
+func (t *NTAGTag) verifyWrittenData(ctx context.Context, expectedData []byte, startBlock uint8) error {
+	numBlocks := (len(expectedData) + ntagBlockSize - 1) / ntagBlockSize
+
+	// Bounds check to prevent uint8 overflow
+	if numBlocks > 255-int(startBlock) {
+		return fmt.Errorf("too many blocks to verify: %d exceeds uint8 range", numBlocks)
+	}
+
+	for i := range numBlocks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		block := startBlock + uint8(i) //nolint:gosec // bounds checked above
+		readData, err := t.ReadBlock(ctx, block)
+		if err != nil {
+			return fmt.Errorf("verification read failed (block %d): %w", block, err)
+		}
+
+		startIdx := i * ntagBlockSize
+		expected := t.prepareBlockData(expectedData, startIdx)
+
+		if !bytes.Equal(readData[:len(expected)], expected) {
+			Debugf("Write verify fail block %d: want %X, got %X",
+				block, expected, readData[:len(expected)])
+			return fmt.Errorf("%w at block %d", ErrWriteVerificationFailed, block)
+		}
+	}
+
+	Debugf("NTAG write verification successful: %d blocks verified", numBlocks)
+	return nil
+}
+
 // FastRead performs a fast read operation on NTAG tags
 // It reads multiple blocks from startAddr to endAddr (inclusive)
-func (t *NTAGTag) FastRead(startAddr, endAddr uint8) ([]byte, error) {
+func (t *NTAGTag) FastRead(ctx context.Context, startAddr, endAddr uint8) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if startAddr > endAddr {
 		return nil, fmt.Errorf("invalid address range: start (%d) > end (%d)", startAddr, endAddr)
 	}
 
-	debugf("NTAG FastRead: reading pages %d-%d (%d pages)", startAddr, endAddr, endAddr-startAddr+1)
+	Debugf("NTAG FastRead: reading pages %d-%d (%d pages)", startAddr, endAddr, endAddr-startAddr+1)
 
 	// FAST_READ command format: 0x3A + start address + end address
 	cmd := []byte{ntagCmdFastRead, startAddr, endAddr}
 
 	// Use SendRawCommand for FastRead as some PN532 chips require it
 	// (SendDataExchange returns error 0x81 on some PN532 variants)
-	data, err := t.device.SendRawCommand(context.Background(), cmd)
+	data, err := t.device.SendRawCommand(ctx, cmd)
+
+	// Re-select target after SendRawCommand to restore PN532 internal state.
+	// SendRawCommand uses InCommunicateThru (0x42) which is a raw pass-through command
+	// that doesn't maintain the PN532's target selection state. Without re-selection,
+	// subsequent InDataExchange calls may fail with timeout error 01.
+	// See PN532 User Manual §7.3.9: "The host controller has to take care of the
+	// selection of the target it wants to reach (whereas when using the
+	// InDataExchange command, it is done automatically)."
+	if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
+		Debugf("NTAG FastRead: InSelect after raw command failed: %v", selectErr)
+	}
+
 	if err != nil {
-		debugf("NTAG FastRead failed: %v", err)
+		Debugf("NTAG FastRead failed: %v", err)
 		return nil, fmt.Errorf("FAST_READ failed: %w", err)
 	}
 
@@ -723,7 +758,7 @@ func (t *NTAGTag) FastRead(startAddr, endAddr uint8) ([]byte, error) {
 		return nil, fmt.Errorf("FAST_READ response too short: expected %d bytes, got %d", expectedBytes, len(data))
 	}
 
-	debugf("NTAG FastRead successful: read %d bytes", expectedBytes)
+	Debugf("NTAG FastRead successful: read %d bytes", expectedBytes)
 	return data[:expectedBytes], nil
 }
 
@@ -921,10 +956,14 @@ func (t *NTAGTag) GetTotalPages() uint8 {
 }
 
 // DetectType attempts to detect the NTAG variant using GET_VERSION command with fallback
-func (t *NTAGTag) DetectType() error {
+func (t *NTAGTag) DetectType(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// First verify this is an NTAG by reading the capability container (CC) at page 3
 	// NTAG tags should have a valid CC with NDEF magic number 0xE1 at byte 0
-	ccData, err := t.ReadBlock(ntagPageCC)
+	ccData, err := t.ReadBlock(ctx, ntagPageCC)
 	if err != nil {
 		return fmt.Errorf("%w (NTAG capability container): %w", ErrTagReadFailed, err)
 	}
@@ -945,14 +984,14 @@ func (t *NTAGTag) DetectType() error {
 	// See PN532 User Manual §7.3.9: "The host controller has to take care of the
 	// selection of the target it wants to reach (whereas when using the
 	// InDataExchange command, it is done automatically)."
-	if selectErr := t.device.InSelect(context.Background(), 0); selectErr != nil {
-		debugf("NTAG DetectType: InSelect after GetVersion failed: %v", selectErr)
+	if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
+		Debugf("NTAG DetectType: InSelect after GetVersion failed: %v", selectErr)
 	}
 
 	if err != nil {
 		// If GET_VERSION fails, we still know it's an NTAG from the CC check
 		// Use fallback detection method based on capability container
-		debugf("NTAG GET_VERSION failed, using CC-based detection fallback: %v", err)
+		Debugf("NTAG GET_VERSION failed, using CC-based detection fallback: %v", err)
 		t.tagType = t.detectTypeFromCapabilityContainer(ccData)
 		return nil // Don't return error if CC-based detection succeeded
 	}
@@ -962,7 +1001,7 @@ func (t *NTAGTag) DetectType() error {
 
 	if t.tagType == NTAGTypeUnknown {
 		// Even if storage size is unknown from GET_VERSION, try CC-based detection
-		debugf("NTAG GET_VERSION returned unknown type, trying CC-based detection fallback")
+		Debugf("NTAG GET_VERSION returned unknown type, trying CC-based detection fallback")
 		fallbackType := t.detectTypeFromCapabilityContainer(ccData)
 		if fallbackType != NTAGTypeUnknown {
 			t.tagType = fallbackType
@@ -993,25 +1032,25 @@ func (*NTAGTag) detectTypeFromCapabilityContainer(ccData []byte) NTAGType {
 
 	switch sizeField {
 	case 0x12:
-		debugf("NTAG detected as NTAG213 from CC size field: 0x%02X", sizeField)
+		Debugf("NTAG detected as NTAG213 from CC size field: 0x%02X", sizeField)
 		return NTAGType213
 	case 0x3E:
-		debugf("NTAG detected as NTAG215 from CC size field: 0x%02X", sizeField)
+		Debugf("NTAG detected as NTAG215 from CC size field: 0x%02X", sizeField)
 		return NTAGType215
 	case 0x6D:
-		debugf("NTAG detected as NTAG216 from CC size field: 0x%02X", sizeField)
+		Debugf("NTAG detected as NTAG216 from CC size field: 0x%02X", sizeField)
 		return NTAGType216
 	default:
 		// Unknown size field - try to make educated guess based on range
 		switch {
 		case sizeField <= 0x20:
-			debugf("NTAG unknown size 0x%02X, guessing NTAG213 (small)", sizeField)
+			Debugf("NTAG unknown size 0x%02X, guessing NTAG213 (small)", sizeField)
 			return NTAGType213
 		case sizeField <= 0x50:
-			debugf("NTAG unknown size 0x%02X, guessing NTAG215 (medium)", sizeField)
+			Debugf("NTAG unknown size 0x%02X, guessing NTAG215 (medium)", sizeField)
 			return NTAGType215
 		default:
-			debugf("NTAG unknown size 0x%02X, guessing NTAG216 (large)", sizeField)
+			Debugf("NTAG unknown size 0x%02X, guessing NTAG216 (large)", sizeField)
 			return NTAGType216
 		}
 	}
@@ -1032,11 +1071,11 @@ func (t *NTAGTag) canAccessPageSafely(page uint8) bool {
 
 // validateWriteBoundary validates that a write operation is within the actual memory bounds
 // This catches counterfeit tags that report larger size than actual memory
-func (t *NTAGTag) validateWriteBoundary(block uint8) error {
+func (t *NTAGTag) validateWriteBoundary(ctx context.Context, block uint8) error {
 	// Ensure tag type is detected first, but only if unknown
 	// This allows tests to manually set tag type without triggering re-detection
 	if t.tagType == NTAGTypeUnknown {
-		_ = t.DetectType() // Try to detect, ignore error
+		_ = t.DetectType(ctx) // Try to detect, ignore error
 	}
 
 	// Only validate for potential overwrite scenarios based on GET_VERSION response
@@ -1075,14 +1114,18 @@ func (t *NTAGTag) getTagTypeName() string {
 	}
 }
 
-func (t *NTAGTag) readBlockWithRetry(block uint8) ([]byte, error) {
+func (t *NTAGTag) readBlockWithRetry(ctx context.Context, block uint8) ([]byte, error) {
 	maxRetries := 3
 	for i := range maxRetries {
-		data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, block})
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, block})
 		if err != nil {
 			// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
 			if IsPN532AuthenticationError(err) {
-				return t.readBlockCommunicateThru(block)
+				return t.readBlockCommunicateThru(ctx, block)
 			}
 			if i < maxRetries-1 {
 				continue
@@ -1106,7 +1149,11 @@ func (t *NTAGTag) readBlockWithRetry(block uint8) ([]byte, error) {
 // SetPasswordProtection enables password protection on the tag
 // password must be exactly 4 bytes, pack must be exactly 2 bytes
 // auth0 defines from which page password protection starts (0x00 = disable, 0xFF = only config area)
-func (t *NTAGTag) SetPasswordProtection(password, pack []byte, auth0 uint8) error {
+func (t *NTAGTag) SetPasswordProtection(ctx context.Context, password, pack []byte, auth0 uint8) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if len(password) != 4 {
 		return fmt.Errorf("password must be 4 bytes, got %d", len(password))
 	}
@@ -1136,26 +1183,26 @@ func (t *NTAGTag) SetPasswordProtection(password, pack []byte, auth0 uint8) erro
 	}
 
 	// Write password
-	if err := t.WriteBlock(pwdPage, password); err != nil {
+	if err := t.WriteBlock(ctx, pwdPage, password); err != nil {
 		return fmt.Errorf("failed to set password: %w", err)
 	}
 
 	// Write PACK
 	packData := make([]byte, 4)
 	copy(packData, pack)
-	if err := t.WriteBlock(packPage, packData); err != nil {
+	if err := t.WriteBlock(ctx, packPage, packData); err != nil {
 		return fmt.Errorf("failed to set PACK: %w", err)
 	}
 
 	// Read current CFG0
-	cfg0, err := t.ReadBlock(cfg0Page)
+	cfg0, err := t.ReadBlock(ctx, cfg0Page)
 	if err != nil {
 		return fmt.Errorf("%w (CFG0): %w", ErrTagReadFailed, err)
 	}
 
 	// Update AUTH0 in CFG0 (byte 3)
 	cfg0[3] = auth0
-	if err := t.WriteBlock(cfg0Page, cfg0); err != nil {
+	if err := t.WriteBlock(ctx, cfg0Page, cfg0); err != nil {
 		return fmt.Errorf("failed to update AUTH0: %w", err)
 	}
 
@@ -1163,20 +1210,24 @@ func (t *NTAGTag) SetPasswordProtection(password, pack []byte, auth0 uint8) erro
 }
 
 // DisablePasswordProtection disables password protection by setting AUTH0 to 0xFF
-func (t *NTAGTag) DisablePasswordProtection() error {
-	return t.SetPasswordProtection([]byte{0xFF, 0xFF, 0xFF, 0xFF}, []byte{0x00, 0x00}, 0xFF)
+func (t *NTAGTag) DisablePasswordProtection(ctx context.Context) error {
+	return t.SetPasswordProtection(ctx, []byte{0xFF, 0xFF, 0xFF, 0xFF}, []byte{0x00, 0x00}, 0xFF)
 }
 
 // LockPage permanently locks a page from writing (irreversible!)
 // This uses the static lock bytes for pages 0-15 or dynamic lock bytes for higher pages
-func (t *NTAGTag) LockPage(page uint8) error {
+func (t *NTAGTag) LockPage(ctx context.Context, page uint8) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if page < 3 {
 		return errors.New("cannot lock system pages 0-2")
 	}
 
 	// For pages 3-15, use static lock bytes
 	if page <= 15 {
-		return t.lockStaticPage(page)
+		return t.lockStaticPage(ctx, page)
 	}
 
 	// For pages > 15, use dynamic lock bytes
@@ -1195,7 +1246,7 @@ func (t *NTAGTag) LockPage(page uint8) error {
 	}
 
 	// Read current dynamic lock bytes
-	dynLock, err := t.ReadBlock(dynLockPage)
+	dynLock, err := t.ReadBlock(ctx, dynLockPage)
 	if err != nil {
 		return fmt.Errorf("%w (dynamic lock bytes): %w", ErrTagReadFailed, err)
 	}
@@ -1208,7 +1259,7 @@ func (t *NTAGTag) LockPage(page uint8) error {
 	dynLock[0] |= 0x01
 
 	// Write back the dynamic lock bytes
-	if err := t.WriteBlock(dynLockPage, dynLock); err != nil {
+	if err := t.WriteBlock(ctx, dynLockPage, dynLock); err != nil {
 		return fmt.Errorf("%w (dynamic lock bytes): %w", ErrTagWriteFailed, err)
 	}
 
@@ -1216,9 +1267,9 @@ func (t *NTAGTag) LockPage(page uint8) error {
 }
 
 // lockStaticPage locks a page using static lock bytes (pages 3-15)
-func (t *NTAGTag) lockStaticPage(page uint8) error {
+func (t *NTAGTag) lockStaticPage(ctx context.Context, page uint8) error {
 	// Read current lock bytes
-	lockPage, err := t.ReadBlock(ntagPageStaticLock)
+	lockPage, err := t.ReadBlock(ctx, ntagPageStaticLock)
 	if err != nil {
 		return fmt.Errorf("%w (static lock bytes): %w", ErrTagReadFailed, err)
 	}
@@ -1228,7 +1279,7 @@ func (t *NTAGTag) lockStaticPage(page uint8) error {
 	lockPage[lockByte] |= (1 << lockBit)
 
 	// Write back the lock bytes
-	if err := t.WriteBlock(ntagPageStaticLock, lockPage); err != nil {
+	if err := t.WriteBlock(ctx, ntagPageStaticLock, lockPage); err != nil {
 		return fmt.Errorf("%w (static lock bytes): %w", ErrTagWriteFailed, err)
 	}
 	return nil
@@ -1277,7 +1328,11 @@ func (*NTAGTag) updateCFG1Bits(cfg1 []byte, config AccessControlConfig) {
 }
 
 // SetAccessControl configures the access control settings
-func (t *NTAGTag) SetAccessControl(config AccessControlConfig) error {
+func (t *NTAGTag) SetAccessControl(ctx context.Context, config AccessControlConfig) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if config.AuthFailureLimit > 7 {
 		return fmt.Errorf("authFailureLimit must be 0-7, got %d", config.AuthFailureLimit)
 	}
@@ -1288,13 +1343,13 @@ func (t *NTAGTag) SetAccessControl(config AccessControlConfig) error {
 	}
 
 	// Read current CFG0 (not used in this implementation, kept for future use)
-	_, err = t.ReadBlock(cfg0Page)
+	_, err = t.ReadBlock(ctx, cfg0Page)
 	if err != nil {
 		return fmt.Errorf("%w (CFG0): %w", ErrTagReadFailed, err)
 	}
 
 	// Read current CFG1
-	cfg1, err := t.ReadBlock(cfg1Page)
+	cfg1, err := t.ReadBlock(ctx, cfg1Page)
 	if err != nil {
 		return fmt.Errorf("%w (CFG1): %w", ErrTagReadFailed, err)
 	}
@@ -1303,7 +1358,7 @@ func (t *NTAGTag) SetAccessControl(config AccessControlConfig) error {
 	t.updateCFG1Bits(cfg1, config)
 
 	// Write back CFG1
-	if err := t.WriteBlock(cfg1Page, cfg1); err != nil {
+	if err := t.WriteBlock(ctx, cfg1Page, cfg1); err != nil {
 		return fmt.Errorf("%w (CFG1): %w", ErrTagWriteFailed, err)
 	}
 
@@ -1312,7 +1367,13 @@ func (t *NTAGTag) SetAccessControl(config AccessControlConfig) error {
 
 // readBlockCommunicateThru tries to read a block using InCommunicateThru instead of InDataExchange
 // This is used as a fallback for clone devices that have limited InDataExchange support
-func (t *NTAGTag) readBlockCommunicateThru(block uint8) ([]byte, error) {
+//
+//nolint:gocognit,revive // Retry logic with multiple fallback paths requires complexity
+func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Build NTAG read command
 	cmd := []byte{ntagCmdRead, block}
 
@@ -1323,9 +1384,17 @@ func (t *NTAGTag) readBlockCommunicateThru(block uint8) ([]byte, error) {
 	successAttempt := 0
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		debugf("NTAG InCommunicateThru attempt %d/%d for block %d", attempt, maxRetries, block)
-		data, err = t.device.SendRawCommand(context.Background(), cmd)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+
+		Debugf("NTAG InCommunicateThru attempt %d/%d for block %d", attempt, maxRetries, block)
+		data, err = t.device.SendRawCommand(ctx, cmd)
 		if err == nil {
+			// Re-select target after SendRawCommand to restore PN532 internal state
+			if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
+				Debugf("NTAG readBlockCommunicateThru: InSelect failed: %v", selectErr)
+			}
 			successAttempt = attempt
 			break
 		}
@@ -1334,15 +1403,15 @@ func (t *NTAGTag) readBlockCommunicateThru(block uint8) ([]byte, error) {
 		if strings.Contains(err.Error(), "PN532 didn't reply") ||
 			strings.Contains(err.Error(), "timeout") ||
 			strings.Contains(err.Error(), "InCommunicateThru error") {
-			debugf("NTAG InCommunicateThru timeout/error on attempt %d: %v", attempt, err)
+			Debugf("NTAG InCommunicateThru timeout/error on attempt %d: %v", attempt, err)
 			if attempt < maxRetries {
 				// Brief pause before retry to let clone device stabilize
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 			// On final attempt, try fallback to InDataExchange without target selection
-			debugf("NTAG InCommunicateThru failed all attempts, trying direct InDataExchange fallback")
-			return t.readBlockDirectFallback(block)
+			Debugf("NTAG InCommunicateThru failed all attempts, trying direct InDataExchange fallback")
+			return t.readBlockDirectFallback(ctx, block)
 		}
 
 		// For other errors, don't retry
@@ -1359,7 +1428,7 @@ func (t *NTAGTag) readBlockCommunicateThru(block uint8) ([]byte, error) {
 	}
 
 	if successAttempt > 0 {
-		debugf("NTAG InCommunicateThru succeeded on attempt %d", successAttempt)
+		Debugf("NTAG InCommunicateThru succeeded on attempt %d", successAttempt)
 	}
 	// Return only the requested block
 	return data[:ntagBlockSize], nil
@@ -1367,14 +1436,18 @@ func (t *NTAGTag) readBlockCommunicateThru(block uint8) ([]byte, error) {
 
 // readBlockDirectFallback attempts a direct InDataExchange without proper target selection
 // This is a last-resort fallback for clones that have both InSelect and InCommunicateThru issues
-func (t *NTAGTag) readBlockDirectFallback(block uint8) ([]byte, error) {
-	debugf("NTAG attempting direct InDataExchange fallback for block %d", block)
+func (t *NTAGTag) readBlockDirectFallback(ctx context.Context, block uint8) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	Debugf("NTAG attempting direct InDataExchange fallback for block %d", block)
 
 	// Try direct InDataExchange, ignoring the error 14 that originally triggered the fallback chain
-	data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, block})
+	data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, block})
 	if err != nil {
 		// If this also fails, the clone device simply doesn't support NTAG properly
-		debugf("NTAG direct InDataExchange fallback also failed: %v", err)
+		Debugf("NTAG direct InDataExchange fallback also failed: %v", err)
 		return nil, errors.New("NTAG read not supported by this clone device (error 14): " +
 			"this clone device has NTAG compatibility issues. Consider using a genuine PN532 device " +
 			"or different reader for NTAG cards. MIFARE cards should work fine")
@@ -1385,7 +1458,7 @@ func (t *NTAGTag) readBlockDirectFallback(block uint8) ([]byte, error) {
 		return nil, fmt.Errorf("invalid read response length: %d", len(data))
 	}
 
-	debugf("NTAG direct InDataExchange fallback succeeded for block %d", block)
+	Debugf("NTAG direct InDataExchange fallback succeeded for block %d", block)
 	// Return only the requested block
 	return data[:ntagBlockSize], nil
 }
@@ -1396,7 +1469,7 @@ func (t *NTAGTag) DebugInfo() string {
 }
 
 // WriteText writes a simple text record to the NTAG tag
-func (t *NTAGTag) WriteText(text string) error {
+func (t *NTAGTag) WriteText(ctx context.Context, text string) error {
 	message := &NDEFMessage{
 		Records: []NDEFRecord{
 			{
@@ -1406,5 +1479,5 @@ func (t *NTAGTag) WriteText(text string) error {
 		},
 	}
 
-	return t.WriteNDEF(message)
+	return t.WriteNDEF(ctx, message)
 }

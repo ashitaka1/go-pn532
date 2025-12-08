@@ -49,19 +49,19 @@ func (t *TagOperations) WriteBlocks(ctx context.Context, startBlock byte, data [
 }
 
 // WriteNDEF writes an NDEF message to the tag
-func (t *TagOperations) WriteNDEF(_ context.Context, msg *pn532.NDEFMessage) error {
+func (t *TagOperations) WriteNDEF(ctx context.Context, msg *pn532.NDEFMessage) error {
 	if t.tag == nil {
 		return ErrNoTag
 	}
 
 	switch t.tagType {
 	case pn532.TagTypeNTAG:
-		if err := t.ntagInstance.WriteNDEF(msg); err != nil {
+		if err := t.ntagInstance.WriteNDEF(ctx, msg); err != nil {
 			return fmt.Errorf("failed to write NDEF to NTAG: %w", err)
 		}
 		return nil
 	case pn532.TagTypeMIFARE:
-		if err := t.mifareInstance.WriteNDEF(msg); err != nil {
+		if err := t.mifareInstance.WriteNDEF(ctx, msg); err != nil {
 			return fmt.Errorf("failed to write NDEF to MIFARE: %w", err)
 		}
 		return nil
@@ -114,10 +114,8 @@ func (t *TagOperations) writeNTAGBlocks(_ context.Context, startBlock byte, data
 }
 
 // writeMIFAREBlocks writes blocks to MIFARE Classic with automatic authentication
-func (t *TagOperations) writeMIFAREBlocks(_ context.Context, startBlock byte, data []byte) error {
+func (t *TagOperations) writeMIFAREBlocks(ctx context.Context, startBlock byte, data []byte) error {
 	// Authentication is handled automatically by WriteBlockAuto
-
-	// Ensure key provider is set
 
 	// Validate we're not writing to restricted blocks
 	if startBlock == 0 {
@@ -146,7 +144,7 @@ func (t *TagOperations) writeMIFAREBlocks(_ context.Context, startBlock byte, da
 		copy(blockData, data[dataStart:dataEnd])
 
 		// WriteBlockAuto handles authentication automatically
-		err := t.mifareInstance.WriteBlockAuto(block, blockData)
+		err := t.mifareInstance.WriteBlockAuto(ctx, block, blockData)
 		if err != nil {
 			return fmt.Errorf("failed to write block %d: %w", block, err)
 		}
