@@ -590,20 +590,22 @@ func (d *Device) SendDataExchange(ctx context.Context, data []byte) ([]byte, err
 	// Check for error frame (TFI = 0x7F)
 	if len(res) >= 2 && res[0] == 0x7F {
 		errorCode := res[1]
-		return nil, NewPN532Error(errorCode, "InDataExchange", "")
+		return nil, NewPN532ErrorWithDetails(errorCode, "InDataExchange", len(data), targetNum)
 	}
 
 	if len(res) < 2 || res[0] != 0x41 {
 		return nil, errors.New("unexpected data exchange response")
 	}
 	if res[1] != 0x00 {
-		return nil, fmt.Errorf("data exchange error: %02x", res[1])
+		// Use enhanced error type for protocol errors with context
+		return nil, NewPN532ErrorWithDetails(res[1], "InDataExchange", len(data), targetNum)
 	}
 	return res[2:], nil
 }
 
 // SendRawCommand sends a raw command with context support
 func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error) {
+	targetNum := d.getCurrentTarget()
 	res, err := d.transport.SendCommandWithContext(ctx, cmdInCommunicateThru, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send communicate through command: %w", err)
@@ -612,14 +614,15 @@ func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error
 	// Check for error frame (TFI = 0x7F)
 	if len(res) >= 2 && res[0] == 0x7F {
 		errorCode := res[1]
-		return nil, NewPN532Error(errorCode, "InCommunicateThru", "")
+		return nil, NewPN532ErrorWithDetails(errorCode, "InCommunicateThru", len(data), targetNum)
 	}
 
 	if len(res) < 2 || res[0] != 0x43 {
 		return nil, errors.New("unexpected InCommunicateThru response")
 	}
 	if res[1] != 0x00 {
-		return nil, fmt.Errorf("InCommunicateThru error: %02x", res[1])
+		// Use enhanced error type for protocol errors with context
+		return nil, NewPN532ErrorWithDetails(res[1], "InCommunicateThru", len(data), targetNum)
 	}
 	return res[2:], nil
 }

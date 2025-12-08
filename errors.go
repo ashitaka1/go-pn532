@@ -98,18 +98,65 @@ func (e *TransportError) Unwrap() error {
 	return e.Err
 }
 
-// PN532Error wraps PN532 device errors with error code context
+// PN532Error wraps PN532 device errors with error code context.
+// This provides detailed information for debugging protocol-level failures.
 type PN532Error struct {
 	Command   string
 	Context   string
+	BytesSent int
 	ErrorCode byte
+	Target    byte
 }
 
 func (e *PN532Error) Error() string {
+	meaning := pn532ErrorCodeMeaning(e.ErrorCode)
+	base := fmt.Sprintf("%s error 0x%02X (%s)", e.Command, e.ErrorCode, meaning)
 	if e.Context != "" {
-		return fmt.Sprintf("PN532 error 0x%02X (%s): %s", e.ErrorCode, e.Command, e.Context)
+		base += ": " + e.Context
 	}
-	return fmt.Sprintf("PN532 error 0x%02X: %s", e.ErrorCode, e.Command)
+	if e.BytesSent > 0 {
+		base += fmt.Sprintf(" [sent %d bytes, target %d]", e.BytesSent, e.Target)
+	}
+	return base
+}
+
+// pn532ErrorCodeMeaning returns a human-readable meaning for PN532 error codes
+// Error codes are from the PN532 User Manual section 7.1
+func pn532ErrorCodeMeaning(code byte) string {
+	meanings := map[byte]string{
+		0x00: "success",
+		0x01: "timeout",
+		0x02: "CRC error",
+		0x03: "parity error",
+		0x04: "erroneous bit count during anti-collision",
+		0x05: "framing error during mifare operation",
+		0x06: "abnormal bit collision",
+		0x07: "communication buffer size insufficient",
+		0x09: "RF buffer overflow",
+		0x0A: "RF field not activated in time",
+		0x0B: "RF protocol error",
+		0x0D: "overheating",
+		0x0E: "internal buffer overflow",
+		0x10: "invalid parameter",
+		0x12: "DEP protocol not supported",
+		0x13: "dataformat does not match",
+		0x14: "authentication error",
+		0x23: "UID check byte is wrong",
+		0x25: "DEP invalid state",
+		0x26: "operation not allowed",
+		0x27: "wrong context for command",
+		0x29: "target released by initiator",
+		0x2A: "card ID mismatch",
+		0x2B: "card disappeared",
+		0x2C: "NFCID3 initiator/target mismatch",
+		0x2D: "over-current event",
+		0x2E: "NAD missing in DEP frame",
+		0x81: "command not supported",
+	}
+	if m, ok := meanings[code]; ok {
+		return m
+	}
+	return "unknown error"
 }
 
 // IsCommandNotSupported returns true if the error indicates the command is not supported
@@ -199,6 +246,17 @@ func NewPN532Error(errorCode byte, command, context string) *PN532Error {
 		ErrorCode: errorCode,
 		Command:   command,
 		Context:   context,
+	}
+}
+
+// NewPN532ErrorWithDetails creates a PN532 error with full debugging context.
+// Use this for protocol-level errors where knowing bytes sent and target helps debugging.
+func NewPN532ErrorWithDetails(errorCode byte, command string, bytesSent int, target byte) *PN532Error {
+	return &PN532Error{
+		ErrorCode: errorCode,
+		Command:   command,
+		BytesSent: bytesSent,
+		Target:    target,
 	}
 }
 
@@ -327,7 +385,7 @@ func (e *TraceableError) FormatTrace() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("[%s:%s] Wire trace (%d entries):\n", e.Transport, e.Port, len(e.Trace)))
+	_, _ = sb.WriteString(fmt.Sprintf("[%s:%s] Wire trace (%d entries):\n", e.Transport, e.Port, len(e.Trace)))
 
 	for _, entry := range e.Trace {
 		direction := ">"
@@ -336,9 +394,9 @@ func (e *TraceableError) FormatTrace() string {
 		}
 		hexData := formatHexBytes(entry.Data)
 		if entry.Note != "" {
-			sb.WriteString(fmt.Sprintf("  %s %s (%s)\n", direction, hexData, entry.Note))
+			_, _ = sb.WriteString(fmt.Sprintf("  %s %s (%s)\n", direction, hexData, entry.Note))
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s %s\n", direction, hexData))
+			_, _ = sb.WriteString(fmt.Sprintf("  %s %s\n", direction, hexData))
 		}
 	}
 

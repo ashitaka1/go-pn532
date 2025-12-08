@@ -351,28 +351,28 @@ func TestNewPN532Error(t *testing.T) {
 			errorCode:   0x01,
 			command:     "InDataExchange",
 			context:     "",
-			wantMessage: "PN532 error 0x01: InDataExchange",
+			wantMessage: "InDataExchange error 0x01 (timeout)",
 		},
 		{
 			name:        "authentication error with context",
 			errorCode:   0x14,
 			command:     "InDataExchange",
 			context:     "authentication failure",
-			wantMessage: "PN532 error 0x14 (InDataExchange): authentication failure",
+			wantMessage: "InDataExchange error 0x14 (authentication error): authentication failure",
 		},
 		{
 			name:        "command not supported",
 			errorCode:   0x81,
 			command:     "InCommunicateThru",
 			context:     "",
-			wantMessage: "PN532 error 0x81: InCommunicateThru",
+			wantMessage: "InCommunicateThru error 0x81 (command not supported)",
 		},
 		{
 			name:        "error with detailed context",
 			errorCode:   0x02,
 			command:     "InListPassiveTarget",
 			context:     "no targets found in field",
-			wantMessage: "PN532 error 0x02 (InListPassiveTarget): no targets found in field",
+			wantMessage: "InListPassiveTarget error 0x02 (CRC error): no targets found in field",
 		},
 	}
 
@@ -389,6 +389,75 @@ func TestNewPN532Error(t *testing.T) {
 			}
 			if err.Context != tt.context {
 				t.Errorf("Context = %q, want %q", err.Context, tt.context)
+			}
+			if err.Error() != tt.wantMessage {
+				t.Errorf("Error() = %q, want %q", err.Error(), tt.wantMessage)
+			}
+		})
+	}
+}
+
+//nolint:gocognit,revive // Test function with multiple field validations
+func TestNewPN532ErrorWithDetails(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		command     string
+		wantMessage string
+		bytesSent   int
+		errorCode   byte
+		target      byte
+	}{
+		{
+			name:        "timeout error with bytes sent and target",
+			errorCode:   0x01,
+			command:     "InDataExchange",
+			bytesSent:   16,
+			target:      1,
+			wantMessage: "InDataExchange error 0x01 (timeout) [sent 16 bytes, target 1]",
+		},
+		{
+			name:        "authentication error with protocol details",
+			errorCode:   0x14,
+			command:     "InCommunicateThru",
+			bytesSent:   32,
+			target:      2,
+			wantMessage: "InCommunicateThru error 0x14 (authentication error) [sent 32 bytes, target 2]",
+		},
+		{
+			name:        "CRC error with many bytes",
+			errorCode:   0x02,
+			command:     "InDataExchange",
+			bytesSent:   255,
+			target:      1,
+			wantMessage: "InDataExchange error 0x02 (CRC error) [sent 255 bytes, target 1]",
+		},
+		{
+			name:        "error with zero bytes sent (omits details)",
+			errorCode:   0x03,
+			command:     "InDataExchange",
+			bytesSent:   0,
+			target:      1,
+			wantMessage: "InDataExchange error 0x03 (parity error)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewPN532ErrorWithDetails(tt.errorCode, tt.command, tt.bytesSent, tt.target)
+
+			if err.ErrorCode != tt.errorCode {
+				t.Errorf("ErrorCode = 0x%02X, want 0x%02X", err.ErrorCode, tt.errorCode)
+			}
+			if err.Command != tt.command {
+				t.Errorf("Command = %q, want %q", err.Command, tt.command)
+			}
+			if err.BytesSent != tt.bytesSent {
+				t.Errorf("BytesSent = %d, want %d", err.BytesSent, tt.bytesSent)
+			}
+			if err.Target != tt.target {
+				t.Errorf("Target = %d, want %d", err.Target, tt.target)
 			}
 			if err.Error() != tt.wantMessage {
 				t.Errorf("Error() = %q, want %q", err.Error(), tt.wantMessage)

@@ -21,11 +21,15 @@
 package pn532
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -487,5 +491,170 @@ func TestRetryHelperFunctions(t *testing.T) {
 				require.Equal(t, tt.want, got)
 			})
 		}
+	})
+}
+
+// TestWriteNDEFWithRetry tests the write retry logic function
+//
+//nolint:revive,funlen // Function complexity and length are necessary to test comprehensive retry scenarios
+func TestWriteNDEFWithRetry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success on first attempt", func(t *testing.T) {
+		t.Parallel()
+
+		var attempts int32
+		writeFunc := func(_ context.Context) error {
+			atomic.AddInt32(&attempts, 1)
+			return nil
+		}
+
+		err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&attempts), "Should only attempt once on success")
+	})
+
+	t.Run("Retryable error then success", func(t *testing.T) {
+		t.Parallel()
+
+		var attempts int32
+		writeFunc := func(_ context.Context) error {
+			count := atomic.AddInt32(&attempts, 1)
+			if count < 3 {
+				return ErrTransportTimeout // Retryable
+			}
+			return nil // Success on 3rd attempt
+		}
+
+		err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
+		require.NoError(t, err)
+		assert.Equal(t, int32(3), atomic.LoadInt32(&attempts), "Should retry until success")
+	})
+
+	t.Run("Non-retryable error fails immediately", func(t *testing.T) {
+		t.Parallel()
+
+		var attempts int32
+		writeFunc := func(_ context.Context) error {
+			atomic.AddInt32(&attempts, 1)
+			return ErrDeviceNotFound // Not retryable
+		}
+
+		err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrDeviceNotFound)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&attempts), "Should not retry non-retryable errors")
+	})
+
+	t.Run("Retryable error exhausts all retries", func(t *testing.T) {
+		t.Parallel()
+
+		var attempts int32
+		writeFunc := func(_ context.Context) error {
+			atomic.AddInt32(&attempts, 1)
+			return ErrTransportTimeout // Always fail with retryable error
+		}
+
+		err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to write TEST NDEF data after 3 retries")
+		require.ErrorIs(t, err, ErrTransportTimeout)
+		assert.Equal(t, int32(3), atomic.LoadInt32(&attempts), "Should exhaust all retries")
+	})
+
+	t.Run("Context cancellation before first attempt", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		var attempts int32
+		writeFunc := func(_ context.Context) error {
+			atomic.AddInt32(&attempts, 1)
+			return nil
+		}
+
+		err := WriteNDEFWithRetry(ctx, writeFunc, 3, "TEST")
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, int32(0), atomic.LoadInt32(&attempts), "Should not attempt when context is already cancelled")
+	})
+
+	t.Run("Context cancellation during retry delay", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		var attempts int32
+		writeFunc := func(_ context.Context) error {
+			count := atomic.AddInt32(&attempts, 1)
+			if count == 1 {
+				// Cancel after first failure, during the retry delay
+				go func() {
+					time.Sleep(10 * time.Millisecond)
+					cancel()
+				}()
+				return ErrTransportTimeout // Trigger retry
+			}
+			return nil
+		}
+
+		start := time.Now()
+		err := WriteNDEFWithRetry(ctx, writeFunc, 3, "TEST")
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&attempts), "Should stop after context cancellation")
+		// Should cancel during the 100ms delay, not wait the full delay
+		assert.Less(t, elapsed, 80*time.Millisecond, "Should cancel quickly, not wait for full delay")
+	})
+
+	t.Run("Default max retries when zero provided", func(t *testing.T) {
+		t.Parallel()
+
+		var attempts int32
+		writeFunc := func(_ context.Context) error {
+			atomic.AddInt32(&attempts, 1)
+			return ErrTransportTimeout
+		}
+
+		err := WriteNDEFWithRetry(context.Background(), writeFunc, 0, "TEST")
+		require.Error(t, err)
+		assert.Equal(t, int32(3), atomic.LoadInt32(&attempts), "Should default to 3 retries when 0 provided")
+	})
+
+	t.Run("ACK error is retried", func(t *testing.T) {
+		t.Parallel()
+
+		var attempts int32
+		writeFunc := func(_ context.Context) error {
+			count := atomic.AddInt32(&attempts, 1)
+			if count < 2 {
+				return ErrNoACK // ACK error should be retryable
+			}
+			return nil
+		}
+
+		err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), atomic.LoadInt32(&attempts), "Should retry on ACK errors")
+	})
+
+	t.Run("PN532 timeout error is retried", func(t *testing.T) {
+		t.Parallel()
+
+		var attempts int32
+		writeFunc := func(_ context.Context) error {
+			count := atomic.AddInt32(&attempts, 1)
+			if count < 2 {
+				return NewPN532Error(0x01, "InDataExchange", "") // Timeout
+			}
+			return nil
+		}
+
+		err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), atomic.LoadInt32(&attempts), "Should retry on PN532 timeout")
 	})
 }
