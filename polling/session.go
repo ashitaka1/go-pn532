@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -33,20 +34,26 @@ import (
 
 // Session handles continuous card monitoring with state machine
 type Session struct {
-	device         *pn532.Device
-	config         *Config
-	OnCardDetected func(tag *pn532.DetectedTag) error
-	OnCardRemoved  func()
-	OnCardChanged  func(tag *pn532.DetectedTag) error
-	pauseChan      chan struct{}
-	resumeChan     chan struct{}
-	ackChan        chan struct{}
-	actor          *DeviceActor
-	state          CardState
-	stateMutex     syncutil.RWMutex
-	writeMutex     syncutil.Mutex
-	isPaused       atomic.Bool
-	closed         atomic.Bool // Prevents callbacks from executing after Close()
+	OnMultiTagRemoved  func()
+	config             *Config
+	OnCardDetected     func(tag *pn532.DetectedTag) error
+	OnCardRemoved      func()
+	OnCardChanged      func(tag *pn532.DetectedTag) error
+	pauseChan          chan struct{}
+	resumeChan         chan struct{}
+	ackChan            chan struct{}
+	OnMultiTagChanged  func(tags []*pn532.DetectedTag) error
+	actor              *DeviceActor
+	device             *pn532.Device
+	OnMultiTagDetected func(tags []*pn532.DetectedTag) error
+	lastUIDs           []string
+	state              CardState
+	stateMutex         syncutil.RWMutex
+	writeMutex         syncutil.Mutex
+	closed             atomic.Bool
+	isPaused           atomic.Bool
+	multiTagMode       bool
+	multiTagTested     bool
 }
 
 // NewSession creates a new card monitoring session
@@ -112,6 +119,19 @@ func (s *Session) Start(ctx context.Context) error {
 	return s.continuousPolling(ctx)
 }
 
+// StartMultiTag begins continuous monitoring for up to 2 cards simultaneously.
+// Uses OnMultiTagDetected/OnMultiTagRemoved/OnMultiTagChanged callbacks instead
+// of the single-tag callbacks.
+func (s *Session) StartMultiTag(ctx context.Context) error {
+	s.stateMutex.Lock()
+	s.multiTagMode = true
+	s.lastUIDs = nil
+	s.multiTagTested = false
+	s.stateMutex.Unlock()
+
+	return s.continuousPollingMultiTag(ctx)
+}
+
 // GetState returns the current card state
 func (s *Session) GetState() CardState {
 	s.stateMutex.RLock()
@@ -148,6 +168,27 @@ func (s *Session) SetOnCardChanged(callback func(*pn532.DetectedTag) error) {
 	s.stateMutex.Lock()
 	defer s.stateMutex.Unlock()
 	s.OnCardChanged = callback
+}
+
+// SetOnMultiTagDetected sets the callback for when tags are first detected in multi-tag mode.
+func (s *Session) SetOnMultiTagDetected(callback func([]*pn532.DetectedTag) error) {
+	s.stateMutex.Lock()
+	defer s.stateMutex.Unlock()
+	s.OnMultiTagDetected = callback
+}
+
+// SetOnMultiTagRemoved sets the callback for when all tags are removed in multi-tag mode.
+func (s *Session) SetOnMultiTagRemoved(callback func()) {
+	s.stateMutex.Lock()
+	defer s.stateMutex.Unlock()
+	s.OnMultiTagRemoved = callback
+}
+
+// SetOnMultiTagChanged sets the callback for when the set of tags changes in multi-tag mode.
+func (s *Session) SetOnMultiTagChanged(callback func([]*pn532.DetectedTag) error) {
+	s.stateMutex.Lock()
+	defer s.stateMutex.Unlock()
+	s.OnMultiTagChanged = callback
 }
 
 // Close cleans up the monitor resources
@@ -398,6 +439,11 @@ func (s *Session) WriteToTagWithRetry(
 
 // continuousPolling runs continuous InAutoPoll monitoring
 func (s *Session) continuousPolling(ctx context.Context) error {
+	return s.runPollingLoop(ctx, s.executeSinglePollingCycle)
+}
+
+// runPollingLoop is the generic polling loop used by both single and multi-tag modes
+func (s *Session) runPollingLoop(ctx context.Context, cycleFunc func(context.Context) error) error {
 	// Configure PN532 hardware polling retries to reduce host-side polling frequency
 	// This tells the PN532 to retry detection internally before returning to the host
 	if err := s.device.SetPollingRetries(s.config.HardwareTimeoutRetries); err != nil {
@@ -412,7 +458,7 @@ func (s *Session) continuousPolling(ctx context.Context) error {
 			return err
 		}
 
-		if err := s.executeSinglePollingCycle(ctx); err != nil {
+		if err := cycleFunc(ctx); err != nil {
 			return err
 		}
 
@@ -656,4 +702,170 @@ func (s *Session) testAndRecordCard(detectedTag *pn532.DetectedTag) {
 	s.state.TransitionToPostReadGrace(s.config.CardRemovalTimeout, func() {
 		s.handleCardRemoval()
 	})
+}
+
+// ============================================================================
+// Multi-Tag Polling Support
+// ============================================================================
+
+// continuousPollingMultiTag runs continuous polling for up to 2 tags
+func (s *Session) continuousPollingMultiTag(ctx context.Context) error {
+	return s.runPollingLoop(ctx, s.executeMultiTagPollingCycle)
+}
+
+// executeMultiTagPollingCycle performs one multi-tag polling cycle
+func (s *Session) executeMultiTagPollingCycle(ctx context.Context) error {
+	tags, err := s.performMultiTagPoll(ctx)
+	if err != nil {
+		if !errors.Is(err, ErrNoTagInPoll) {
+			s.handleMultiTagPollingError(err)
+		} else {
+			// No tags detected - check if we need to trigger removal
+			s.checkMultiTagRemoval()
+		}
+		return nil
+	}
+
+	if err := s.processMultiTagResults(tags); err != nil {
+		return fmt.Errorf("callback error during multi-tag polling: %w", err)
+	}
+	return nil
+}
+
+// performMultiTagPoll polls for up to 2 tags
+func (s *Session) performMultiTagPoll(ctx context.Context) ([]*pn532.DetectedTag, error) {
+	tags, err := s.device.InListPassiveTarget(ctx, 2, 0x00)
+	if err != nil {
+		return nil, fmt.Errorf("tag detection failed: %w", err)
+	}
+
+	if len(tags) == 0 {
+		return nil, ErrNoTagInPoll
+	}
+
+	return tags, nil
+}
+
+// processMultiTagResults processes detected tags and triggers appropriate callbacks
+func (s *Session) processMultiTagResults(tags []*pn532.DetectedTag) error {
+	// Extract and sort UIDs for comparison
+	currentUIDs := extractSortedUIDs(tags)
+
+	// Capture state and callbacks under lock
+	s.stateMutex.RLock()
+	previousUIDs := s.lastUIDs
+	wasPresent := len(previousUIDs) > 0
+	uidsChanged := !slices.Equal(previousUIDs, currentUIDs)
+	onDetected := s.OnMultiTagDetected
+	onChanged := s.OnMultiTagChanged
+	tested := s.multiTagTested
+	s.stateMutex.RUnlock()
+
+	// Determine which callback to call
+	if !wasPresent && onDetected != nil {
+		// First detection
+		if err := s.safeCallMultiTagCallback(onDetected, tags, "OnMultiTagDetected"); err != nil {
+			return err
+		}
+	} else if wasPresent && uidsChanged && onChanged != nil {
+		// Tag set changed
+		if err := s.safeCallMultiTagCallback(onChanged, tags, "OnMultiTagChanged"); err != nil {
+			return err
+		}
+	}
+
+	// Update state under lock
+	s.stateMutex.Lock()
+	s.lastUIDs = currentUIDs
+	s.state.Present = true
+
+	// Reset removal timer
+	shouldTransition := s.state.DetectionState != StateReading
+	if shouldTransition {
+		s.state.TransitionToDetected(s.config.CardRemovalTimeout, func() {
+			s.handleMultiTagRemoval()
+		})
+	}
+
+	// Mark as tested if this is a new tag set
+	if !wasPresent || uidsChanged || !tested {
+		s.multiTagTested = true
+		s.state.TransitionToReading()
+		s.state.TransitionToPostReadGrace(s.config.CardRemovalTimeout, func() {
+			s.handleMultiTagRemoval()
+		})
+	}
+	s.stateMutex.Unlock()
+
+	return nil
+}
+
+// checkMultiTagRemoval checks if tags were removed and triggers removal if needed
+func (*Session) checkMultiTagRemoval() {
+	// This is called when no tags are detected - the removal timer handles the actual removal
+	// Nothing to do here, just let the timer fire
+}
+
+// handleMultiTagPollingError handles errors from multi-tag polling
+func (s *Session) handleMultiTagPollingError(err error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	// For serious device errors, trigger immediate removal
+	s.handleMultiTagRemoval()
+}
+
+// handleMultiTagRemoval handles removal of all tags in multi-tag mode
+func (s *Session) handleMultiTagRemoval() {
+	if s.closed.Load() {
+		return
+	}
+
+	s.stateMutex.Lock()
+	wasPresent := len(s.lastUIDs) > 0
+	if wasPresent {
+		s.lastUIDs = nil
+		s.multiTagTested = false
+		s.state.TransitionToIdle()
+	}
+	onRemoved := s.OnMultiTagRemoved
+	s.stateMutex.Unlock()
+
+	if wasPresent && onRemoved != nil {
+		onRemoved()
+	}
+}
+
+// safeCallMultiTagCallback executes a multi-tag callback with panic recovery
+func (*Session) safeCallMultiTagCallback(
+	callback func([]*pn532.DetectedTag) error,
+	tags []*pn532.DetectedTag,
+	callbackName string,
+) error {
+	var callbackErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callbackErr = fmt.Errorf("%s callback panicked: %v", callbackName, r)
+			}
+		}()
+		callbackErr = callback(tags)
+	}()
+	if callbackErr != nil {
+		return fmt.Errorf("%s callback failed: %w", callbackName, callbackErr)
+	}
+	return nil
+}
+
+// extractSortedUIDs extracts UIDs from tags and returns them sorted
+func extractSortedUIDs(tags []*pn532.DetectedTag) []string {
+	uids := make([]string, len(tags))
+	for i, tag := range tags {
+		uids[i] = tag.UID
+	}
+	slices.Sort(uids)
+	return uids
 }

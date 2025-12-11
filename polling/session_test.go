@@ -1265,3 +1265,281 @@ func TestSession_HandleCardRemoval(t *testing.T) {
 		assert.False(t, session.state.Present, "Card should no longer be present")
 	})
 }
+
+// ============================================================================
+// Multi-Tag Polling Tests
+// ============================================================================
+
+func createTestDetectedTag2() *pn532.DetectedTag {
+	return &pn532.DetectedTag{
+		UID:        "04FEDCBA987654",
+		UIDBytes:   []byte{0x04, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54},
+		ATQ:        []byte{0x00, 0x04},
+		SAK:        0x08,
+		Type:       pn532.TagTypeNTAG,
+		DetectedAt: time.Now(),
+	}
+}
+
+func TestSession_MultiTagCallbackSetters(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+
+	t.Run("SetOnMultiTagDetected", func(t *testing.T) {
+		t.Parallel()
+		session := NewSession(device, nil)
+		var called atomic.Bool
+		session.SetOnMultiTagDetected(func(_ []*pn532.DetectedTag) error {
+			called.Store(true)
+			return nil
+		})
+		require.NotNil(t, session.OnMultiTagDetected)
+		require.NoError(t, session.OnMultiTagDetected([]*pn532.DetectedTag{createTestDetectedTag()}))
+		assert.True(t, called.Load())
+	})
+
+	t.Run("SetOnMultiTagRemoved", func(t *testing.T) {
+		t.Parallel()
+		session := NewSession(device, nil)
+		var called atomic.Bool
+		session.SetOnMultiTagRemoved(func() { called.Store(true) })
+		require.NotNil(t, session.OnMultiTagRemoved)
+		session.OnMultiTagRemoved()
+		assert.True(t, called.Load())
+	})
+
+	t.Run("SetOnMultiTagChanged", func(t *testing.T) {
+		t.Parallel()
+		session := NewSession(device, nil)
+		var called atomic.Bool
+		session.SetOnMultiTagChanged(func(_ []*pn532.DetectedTag) error {
+			called.Store(true)
+			return nil
+		})
+		require.NotNil(t, session.OnMultiTagChanged)
+		require.NoError(t, session.OnMultiTagChanged([]*pn532.DetectedTag{createTestDetectedTag()}))
+		assert.True(t, called.Load())
+	})
+}
+
+func TestSession_ExtractSortedUIDs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("EmptySlice", func(t *testing.T) {
+		t.Parallel()
+		uids := extractSortedUIDs([]*pn532.DetectedTag{})
+		assert.Empty(t, uids)
+	})
+
+	t.Run("SingleTag", func(t *testing.T) {
+		t.Parallel()
+		tags := []*pn532.DetectedTag{createTestDetectedTag()}
+		uids := extractSortedUIDs(tags)
+		assert.Equal(t, []string{"04123456789ABC"}, uids)
+	})
+
+	t.Run("TwoTags_AlreadySorted", func(t *testing.T) {
+		t.Parallel()
+		tags := []*pn532.DetectedTag{createTestDetectedTag(), createTestDetectedTag2()}
+		uids := extractSortedUIDs(tags)
+		// 04123456789ABC < 04FEDCBA987654, so order should be preserved
+		assert.Equal(t, []string{"04123456789ABC", "04FEDCBA987654"}, uids)
+	})
+
+	t.Run("TwoTags_Unsorted", func(t *testing.T) {
+		t.Parallel()
+		tags := []*pn532.DetectedTag{createTestDetectedTag2(), createTestDetectedTag()}
+		uids := extractSortedUIDs(tags)
+		// Should be sorted
+		assert.Equal(t, []string{"04123456789ABC", "04FEDCBA987654"}, uids)
+	})
+}
+
+func TestSession_ProcessMultiTagResults_FirstDetection(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	var detectedTags []*pn532.DetectedTag
+	session.SetOnMultiTagDetected(func(tags []*pn532.DetectedTag) error {
+		detectedTags = tags
+		return nil
+	})
+
+	tags := []*pn532.DetectedTag{createTestDetectedTag()}
+	require.NoError(t, session.processMultiTagResults(tags))
+	assert.Len(t, detectedTags, 1)
+	assert.Equal(t, "04123456789ABC", detectedTags[0].UID)
+}
+
+func TestSession_ProcessMultiTagResults_TwoTags(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	var detectedTags []*pn532.DetectedTag
+	session.SetOnMultiTagDetected(func(tags []*pn532.DetectedTag) error {
+		detectedTags = tags
+		return nil
+	})
+
+	tags := []*pn532.DetectedTag{createTestDetectedTag(), createTestDetectedTag2()}
+	require.NoError(t, session.processMultiTagResults(tags))
+	assert.Len(t, detectedTags, 2)
+}
+
+func TestSession_ProcessMultiTagResults_TagSetChanged(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Simulate tag already present
+	session.stateMutex.Lock()
+	session.lastUIDs = []string{"04123456789ABC"}
+	session.stateMutex.Unlock()
+
+	var changedTags []*pn532.DetectedTag
+	session.SetOnMultiTagChanged(func(tags []*pn532.DetectedTag) error {
+		changedTags = tags
+		return nil
+	})
+
+	// Now two tags present
+	tags := []*pn532.DetectedTag{createTestDetectedTag(), createTestDetectedTag2()}
+	require.NoError(t, session.processMultiTagResults(tags))
+	assert.Len(t, changedTags, 2)
+}
+
+func TestSession_ProcessMultiTagResults_SameTagSet(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Simulate same tags already present
+	session.stateMutex.Lock()
+	session.lastUIDs = []string{"04123456789ABC", "04FEDCBA987654"}
+	session.multiTagTested = true
+	session.stateMutex.Unlock()
+
+	var detectedCalled, changedCalled bool
+	session.SetOnMultiTagDetected(func(_ []*pn532.DetectedTag) error {
+		detectedCalled = true
+		return nil
+	})
+	session.SetOnMultiTagChanged(func(_ []*pn532.DetectedTag) error {
+		changedCalled = true
+		return nil
+	})
+
+	tags := []*pn532.DetectedTag{createTestDetectedTag(), createTestDetectedTag2()}
+	require.NoError(t, session.processMultiTagResults(tags))
+	assert.False(t, detectedCalled, "OnMultiTagDetected should not be called")
+	assert.False(t, changedCalled, "OnMultiTagChanged should not be called")
+}
+
+func TestSession_HandleMultiTagRemoval(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NoOpWhenSessionClosed", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+		session.closed.Store(true)
+
+		// Should return early without panic
+		session.handleMultiTagRemoval()
+	})
+
+	t.Run("NoOpWhenNoTagsPresent", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		var callbackCalled bool
+		session.SetOnMultiTagRemoved(func() {
+			callbackCalled = true
+		})
+
+		session.handleMultiTagRemoval()
+
+		assert.False(t, callbackCalled, "OnMultiTagRemoved should not be called")
+	})
+
+	t.Run("CallsCallback_WhenTagsWerePresent", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Simulate tags were present
+		session.stateMutex.Lock()
+		session.lastUIDs = []string{"04123456789ABC", "04FEDCBA987654"}
+		session.multiTagTested = true
+		session.stateMutex.Unlock()
+
+		var callbackCalled bool
+		session.SetOnMultiTagRemoved(func() {
+			callbackCalled = true
+		})
+
+		session.handleMultiTagRemoval()
+
+		assert.True(t, callbackCalled, "OnMultiTagRemoved should be called")
+		assert.Empty(t, session.lastUIDs, "lastUIDs should be cleared")
+		assert.False(t, session.multiTagTested, "multiTagTested should be reset")
+	})
+}
+
+func TestSession_PerformMultiTagPoll(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ReturnsNoTagError_WhenNoTags", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Set up InListPassiveTarget to return no tags
+		mockTransport.SetResponse(0x4A, []byte{0x4B, 0x00}) // No tags
+
+		tags, err := session.performMultiTagPoll(context.Background())
+
+		require.ErrorIs(t, err, ErrNoTagInPoll)
+		assert.Nil(t, tags)
+	})
+}
+
+func TestSession_SafeCallMultiTagCallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ReturnsError_WhenCallbackReturnsError", func(t *testing.T) {
+		t.Parallel()
+		session := &Session{}
+		expectedErr := errors.New("test error")
+		callback := func(_ []*pn532.DetectedTag) error { return expectedErr }
+
+		err := session.safeCallMultiTagCallback(callback, nil, "TestCallback")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TestCallback callback failed")
+	})
+
+	t.Run("ReturnsError_WhenCallbackPanics", func(t *testing.T) {
+		t.Parallel()
+		session := &Session{}
+		callback := func(_ []*pn532.DetectedTag) error { panic("test panic") }
+
+		err := session.safeCallMultiTagCallback(callback, nil, "TestCallback")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TestCallback callback panicked")
+	})
+
+	t.Run("ReturnsNil_WhenCallbackSucceeds", func(t *testing.T) {
+		t.Parallel()
+		session := &Session{}
+		callback := func(_ []*pn532.DetectedTag) error { return nil }
+
+		err := session.safeCallMultiTagCallback(callback, nil, "TestCallback")
+
+		require.NoError(t, err)
+	})
+}
