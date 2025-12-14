@@ -1208,18 +1208,15 @@ func TestSession_HandlePollingError(t *testing.T) {
 		session.handlePollingError(context.Canceled)
 	})
 
-	t.Run("HandlesOtherErrors_CallsInRelease", func(t *testing.T) {
+	t.Run("HandlesOtherErrors_TriggersCardRemoval", func(t *testing.T) {
 		t.Parallel()
-		device, mockTransport := createMockDeviceWithTransport(t)
+		device, _ := createMockDeviceWithTransport(t)
 		session := NewSession(device, nil)
 
-		// Set up InRelease response
-		mockTransport.SetResponse(0x52, []byte{0x53, 0x00}) // InRelease response
-
-		// Should call InRelease and handleCardRemoval
+		// Should trigger handleCardRemoval for transport errors
 		session.handlePollingError(errors.New("some transport error"))
 
-		// No panic means success - InRelease was called
+		// No panic means success
 	})
 }
 
@@ -1241,18 +1238,15 @@ func TestSession_HandleCardRemoval(t *testing.T) {
 		device, _ := createMockDeviceWithTransport(t)
 		session := NewSession(device, nil)
 
-		// Card not present, should not call InRelease or callback
+		// Card not present, should not call callback
 		session.handleCardRemoval()
 		assert.False(t, session.state.Present)
 	})
 
-	t.Run("CallsInReleaseAndCallback_WhenCardWasPresent", func(t *testing.T) {
+	t.Run("CallsCallback_WhenCardWasPresent", func(t *testing.T) {
 		t.Parallel()
-		device, mockTransport := createMockDeviceWithTransport(t)
+		device, _ := createMockDeviceWithTransport(t)
 		session := NewSession(device, nil)
-
-		// Set up InRelease response
-		mockTransport.SetResponse(0x52, []byte{0x53, 0x00}) // InRelease response
 
 		// Simulate card was present
 		session.stateMutex.Lock()

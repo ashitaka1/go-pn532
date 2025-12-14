@@ -511,9 +511,6 @@ func (s *Session) handlePollingError(err error) {
 		return
 	}
 
-	// Release targets to reset PN532 state machine after errors
-	_ = s.device.InRelease(context.Background(), 0)
-
 	// For serious device errors, trigger immediate card removal
 	// This handles cases like device disconnection
 	s.handleCardRemoval()
@@ -533,11 +530,6 @@ func (s *Session) handleCardRemoval() {
 	}
 	onRemoved := s.OnCardRemoved
 	s.stateMutex.Unlock()
-
-	// Release targets to reset PN532 state machine after card removal
-	if wasPresent {
-		_ = s.device.InRelease(context.Background(), 0)
-	}
 
 	// Call callback outside the lock to avoid potential deadlocks
 	if wasPresent && onRemoved != nil {
