@@ -1543,3 +1543,352 @@ func TestSession_SafeCallMultiTagCallback(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// ============================================================================
+// Regression Tests: Timer Race Condition Prevention
+// ============================================================================
+//
+// These tests verify that removal timers from previous polling cycles cannot
+// fire during callback execution. The bug scenario:
+//
+//   Poll N (t=0):     Tag detected → 100ms removal timer started
+//   Poll N+1 (t=50ms): Tag still present → callback starts (takes 150ms)
+//   t=100ms:          OLD TIMER FIRES during callback → FALSE REMOVAL
+//   t=200ms:          Callback completes, but card already marked removed
+//
+// The fix: Call TransitionToReading() BEFORE callbacks to stop any existing
+// timer, then set up a new timer AFTER callbacks complete.
+
+//nolint:funlen // comprehensive test coverage for critical race condition fix
+func TestSession_SingleTag_TimerCannotFireDuringCallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NoRemovalDuringSlowCallback", func(t *testing.T) {
+		t.Parallel()
+
+		device, _ := createMockDeviceWithTransport(t)
+		config := &Config{
+			PollInterval:       50 * time.Millisecond,
+			CardRemovalTimeout: 100 * time.Millisecond, // Short timeout to trigger race
+		}
+		session := NewSession(device, config)
+
+		var removalCalled atomic.Bool
+		var callbackStarted atomic.Bool
+		var callbackEnded atomic.Bool
+		callbackDone := make(chan struct{})
+
+		session.OnCardRemoved = func() {
+			removalCalled.Store(true)
+		}
+
+		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+			callbackStarted.Store(true)
+			// Simulate slow NDEF reading that takes longer than removal timeout
+			time.Sleep(150 * time.Millisecond)
+			callbackEnded.Store(true)
+			close(callbackDone)
+			return nil
+		}
+
+		tag := createTestDetectedTag()
+
+		// First poll: sets up removal timer
+		err := session.processPollingResults(tag)
+		require.NoError(t, err)
+
+		// Verify callback executed
+		<-callbackDone
+		assert.True(t, callbackStarted.Load(), "callback should have started")
+		assert.True(t, callbackEnded.Load(), "callback should have completed")
+
+		// Critical assertion: removal should NOT have been called during callback
+		assert.False(t, removalCalled.Load(),
+			"removal timer must not fire during callback execution")
+
+		// Verify card is still present
+		state := session.GetState()
+		assert.True(t, state.Present, "card should still be marked as present")
+	})
+
+	t.Run("NoRemovalDuringSlowCallback_ConsecutivePolls", func(t *testing.T) {
+		t.Parallel()
+
+		device, _ := createMockDeviceWithTransport(t)
+		config := &Config{
+			PollInterval:       50 * time.Millisecond,
+			CardRemovalTimeout: 100 * time.Millisecond,
+		}
+		session := NewSession(device, config)
+
+		var removalCount atomic.Int32
+		var callbackCount atomic.Int32
+
+		session.OnCardRemoved = func() {
+			removalCount.Add(1)
+		}
+
+		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+			callbackCount.Add(1)
+			// First detection takes a long time
+			time.Sleep(150 * time.Millisecond)
+			return nil
+		}
+
+		tag := createTestDetectedTag()
+
+		// First poll: detection with slow callback
+		err := session.processPollingResults(tag)
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), callbackCount.Load())
+
+		// Simulate continuous polling - tag present on every poll
+		// Each poll should reset the timer, preventing removal
+		for i := range 5 {
+			// Short delay simulating poll interval
+			time.Sleep(30 * time.Millisecond)
+			err = session.processPollingResults(tag)
+			require.NoError(t, err)
+			// No removal should occur while tag is being continuously detected
+			assert.Equal(t, int32(0), removalCount.Load(),
+				"removal should not occur during continuous polling (iteration %d)", i)
+		}
+
+		// Card still present
+		state := session.GetState()
+		assert.True(t, state.Present, "card should still be present after continuous polling")
+	})
+
+	t.Run("RemovalOccursAfterActualRemoval", func(t *testing.T) {
+		t.Parallel()
+
+		device, _ := createMockDeviceWithTransport(t)
+		config := &Config{
+			PollInterval:       50 * time.Millisecond,
+			CardRemovalTimeout: 50 * time.Millisecond, // Short timeout
+		}
+		session := NewSession(device, config)
+
+		removalCalled := make(chan struct{}, 1)
+		session.OnCardRemoved = func() {
+			select {
+			case removalCalled <- struct{}{}:
+			default:
+			}
+		}
+
+		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+			return nil
+		}
+
+		tag := createTestDetectedTag()
+
+		// Detect tag
+		err := session.processPollingResults(tag)
+		require.NoError(t, err)
+
+		// Wait for removal timer to fire (tag not re-detected)
+		select {
+		case <-removalCalled:
+			// Expected: removal should be called after timeout
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("removal should have been called after timeout")
+		}
+
+		// Verify card is no longer present
+		state := session.GetState()
+		assert.False(t, state.Present, "card should be marked as removed")
+	})
+}
+
+//nolint:funlen // comprehensive test coverage for critical race condition fix
+func TestSession_MultiTag_TimerCannotFireDuringCallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NoRemovalDuringSlowCallback", func(t *testing.T) {
+		t.Parallel()
+
+		device, _ := createMockDeviceWithTransport(t)
+		config := &Config{
+			PollInterval:       50 * time.Millisecond,
+			CardRemovalTimeout: 100 * time.Millisecond,
+		}
+		session := NewSession(device, config)
+		session.multiTagMode = true
+
+		var removalCalled atomic.Bool
+		var callbackStarted atomic.Bool
+		var callbackEnded atomic.Bool
+		callbackDone := make(chan struct{})
+
+		session.OnMultiTagRemoved = func() {
+			removalCalled.Store(true)
+		}
+
+		session.OnMultiTagDetected = func(_ []*pn532.DetectedTag) error {
+			callbackStarted.Store(true)
+			// Simulate slow operation that takes longer than removal timeout
+			time.Sleep(150 * time.Millisecond)
+			callbackEnded.Store(true)
+			close(callbackDone)
+			return nil
+		}
+
+		tags := []*pn532.DetectedTag{createTestDetectedTag()}
+
+		// First poll: sets up removal timer
+		err := session.processMultiTagResults(tags)
+		require.NoError(t, err)
+
+		// Verify callback executed
+		<-callbackDone
+		assert.True(t, callbackStarted.Load(), "callback should have started")
+		assert.True(t, callbackEnded.Load(), "callback should have completed")
+
+		// Critical assertion: removal should NOT have been called during callback
+		assert.False(t, removalCalled.Load(),
+			"removal timer must not fire during callback execution")
+
+		// Verify tags are still present
+		session.stateMutex.RLock()
+		present := len(session.lastUIDs) > 0
+		session.stateMutex.RUnlock()
+		assert.True(t, present, "tags should still be marked as present")
+	})
+
+	t.Run("NoRemovalDuringSlowCallback_TwoTags", func(t *testing.T) {
+		t.Parallel()
+
+		device, _ := createMockDeviceWithTransport(t)
+		config := &Config{
+			PollInterval:       50 * time.Millisecond,
+			CardRemovalTimeout: 100 * time.Millisecond,
+		}
+		session := NewSession(device, config)
+		session.multiTagMode = true
+
+		var removalCalled atomic.Bool
+		callbackDone := make(chan struct{})
+
+		session.OnMultiTagRemoved = func() {
+			removalCalled.Store(true)
+		}
+
+		session.OnMultiTagDetected = func(_ []*pn532.DetectedTag) error {
+			time.Sleep(150 * time.Millisecond)
+			close(callbackDone)
+			return nil
+		}
+
+		tag1 := createTestDetectedTag()
+		tag2 := &pn532.DetectedTag{
+			UID:        "04AABBCCDDEEFF",
+			UIDBytes:   []byte{0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF},
+			ATQ:        []byte{0x00, 0x04},
+			SAK:        0x08,
+			Type:       pn532.TagTypeNTAG,
+			DetectedAt: time.Now(),
+		}
+		tags := []*pn532.DetectedTag{tag1, tag2}
+
+		err := session.processMultiTagResults(tags)
+		require.NoError(t, err)
+
+		<-callbackDone
+
+		assert.False(t, removalCalled.Load(),
+			"removal timer must not fire during callback execution with 2 tags")
+	})
+
+	t.Run("NoRemovalDuringSlowCallback_ConsecutivePolls", func(t *testing.T) {
+		t.Parallel()
+
+		device, _ := createMockDeviceWithTransport(t)
+		config := &Config{
+			PollInterval:       50 * time.Millisecond,
+			CardRemovalTimeout: 100 * time.Millisecond,
+		}
+		session := NewSession(device, config)
+		session.multiTagMode = true
+
+		var removalCount atomic.Int32
+		var callbackCount atomic.Int32
+
+		session.OnMultiTagRemoved = func() {
+			removalCount.Add(1)
+		}
+
+		session.OnMultiTagDetected = func(_ []*pn532.DetectedTag) error {
+			callbackCount.Add(1)
+			time.Sleep(150 * time.Millisecond)
+			return nil
+		}
+
+		tags := []*pn532.DetectedTag{createTestDetectedTag()}
+
+		// First poll
+		err := session.processMultiTagResults(tags)
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), callbackCount.Load())
+
+		// Simulate continuous polling - tags present on every poll
+		// Each poll should reset the timer, preventing removal
+		for i := range 5 {
+			// Short delay simulating poll interval
+			time.Sleep(30 * time.Millisecond)
+			err = session.processMultiTagResults(tags)
+			require.NoError(t, err)
+			// No removal should occur while tags are being continuously detected
+			assert.Equal(t, int32(0), removalCount.Load(),
+				"removal should not occur during continuous polling (iteration %d)", i)
+		}
+
+		// Tags still present
+		session.stateMutex.RLock()
+		present := len(session.lastUIDs) > 0
+		session.stateMutex.RUnlock()
+		assert.True(t, present, "tags should still be present after continuous polling")
+	})
+
+	t.Run("RemovalOccursAfterActualRemoval", func(t *testing.T) {
+		t.Parallel()
+
+		device, _ := createMockDeviceWithTransport(t)
+		config := &Config{
+			PollInterval:       50 * time.Millisecond,
+			CardRemovalTimeout: 50 * time.Millisecond,
+		}
+		session := NewSession(device, config)
+		session.multiTagMode = true
+
+		removalCalled := make(chan struct{}, 1)
+		session.OnMultiTagRemoved = func() {
+			select {
+			case removalCalled <- struct{}{}:
+			default:
+			}
+		}
+
+		session.OnMultiTagDetected = func(_ []*pn532.DetectedTag) error {
+			return nil
+		}
+
+		tags := []*pn532.DetectedTag{createTestDetectedTag()}
+
+		err := session.processMultiTagResults(tags)
+		require.NoError(t, err)
+
+		// Wait for removal timer to fire
+		select {
+		case <-removalCalled:
+			// Expected
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("removal should have been called after timeout")
+		}
+
+		session.stateMutex.RLock()
+		present := len(session.lastUIDs) > 0
+		session.stateMutex.RUnlock()
+		assert.False(t, present, "tags should be marked as removed")
+	})
+}
