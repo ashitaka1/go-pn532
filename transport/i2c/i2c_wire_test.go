@@ -4,6 +4,7 @@ package i2c
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -499,10 +500,15 @@ var _ i2c.Bus = (*JitteryMockI2CBus)(nil)
 func newJitteryTestI2CTransport(sim *virt.VirtualPN532, config virt.JitterConfig) *Transport {
 	mockBus := NewJitteryMockI2CBus(sim, config)
 	dev := &i2c.Dev{Addr: pn532WriteAddr, Bus: mockBus}
+	// Use longer timeout on Windows due to less predictable goroutine scheduling
+	timeout := 500 * time.Millisecond
+	if runtime.GOOS == "windows" {
+		timeout = 1500 * time.Millisecond
+	}
 	return &Transport{
 		dev:     dev,
 		busName: "mock://jittery-i2c",
-		timeout: 500 * time.Millisecond,
+		timeout: timeout,
 	}
 }
 
