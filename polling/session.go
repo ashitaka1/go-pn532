@@ -570,6 +570,13 @@ func (s *Session) handleCardRemoval() {
 	}
 
 	s.stateMutex.Lock()
+	// If we're in reading state, a new poll cycle is actively processing - ignore stale timer
+	// This handles the edge case where timer.Stop() returned false (callback already spawned)
+	// but the callback runs after TransitionToReading() released the lock
+	if s.state.DetectionState == StateReading {
+		s.stateMutex.Unlock()
+		return
+	}
 	wasPresent := s.state.Present
 	if wasPresent {
 		s.state.TransitionToIdle()
@@ -590,24 +597,29 @@ func (s *Session) processPollingResults(detectedTag *pn532.DetectedTag) error {
 		return nil
 	}
 
-	// Card present - handle state transitions
+	// Stop any existing removal timer and transition to reading state BEFORE
+	// calling callbacks. This prevents the old timer from firing during callback
+	// execution (e.g., during NDEF reading which can take significant time).
+	s.stateMutex.Lock()
+	s.state.TransitionToReading()
+	s.stateMutex.Unlock()
+
+	// Card present - handle state transitions (calls OnCardDetected/OnCardChanged)
 	cardChanged, err := s.updateCardState(detectedTag)
 	if err != nil {
 		return err
 	}
 
-	// Transition to detected state with removal timer (unless we're currently reading)
-	s.stateMutex.Lock()
-	shouldTransition := s.state.DetectionState != StateReading
-	if shouldTransition {
+	// After callback completes, set up the appropriate timer for this card
+	if cardChanged || s.shouldTestCard(detectedTag.UID) {
+		s.testAndRecordCard(detectedTag)
+	} else {
+		// Card unchanged and already tested - just reset the removal timer
+		s.stateMutex.Lock()
 		s.state.TransitionToDetected(s.config.CardRemovalTimeout, func() {
 			s.handleCardRemoval()
 		})
-	}
-	s.stateMutex.Unlock()
-
-	if cardChanged || s.shouldTestCard(detectedTag.UID) {
-		s.testAndRecordCard(detectedTag)
+		s.stateMutex.Unlock()
 	}
 
 	return nil
@@ -751,6 +763,13 @@ func (s *Session) processMultiTagResults(tags []*pn532.DetectedTag) error {
 	// Extract and sort UIDs for comparison
 	currentUIDs := extractSortedUIDs(tags)
 
+	// Stop any existing removal timer and transition to reading state BEFORE
+	// calling callbacks. This prevents the old timer from firing during callback
+	// execution (e.g., during NDEF reading which can take significant time).
+	s.stateMutex.Lock()
+	s.state.TransitionToReading()
+	s.stateMutex.Unlock()
+
 	// Capture state and callbacks under lock
 	s.stateMutex.RLock()
 	previousUIDs := s.lastUIDs
@@ -761,7 +780,7 @@ func (s *Session) processMultiTagResults(tags []*pn532.DetectedTag) error {
 	tested := s.multiTagTested
 	s.stateMutex.RUnlock()
 
-	// Determine which callback to call
+	// Determine which callback to call (callbacks run with timer stopped)
 	if !wasPresent && onDetected != nil {
 		// First detection
 		if err := s.safeCallMultiTagCallback(onDetected, tags, "OnMultiTagDetected"); err != nil {
@@ -774,24 +793,20 @@ func (s *Session) processMultiTagResults(tags []*pn532.DetectedTag) error {
 		}
 	}
 
-	// Update state under lock
+	// After callbacks complete, update state and set up appropriate timer
 	s.stateMutex.Lock()
 	s.lastUIDs = currentUIDs
 	s.state.Present = true
 
-	// Reset removal timer
-	shouldTransition := s.state.DetectionState != StateReading
-	if shouldTransition {
-		s.state.TransitionToDetected(s.config.CardRemovalTimeout, func() {
-			s.handleMultiTagRemoval()
-		})
-	}
-
 	// Mark as tested if this is a new tag set
 	if !wasPresent || uidsChanged || !tested {
 		s.multiTagTested = true
-		s.state.TransitionToReading()
 		s.state.TransitionToPostReadGrace(s.config.CardRemovalTimeout, func() {
+			s.handleMultiTagRemoval()
+		})
+	} else {
+		// Tags unchanged and already tested - just reset the removal timer
+		s.state.TransitionToDetected(s.config.CardRemovalTimeout, func() {
 			s.handleMultiTagRemoval()
 		})
 	}
@@ -825,6 +840,11 @@ func (s *Session) handleMultiTagRemoval() {
 	}
 
 	s.stateMutex.Lock()
+	// If we're in reading state, a new poll cycle is actively processing - ignore stale timer
+	if s.state.DetectionState == StateReading {
+		s.stateMutex.Unlock()
+		return
+	}
 	wasPresent := len(s.lastUIDs) > 0
 	if wasPresent {
 		s.lastUIDs = nil
