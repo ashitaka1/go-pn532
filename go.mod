@@ -5,7 +5,6 @@ go 1.23.0
 toolchain go1.24.11
 
 require (
-	github.com/hsanjuan/go-ndef v0.0.1
 	github.com/sasha-s/go-deadlock v0.3.6
 	github.com/stretchr/testify v1.8.4
 	go.bug.st/serial v1.6.4

@@ -1,22 +1,17 @@
-// go-pn532
-// Copyright (c) 2025 The Zaparoo Project Contributors.
-// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright 2025 The Zaparoo Project Contributors.
+// SPDX-License-Identifier: Apache-2.0
 //
-// This file is part of go-pn532.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// go-pn532 is free software; you can redistribute it and/or
-// modify it under the terms of the GNU Lesser General Public
-// License as published by the Free Software Foundation; either
-// version 3 of the License, or (at your option) any later version.
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// go-pn532 is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-// Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public License
-// along with go-pn532; if not, write to the Free Software Foundation,
-// Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package pn532
 
@@ -26,7 +21,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hsanjuan/go-ndef"
+	"github.com/ZaparooProject/go-pn532/pkg/ndef"
 )
 
 // ParseNDEFMessage parses a complete NDEF message using go-ndef
@@ -42,10 +37,9 @@ func ParseNDEFMessage(data []byte) (*NDEFMessage, error) {
 		return nil, ErrNoNDEF
 	}
 
-	// Parse using go-ndef
+	// Parse NDEF message
 	msg := &ndef.Message{}
-	_, err := msg.Unmarshal(payload)
-	if err != nil {
+	if _, err := msg.Unmarshal(payload); err != nil {
 		return nil, fmt.Errorf("failed to parse NDEF message: %w", err)
 	}
 
@@ -139,25 +133,21 @@ func convertRecord(rec *ndef.Record) (*NDEFRecord, error) {
 
 // extractPayloadBytes extracts the payload bytes from an NDEF record
 func extractPayloadBytes(rec *ndef.Record) ([]byte, error) {
-	payload, err := rec.Payload()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get NDEF record payload: %w", err)
-	}
-	return payload.Marshal(), nil
+	return rec.Payload, nil
 }
 
 // populateRecordByTNF populates the NDEF record based on TNF type
 func populateRecordByTNF(rec *ndef.Record, result *NDEFRecord, payloadBytes []byte) (*NDEFRecord, error) {
-	switch rec.TNF() {
-	case ndef.NFCForumWellKnownType:
+	switch rec.TNF {
+	case ndef.TNFWellKnown:
 		return handleWellKnownType(rec, result, payloadBytes)
-	case ndef.MediaType:
+	case ndef.TNFMedia:
 		return handleMediaType(rec, result, payloadBytes)
-	case ndef.AbsoluteURI:
-		result.Type = NDEFRecordType("uri:" + rec.Type())
+	case ndef.TNFAbsoluteURI:
+		result.Type = NDEFRecordType("uri:" + rec.Type)
 		return result, nil
-	case ndef.NFCForumExternalType:
-		result.Type = NDEFRecordType("ext:" + rec.Type())
+	case ndef.TNFExternal:
+		result.Type = NDEFRecordType("ext:" + rec.Type)
 		return result, nil
 	default:
 		return nil, errors.New("unsupported TNF")
@@ -166,8 +156,7 @@ func populateRecordByTNF(rec *ndef.Record, result *NDEFRecord, payloadBytes []by
 
 // handleWellKnownType processes NFC Forum well-known types
 func handleWellKnownType(rec *ndef.Record, result *NDEFRecord, payloadBytes []byte) (*NDEFRecord, error) {
-	typeStr := rec.Type()
-	switch typeStr {
+	switch rec.Type {
 	case "T": // Text
 		result.Type = NDEFTypeText
 		if text, err := parseTextPayload(payloadBytes); err == nil {
@@ -181,15 +170,14 @@ func handleWellKnownType(rec *ndef.Record, result *NDEFRecord, payloadBytes []by
 	case "Sp": // Smart Poster
 		result.Type = NDEFTypeSmartPoster
 	default:
-		return nil, fmt.Errorf("unknown well-known type: %s", typeStr)
+		return nil, fmt.Errorf("unknown well-known type: %s", rec.Type)
 	}
 	return result, nil
 }
 
 // handleMediaType processes media type records
 func handleMediaType(rec *ndef.Record, result *NDEFRecord, payloadBytes []byte) (*NDEFRecord, error) {
-	typeStr := rec.Type()
-	switch typeStr {
+	switch rec.Type {
 	case "application/vnd.wfa.wsc":
 		result.Type = NDEFTypeWiFi
 		if wifi, err := parseWiFiCredential(payloadBytes); err == nil {
@@ -202,7 +190,7 @@ func handleMediaType(rec *ndef.Record, result *NDEFRecord, payloadBytes []byte) 
 		}
 	default:
 		// Generic media type
-		result.Type = NDEFRecordType("media:" + typeStr)
+		result.Type = NDEFRecordType("media:" + rec.Type)
 	}
 	return result, nil
 }
