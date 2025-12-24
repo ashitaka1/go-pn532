@@ -839,8 +839,8 @@ func (t *NTAGTag) GetVersion() (*NTAGVersion, error) {
 
 	// GET_VERSION response should be exactly 8 bytes
 	if len(data) < 8 {
-		// Invalid response length, use fallback
-		return t.getDefaultNTAGVersion(), nil
+		// Invalid response length, signal error to trigger CC-based fallback
+		return nil, fmt.Errorf("GET_VERSION response too short: got %d bytes, expected 8", len(data))
 	}
 
 	// Parse the 8-byte version response
@@ -857,8 +857,9 @@ func (t *NTAGTag) GetVersion() (*NTAGVersion, error) {
 
 	// Validate this looks like a genuine NTAG response
 	if version.VendorID != 0x04 || version.ProductType != 0x04 {
-		// Not a valid NTAG response, use fallback
-		return t.getDefaultNTAGVersion(), nil
+		// Not a valid NTAG response, signal error to trigger CC-based fallback
+		return nil, fmt.Errorf("invalid NTAG response: VendorID=0x%02X, ProductType=0x%02X",
+			version.VendorID, version.ProductType)
 	}
 
 	return version, nil

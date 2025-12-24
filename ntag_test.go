@@ -265,68 +265,76 @@ func TestNTAGTag_WriteBlock(t *testing.T) {
 	}
 }
 
-func TestNTAGTag_GetVersion(t *testing.T) {
-	t.Parallel()
+type getVersionTestCase struct {
+	setupMock     func(*MockTransport)
+	name          string
+	errorContains string
+	expectError   bool
+	expectVersion bool
+	expectedType  NTAGType
+}
 
-	tests := []struct {
-		setupMock     func(*MockTransport)
-		name          string
-		errorContains string
-		expectError   bool
-		expectedType  NTAGType
-	}{
+func getVersionTestCases() []getVersionTestCase {
+	return []getVersionTestCase{
 		{
 			name: "NTAG213_Version",
 			setupMock: func(mt *MockTransport) {
-				// Mock GET_VERSION response for NTAG213 using InCommunicateThru (0x42)
-				// Response format: 0x43 (InCommunicateThru response), 0x00 (success status), 8 bytes version data
+				// GET_VERSION response for NTAG213: 0x43 response, 0x00 success status, 8 bytes version
 				mt.SetResponse(0x42, []byte{0x43, 0x00, 0x00, 0x04, 0x04, 0x02, 0x01, 0x00, 0x0F, 0x03})
 			},
-			expectError:  false,
-			expectedType: NTAGType213,
+			expectVersion: true,
+			expectedType:  NTAGType213,
 		},
 		{
 			name: "NTAG215_Version",
 			setupMock: func(mt *MockTransport) {
 				mt.SetResponse(0x42, []byte{0x43, 0x00, 0x00, 0x04, 0x04, 0x02, 0x01, 0x00, 0x11, 0x03})
 			},
-			expectError:  false,
-			expectedType: NTAGType215,
+			expectVersion: true,
+			expectedType:  NTAGType215,
 		},
 		{
 			name: "NTAG216_Version",
 			setupMock: func(mt *MockTransport) {
 				mt.SetResponse(0x42, []byte{0x43, 0x00, 0x00, 0x04, 0x04, 0x02, 0x01, 0x00, 0x13, 0x03})
 			},
-			expectError:  false,
-			expectedType: NTAGType216,
+			expectVersion: true,
+			expectedType:  NTAGType216,
 		},
 		{
 			name: "Transport_Error_With_Fallback",
 			setupMock: func(mt *MockTransport) {
 				mt.SetError(0x42, errors.New("transport error"))
 			},
-			expectError:   true, // Error returned but with fallback version
+			expectError:   true,
 			errorContains: "transport error",
+			expectVersion: true,
 		},
 		{
-			name: "Invalid_Response_With_Fallback",
+			name: "Invalid_Response_Returns_Error",
 			setupMock: func(mt *MockTransport) {
-				mt.SetResponse(0x42, []byte{0x43, 0x00, 0x01, 0x02}) // Invalid short response
+				mt.SetResponse(0x42, []byte{0x43, 0x00, 0x01, 0x02})
 			},
-			expectError: false, // Should succeed with fallback version
+			expectError:   true,
+			errorContains: "too short",
+			expectVersion: false,
 		},
 		{
-			name: "Invalid_Vendor_With_Fallback",
+			name: "Invalid_Vendor_Returns_Error",
 			setupMock: func(mt *MockTransport) {
-				// Invalid vendor ID (not 0x04) - should use fallback
 				mt.SetResponse(0x42, []byte{0x43, 0x00, 0x00, 0xFF, 0x04, 0x02, 0x01, 0x00, 0x0F, 0x03})
 			},
-			expectError: false, // Should succeed with fallback version
+			expectError:   true,
+			errorContains: "invalid NTAG response",
+			expectVersion: false,
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestNTAGTag_GetVersion(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range getVersionTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -337,19 +345,20 @@ func TestNTAGTag_GetVersion(t *testing.T) {
 
 			version, err := tag.GetVersion()
 
-			if tt.expectError {
+			switch {
+			case tt.expectError:
 				require.Error(t, err)
-				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains)
-				}
-				// Even with error, should still return a fallback version
-				assert.NotNil(t, version)
-			} else {
-				// For successful cases or fallback cases
-				assert.NotNil(t, version)
-				if tt.expectedType != NTAGTypeUnknown {
-					assert.Equal(t, tt.expectedType, version.GetNTAGType())
-				}
+				assert.Contains(t, err.Error(), tt.errorContains)
+			default:
+				require.NoError(t, err)
+			}
+
+			switch {
+			case tt.expectVersion && tt.expectedType != NTAGTypeUnknown:
+				require.NotNil(t, version)
+				assert.Equal(t, tt.expectedType, version.GetNTAGType())
+			case tt.expectVersion:
+				require.NotNil(t, version)
 			}
 		})
 	}
