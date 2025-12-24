@@ -42,6 +42,7 @@ type config struct {
 	writeText  string
 	devicePath string
 	debug      bool
+	stressTest bool
 }
 
 // Package-level flag variables
@@ -49,12 +50,14 @@ var (
 	flagWriteText  string
 	flagDevicePath string
 	flagDebug      bool
+	flagStressTest bool
 )
 
 func init() {
 	flag.StringVar(&flagWriteText, "write", "", "Text to write to the next scanned tag (exits after write)")
 	flag.StringVar(&flagDevicePath, "device", "", "Device path (auto-detect if empty)")
 	flag.BoolVar(&flagDebug, "debug", false, "Enable debug output")
+	flag.BoolVar(&flagStressTest, "test", false, "Enable stress test mode for hardware validation")
 }
 
 func parseConfig() *config {
@@ -62,9 +65,15 @@ func parseConfig() *config {
 		writeText:  flagWriteText,
 		devicePath: flagDevicePath,
 		debug:      flagDebug,
+		stressTest: flagStressTest,
 	}
 
-	// Enable debug output if --debug flag is set
+	// Force debug mode when stress test is enabled
+	if cfg.stressTest {
+		cfg.debug = true
+	}
+
+	// Enable debug output if --debug flag is set (or stress test enabled)
 	if cfg.debug {
 		pn532.SetDebugEnabled(true)
 	}
@@ -460,7 +469,11 @@ func run(ctx context.Context, cfg *config) error {
 	// Run diagnostics on startup
 	runDiagnostics(ctx, device)
 
-	// Mode selection based on writeText parameter
+	// Mode selection based on flags
+	if cfg.stressTest {
+		// Stress test mode - multi-tag read/write validation
+		return runStressTestMode(ctx, device, cfg)
+	}
 	if cfg.writeText != "" {
 		// Write mode - write text to next scanned tag and exit
 		return runWriteMode(ctx, device, cfg)
