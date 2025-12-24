@@ -29,29 +29,47 @@ func TestNewNTAGTag(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		device   *Device
-		expected *NTAGTag
-		name     string
-		uid      []byte
-		sak      byte
+		device       *Device
+		expected     *NTAGTag
+		name         string
+		uid          []byte
+		sak          byte
+		targetNumber byte
 	}{
 		{
-			name:   "Valid_NTAG_Creation",
-			device: createMockDevice(t),
-			uid:    []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
-			sak:    0x00,
+			name:         "Valid_NTAG_Creation",
+			device:       createMockDevice(t),
+			uid:          []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			sak:          0x00,
+			targetNumber: 0,
 		},
 		{
-			name:   "Empty_UID",
-			device: createMockDevice(t),
-			uid:    []byte{},
-			sak:    0x00,
+			name:         "Empty_UID",
+			device:       createMockDevice(t),
+			uid:          []byte{},
+			sak:          0x00,
+			targetNumber: 0,
 		},
 		{
-			name:   "Nil_UID",
-			device: createMockDevice(t),
-			uid:    nil,
-			sak:    0x00,
+			name:         "Nil_UID",
+			device:       createMockDevice(t),
+			uid:          nil,
+			sak:          0x00,
+			targetNumber: 0,
+		},
+		{
+			name:         "With_TargetNumber_1",
+			device:       createMockDevice(t),
+			uid:          []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			sak:          0x00,
+			targetNumber: 1,
+		},
+		{
+			name:         "With_TargetNumber_2",
+			device:       createMockDevice(t),
+			uid:          []byte{0x04, 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56},
+			sak:          0x00,
+			targetNumber: 2,
 		},
 	}
 
@@ -59,13 +77,14 @@ func TestNewNTAGTag(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := NewNTAGTag(tt.device, tt.uid, tt.sak)
+			result := NewNTAGTag(tt.device, tt.uid, tt.sak, tt.targetNumber)
 
 			assert.NotNil(t, result)
 			assert.Equal(t, TagTypeNTAG, result.Type())
 			assert.Equal(t, tt.uid, result.UIDBytes())
 			assert.Equal(t, tt.device, result.device)
 			assert.Equal(t, tt.sak, result.sak)
+			assert.Equal(t, tt.targetNumber, result.TargetNumber())
 		})
 	}
 }
@@ -147,7 +166,7 @@ func TestNTAGTag_ReadBlock(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 			data, err := tag.ReadBlock(context.Background(), tt.block)
 
@@ -230,7 +249,7 @@ func TestNTAGTag_WriteBlock(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 			err := tag.WriteBlock(context.Background(), tt.block, tt.data)
 
@@ -314,7 +333,7 @@ func TestNTAGTag_GetVersion(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 			version, err := tag.GetVersion()
 
@@ -404,7 +423,7 @@ func TestNTAGTag_FastRead(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 			data, err := tag.FastRead(context.Background(), tt.startBlock, tt.endBlock)
 
@@ -438,7 +457,7 @@ func TestNTAG215LargeDataCrash(t *testing.T) {
 	t.Parallel()
 
 	device, mockTransport := createMockDeviceWithTransport(t)
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 	tag.tagType = NTAGType215 // Force NTAG215 type
 
 	// Create large NDEF message that approaches NTAG215's 504-byte user memory limit
@@ -486,7 +505,7 @@ func TestNTAG215BlockByBlockBufferOverflow(t *testing.T) {
 	t.Parallel()
 
 	device, mockTransport := createMockDeviceWithTransport(t)
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 	tag.tagType = NTAGType215
 
 	// Force FastRead to be disabled to trigger block-by-block fallback
@@ -579,7 +598,7 @@ func TestNTAGFastReadConfigLimits(t *testing.T) {
 			}
 
 			// Create NTAG tag
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 			// Test the getMaxFastReadPages method
 			maxPages := tag.getMaxFastReadPages()
@@ -604,7 +623,7 @@ func TestNTAGFastReadDefaultLimits(t *testing.T) {
 	}
 
 	// Create NTAG tag
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 	// Test the getMaxFastReadPages method
 	maxPages := tag.getMaxFastReadPages()
@@ -653,7 +672,7 @@ func TestNTAG_GetVersionDoesNotBreakSubsequentReads(t *testing.T) {
 		0x55, 0x00, // InSelect response header + success status
 	})
 
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00, 0)
 
 	// Call DetectType which internally calls GetVersion (via InCommunicateThru)
 	// and then InSelect to restore target selection state
@@ -693,7 +712,7 @@ func TestNTAG_GetVersionFailureStillAllowsReads(t *testing.T) {
 	// 3. InSelect (0x54) - should still be called after GetVersion failure
 	mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
 
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00, 0)
 
 	// DetectType should succeed using CC-based fallback
 	err := tag.DetectType(context.Background())
@@ -711,7 +730,7 @@ func TestNTAGTag_ContextCancellation(t *testing.T) {
 	t.Parallel()
 
 	device, _ := createMockDeviceWithTransport(t)
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 	// Create a cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -797,7 +816,7 @@ func TestNTAGTag_WriteNDEF(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 			tag.tagType = NTAGType215
 
 			err := tag.WriteNDEF(context.Background(), tt.message)
@@ -823,7 +842,7 @@ func TestNTAGTag_WriteText(t *testing.T) {
 	// Mock write error
 	mockTransport.SetError(0x40, errors.New("write failed"))
 
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 	tag.tagType = NTAGType215
 
 	err := tag.WriteText(context.Background(), "Hi")
@@ -835,7 +854,7 @@ func TestNTAGTag_FastRead_InvalidRange(t *testing.T) {
 	t.Parallel()
 
 	device, _ := createMockDeviceWithTransport(t)
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 	// Test invalid range (start > end)
 	_, err := tag.FastRead(context.Background(), 10, 5)
@@ -864,7 +883,7 @@ func TestNTAGTag_GetUserMemoryRange(t *testing.T) {
 			t.Parallel()
 
 			device, _ := createMockDeviceWithTransport(t)
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 			tag.tagType = tt.tagType
 
 			start, end := tag.GetUserMemoryRange()
@@ -894,7 +913,7 @@ func TestNTAGTag_GetConfigPage(t *testing.T) {
 			t.Parallel()
 
 			device, _ := createMockDeviceWithTransport(t)
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 			tag.tagType = tt.tagType
 
 			page := tag.GetConfigPage()
@@ -923,7 +942,7 @@ func TestNTAGTag_GetPasswordPage(t *testing.T) {
 			t.Parallel()
 
 			device, _ := createMockDeviceWithTransport(t)
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 			tag.tagType = tt.tagType
 
 			page := tag.GetPasswordPage()
@@ -952,7 +971,7 @@ func TestNTAGTag_GetTotalPages(t *testing.T) {
 			t.Parallel()
 
 			device, _ := createMockDeviceWithTransport(t)
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 			tag.tagType = tt.tagType
 
 			pages := tag.GetTotalPages()
@@ -1094,7 +1113,7 @@ func TestNTAGTag_PwdAuth(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 			pack, err := tag.PwdAuth(tt.password)
 
@@ -1183,7 +1202,7 @@ func TestNTAGTag_SetPasswordProtection(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 			tag.tagType = tt.tagType
 
 			err := tag.SetPasswordProtection(context.Background(), tt.password, tt.pack, tt.auth0)
@@ -1248,7 +1267,7 @@ func TestNTAGTag_LockPage(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 			tag.tagType = tt.tagType
 
 			err := tag.LockPage(context.Background(), tt.page)
@@ -1320,7 +1339,7 @@ func TestNTAGTag_SetAccessControl(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 			tag.tagType = tt.tagType
 
 			err := tag.SetAccessControl(context.Background(), tt.config)
@@ -1342,7 +1361,7 @@ func TestNTAGTag_detectTypeFromCapabilityContainer(t *testing.T) {
 	t.Parallel()
 
 	device, _ := createMockDeviceWithTransport(t)
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 
 	tests := []struct {
 		name         string
@@ -1376,7 +1395,7 @@ func TestNTAGTag_DebugInfo(t *testing.T) {
 	// Mock for ReadNDEFRobust called by DebugInfoWithNDEF
 	mockTransport.SetError(0x40, errors.New("read error"))
 
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 	tag.tagType = NTAGType215
 
 	info := tag.DebugInfo()
@@ -1389,7 +1408,7 @@ func TestNTAGTag_calculateReadRange(t *testing.T) {
 	t.Parallel()
 
 	device, _ := createMockDeviceWithTransport(t)
-	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
 	tag.tagType = NTAGType215
 
 	tests := []struct {

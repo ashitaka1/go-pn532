@@ -50,6 +50,10 @@ type Tag interface {
 	// UIDBytes returns the tag's unique identifier as bytes
 	UIDBytes() []byte
 
+	// TargetNumber returns the PN532 target number assigned during detection.
+	// This is used for InSelect when multiple tags are in the field.
+	TargetNumber() byte
+
 	// ReadBlock reads a block of data from the tag
 	ReadBlock(ctx context.Context, block uint8) ([]byte, error)
 
@@ -77,10 +81,11 @@ type Tag interface {
 
 // BaseTag provides common tag functionality
 type BaseTag struct {
-	device  *Device
-	tagType TagType
-	uid     []byte
-	sak     byte // SAK (Select Acknowledge) response for card type detection
+	device       *Device
+	tagType      TagType
+	uid          []byte
+	sak          byte // SAK (Select Acknowledge) response for card type detection
+	targetNumber byte // PN532 target number assigned during detection (for InSelect)
 }
 
 // Type returns the tag type
@@ -96,6 +101,12 @@ func (t *BaseTag) UID() string {
 // UIDBytes returns the tag's unique identifier as bytes
 func (t *BaseTag) UIDBytes() []byte {
 	return t.uid
+}
+
+// TargetNumber returns the PN532 target number assigned during detection.
+// This is used for InSelect when multiple tags are in the field.
+func (t *BaseTag) TargetNumber() byte {
+	return t.targetNumber
 }
 
 // IsMIFARE4K returns true if this is a MIFARE Classic 4K card

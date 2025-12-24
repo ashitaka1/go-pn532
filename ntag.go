@@ -148,13 +148,14 @@ type AccessControlConfig struct {
 }
 
 // NewNTAGTag creates a new NTAG tag instance
-func NewNTAGTag(device *Device, uid []byte, sak byte) *NTAGTag {
+func NewNTAGTag(device *Device, uid []byte, sak, targetNumber byte) *NTAGTag {
 	return &NTAGTag{
 		BaseTag: BaseTag{
-			tagType: TagTypeNTAG,
-			uid:     uid,
-			device:  device,
-			sak:     sak,
+			tagType:      TagTypeNTAG,
+			uid:          uid,
+			device:       device,
+			sak:          sak,
+			targetNumber: targetNumber,
 		},
 	}
 }
@@ -237,6 +238,14 @@ func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 		return nil, err
 	}
 
+	// Ensure target is selected before reading. This is critical after DetectType()
+	// which uses GetVersion() via InCommunicateThru - that command doesn't maintain
+	// target selection state. Without re-selection, InDataExchange fails with timeout
+	// error 0x01. See PN532 User Manual §7.3.9.
+	if err := t.device.InSelect(ctx, t.targetNumber); err != nil {
+		Debugf("NTAG ReadNDEF: InSelect(target=%d) failed, continuing anyway: %v", t.targetNumber, err)
+	}
+
 	header, err := t.readNDEFHeader(ctx)
 	if err != nil {
 		return nil, err
@@ -251,7 +260,11 @@ func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 			totalBytes, header.headerSize, header.ndefLength)
 	}
 
-	_ = t.ensureTagTypeDetected(ctx) // Ignore error, use conservative approach
+	// Try to detect tag type for optimal read strategy; failure is non-fatal
+	// as we fall back to conservative memory bounds
+	if detectErr := t.ensureTagTypeDetected(ctx); detectErr != nil {
+		Debugf("NTAG ReadNDEF: tag type detection failed (using conservative bounds): %v", detectErr)
+	}
 
 	data, err := t.readNDEFDataWithFastRead(ctx, header, totalBytes)
 	if err != nil {
@@ -323,8 +336,11 @@ func (t *NTAGTag) readNDEFHeader(ctx context.Context) (*ndefHeader, error) {
 
 // validateNDEFLengthAgainstCapacity checks if the NDEF length is reasonable for the tag type
 func (t *NTAGTag) validateNDEFLengthAgainstCapacity(ctx context.Context, ndefLength int) error {
-	// Ensure tag type detection has been attempted
-	_ = t.ensureTagTypeDetected(ctx) // Ignore error, use conservative bounds
+	// Ensure tag type detection has been attempted; failure is non-fatal
+	// as we fall back to conservative memory bounds for validation
+	if err := t.ensureTagTypeDetected(ctx); err != nil {
+		Debugf("NTAG validateNDEFLengthAgainstCapacity: tag type detection failed (using conservative bounds): %v", err)
+	}
 
 	var maxUserBytes int
 	switch t.tagType {
@@ -536,12 +552,57 @@ func (t *NTAGTag) markFastReadAsUnsupported() {
 	t.fastReadSupported = &supported
 }
 
+// blockByBlockReadState tracks state during block-by-block reading
+type blockByBlockReadState struct {
+	data           []byte
+	emptyBlocks    int
+	maxEmptyBlocks int
+}
+
+// processBlock reads and processes a single block, returning true if reading should stop
+func (t *NTAGTag) processBlock(ctx context.Context, blockNum int, state *blockByBlockReadState) (stop bool, err error) {
+	if blockNum > 255 {
+		return true, nil // Prevent overflow - should not happen with valid NTAG tags
+	}
+
+	// Safe conversion: blockNum is checked to be <= 255
+	blockData, err := t.readBlockWithRetry(ctx, uint8(blockNum)) // #nosec G115
+	if err != nil {
+		Debugf("NTAG block-by-block read failed at block %d: %v", blockNum, err)
+		return true, nil // Stop reading but don't propagate error
+	}
+
+	// Check if block is empty (all zeros)
+	if bytes.Equal(blockData, make([]byte, len(blockData))) {
+		state.emptyBlocks++
+		if state.emptyBlocks >= state.maxEmptyBlocks {
+			Debugf("NTAG stopping block-by-block read after %d empty blocks", state.maxEmptyBlocks)
+			return true, nil
+		}
+	} else {
+		state.emptyBlocks = 0
+	}
+
+	state.data = append(state.data, blockData...)
+
+	// Check if we've found the NDEF end marker
+	if bytes.Contains(state.data, ndefEnd) {
+		Debugf("NTAG found NDEF end marker, stopping block-by-block read")
+		return true, nil
+	}
+
+	return false, nil
+}
+
 // readNDEFBlockByBlock is the fallback method using block-by-block reads
 func (t *NTAGTag) readNDEFBlockByBlock(ctx context.Context) (*NDEFMessage, error) {
 	Debugf("NTAG reading NDEF data using block-by-block method (FastRead unavailable)")
 
-	// Ensure tag type is detected for proper bounds
-	_ = t.ensureTagTypeDetected(ctx)
+	// Ensure tag type is detected for proper bounds; failure is non-fatal
+	// as we fall back to conservative memory range
+	if detectErr := t.ensureTagTypeDetected(ctx); detectErr != nil {
+		Debugf("NTAG readNDEFBlockByBlock: tag type detection failed (using conservative bounds): %v", detectErr)
+	}
 
 	// Get the actual user memory range for this tag type
 	userStart, userEnd := t.GetUserMemoryRange()
@@ -551,48 +612,27 @@ func (t *NTAGTag) readNDEFBlockByBlock(ctx context.Context) (*NDEFMessage, error
 
 	// Allocate buffer based on actual tag capacity
 	estimatedCapacity := (maxBlocks - int(userStart)) * ntagBlockSize
-	data := make([]byte, 0, estimatedCapacity)
-	emptyBlocks := 0
-	maxEmptyBlocks := 3
+	state := &blockByBlockReadState{
+		data:           make([]byte, 0, estimatedCapacity),
+		maxEmptyBlocks: 3,
+	}
 
 	for i := int(userStart); i < maxBlocks; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
-		if i > 255 {
-			break // Prevent overflow - should not happen with valid NTAG tags
-		}
-
-		// Safe conversion: i is checked to be <= 255
-		blockData, err := t.readBlockWithRetry(ctx, uint8(i)) // #nosec G115
+		stop, err := t.processBlock(ctx, i, state)
 		if err != nil {
-			Debugf("NTAG block-by-block read failed at block %d: %v", i, err)
-			break
+			return nil, err
 		}
-
-		// Check if block is empty (all zeros)
-		if bytes.Equal(blockData, make([]byte, len(blockData))) {
-			emptyBlocks++
-			if emptyBlocks >= maxEmptyBlocks {
-				Debugf("NTAG stopping block-by-block read after %d empty blocks", maxEmptyBlocks)
-				break
-			}
-		} else {
-			emptyBlocks = 0
-		}
-
-		data = append(data, blockData...)
-
-		// Check if we've found the NDEF end marker
-		if bytes.Contains(data, ndefEnd) {
-			Debugf("NTAG found NDEF end marker, stopping block-by-block read")
+		if stop {
 			break
 		}
 	}
 
-	Debugf("NTAG block-by-block read completed: %d bytes", len(data))
-	return ParseNDEFMessage(data)
+	Debugf("NTAG block-by-block read completed: %d bytes", len(state.data))
+	return ParseNDEFMessage(state.data)
 }
 
 // WriteNDEF writes NDEF data to the NTAG tag with final verification
@@ -738,8 +778,8 @@ func (t *NTAGTag) FastRead(ctx context.Context, startAddr, endAddr uint8) ([]byt
 	// See PN532 User Manual §7.3.9: "The host controller has to take care of the
 	// selection of the target it wants to reach (whereas when using the
 	// InDataExchange command, it is done automatically)."
-	if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
-		Debugf("NTAG FastRead: InSelect after raw command failed: %v", selectErr)
+	if selectErr := t.device.InSelect(ctx, t.targetNumber); selectErr != nil {
+		Debugf("NTAG FastRead: InSelect(target=%d) after raw command failed: %v", t.targetNumber, selectErr)
 	}
 
 	if err != nil {
@@ -979,8 +1019,8 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// See PN532 User Manual §7.3.9: "The host controller has to take care of the
 	// selection of the target it wants to reach (whereas when using the
 	// InDataExchange command, it is done automatically)."
-	if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
-		Debugf("NTAG DetectType: InSelect after GetVersion failed: %v", selectErr)
+	if selectErr := t.device.InSelect(ctx, t.targetNumber); selectErr != nil {
+		Debugf("NTAG DetectType: InSelect(target=%d) after GetVersion failed: %v", t.targetNumber, selectErr)
 	}
 
 	if err != nil {
@@ -1387,8 +1427,8 @@ func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]
 		data, err = t.device.SendRawCommand(ctx, cmd)
 		if err == nil {
 			// Re-select target after SendRawCommand to restore PN532 internal state
-			if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
-				Debugf("NTAG readBlockCommunicateThru: InSelect failed: %v", selectErr)
+			if selectErr := t.device.InSelect(ctx, t.targetNumber); selectErr != nil {
+				Debugf("NTAG readBlockCommunicateThru: InSelect(target=%d) failed: %v", t.targetNumber, selectErr)
 			}
 			successAttempt = attempt
 			break

@@ -350,11 +350,11 @@ func (d *Device) CreateTag(detected *DetectedTag) (Tag, error) {
 	}
 	switch detected.Type {
 	case TagTypeNTAG:
-		return NewNTAGTag(d, detected.UIDBytes, detected.SAK), nil
+		return NewNTAGTag(d, detected.UIDBytes, detected.SAK, detected.TargetNumber), nil
 	case TagTypeMIFARE:
-		return NewMIFARETag(d, detected.UIDBytes, detected.SAK), nil
+		return NewMIFARETag(d, detected.UIDBytes, detected.SAK, detected.TargetNumber), nil
 	case TagTypeFeliCa:
-		return NewFeliCaTag(d, detected.TargetData)
+		return NewFeliCaTag(d, detected.TargetData, detected.TargetNumber)
 	case TagTypeUnknown:
 		return nil, ErrInvalidTag
 	case TagTypeAny:

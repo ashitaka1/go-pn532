@@ -161,6 +161,50 @@ func TestBaseTag_UIDBytes(t *testing.T) {
 	}
 }
 
+func TestBaseTag_TargetNumber(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		targetNumber byte
+		expected     byte
+	}{
+		{
+			name:         "Target_0_default",
+			targetNumber: 0,
+			expected:     0,
+		},
+		{
+			name:         "Target_1",
+			targetNumber: 1,
+			expected:     1,
+		},
+		{
+			name:         "Target_2",
+			targetNumber: 2,
+			expected:     2,
+		},
+		{
+			name:         "Max_target_255",
+			targetNumber: 255,
+			expected:     255,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tag := &BaseTag{
+				targetNumber: tt.targetNumber,
+			}
+
+			result := tag.TargetNumber()
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestBaseTag_IsMIFARE4K(t *testing.T) {
 	t.Parallel()
 

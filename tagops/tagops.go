@@ -89,7 +89,7 @@ func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 	}
 
 	// Try NTAG detection first
-	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK)
+	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK, t.tag.TargetNumber)
 	if err := ntag.DetectType(ctx); err == nil {
 		t.tagType = pn532.TagTypeNTAG
 		t.ntagInstance = ntag
@@ -98,7 +98,7 @@ func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 	}
 
 	// Try MIFARE detection
-	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
+	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK, t.tag.TargetNumber)
 	// Try to authenticate with common keys to verify it's MIFARE
 	if t.tryMIFAREAuth(ctx, mifare) {
 		t.tagType = pn532.TagTypeMIFARE

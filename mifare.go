@@ -185,14 +185,15 @@ type MIFARETag struct {
 }
 
 // NewMIFARETag creates a new MIFARE tag instance
-func NewMIFARETag(device *Device, uid []byte, sak byte) *MIFARETag {
+func NewMIFARETag(device *Device, uid []byte, sak, targetNumber byte) *MIFARETag {
 	tag := &MIFARETag{
 		ndefKey: newSecureKey(ndefKeyTemplate),
 		BaseTag: BaseTag{
-			tagType: TagTypeMIFARE,
-			uid:     uid,
-			device:  device,
-			sak:     sak,
+			tagType:      TagTypeMIFARE,
+			uid:          uid,
+			device:       device,
+			sak:          sak,
+			targetNumber: targetNumber,
 		},
 		lastAuthSector: -1, // Not authenticated initially
 		config:         DefaultMIFAREConfig(),
@@ -461,8 +462,8 @@ func (t *MIFARETag) writeBlockCommunicateThru(ctx context.Context, block uint8, 
 	_, err := t.device.SendRawCommand(ctx, cmd)
 
 	// Re-select target after SendRawCommand to restore PN532 internal state
-	if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
-		Debugf("MIFARE writeBlockCommunicateThru: InSelect failed: %v", selectErr)
+	if selectErr := t.device.InSelect(ctx, t.targetNumber); selectErr != nil {
+		Debugf("MIFARE writeBlockCommunicateThru: InSelect(target=%d) failed: %v", t.targetNumber, selectErr)
 	}
 
 	if err != nil {
@@ -485,8 +486,8 @@ func (t *MIFARETag) readBlockCommunicateThru(ctx context.Context, block uint8) (
 	data, err := t.device.SendRawCommand(ctx, cmd)
 
 	// Re-select target after SendRawCommand to restore PN532 internal state
-	if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
-		Debugf("MIFARE readBlockCommunicateThru: InSelect failed: %v", selectErr)
+	if selectErr := t.device.InSelect(ctx, t.targetNumber); selectErr != nil {
+		Debugf("MIFARE readBlockCommunicateThru: InSelect(target=%d) failed: %v", t.targetNumber, selectErr)
 	}
 
 	if err != nil {

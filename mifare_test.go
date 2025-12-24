@@ -26,7 +26,7 @@ import (
 
 // newTestMIFARETag creates a MIFARE tag with fast test configuration
 func newTestMIFARETag(device *Device, uid []byte, sak byte) *MIFARETag {
-	tag := NewMIFARETag(device, uid, sak)
+	tag := NewMIFARETag(device, uid, sak, 0)
 	tag.SetConfig(testMIFAREConfig()) // Apply fast test timing
 	return tag
 }
@@ -38,29 +38,47 @@ func TestNewMIFARETag(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		device   *Device
-		expected *MIFARETag
-		name     string
-		uid      []byte
-		sak      byte
+		device       *Device
+		expected     *MIFARETag
+		name         string
+		uid          []byte
+		sak          byte
+		targetNumber byte
 	}{
 		{
-			name:   "Valid_MIFARE_Creation",
-			device: createMockDevice(t),
-			uid:    []byte{0x04, 0x56, 0x78, 0x9A},
-			sak:    0x08, // MIFARE Classic 1K
+			name:         "Valid_MIFARE_Creation",
+			device:       createMockDevice(t),
+			uid:          []byte{0x04, 0x56, 0x78, 0x9A},
+			sak:          0x08, // MIFARE Classic 1K
+			targetNumber: 0,
 		},
 		{
-			name:   "MIFARE_4K_Creation",
-			device: createMockDevice(t),
-			uid:    []byte{0x04, 0x12, 0x34, 0x56},
-			sak:    0x18, // MIFARE Classic 4K
+			name:         "MIFARE_4K_Creation",
+			device:       createMockDevice(t),
+			uid:          []byte{0x04, 0x12, 0x34, 0x56},
+			sak:          0x18, // MIFARE Classic 4K
+			targetNumber: 0,
 		},
 		{
-			name:   "Empty_UID",
-			device: createMockDevice(t),
-			uid:    []byte{},
-			sak:    0x08,
+			name:         "Empty_UID",
+			device:       createMockDevice(t),
+			uid:          []byte{},
+			sak:          0x08,
+			targetNumber: 0,
+		},
+		{
+			name:         "With_TargetNumber_1",
+			device:       createMockDevice(t),
+			uid:          []byte{0x04, 0x56, 0x78, 0x9A},
+			sak:          0x08,
+			targetNumber: 1,
+		},
+		{
+			name:         "With_TargetNumber_2",
+			device:       createMockDevice(t),
+			uid:          []byte{0x04, 0xAB, 0xCD, 0xEF},
+			sak:          0x18,
+			targetNumber: 2,
 		},
 	}
 
@@ -68,13 +86,14 @@ func TestNewMIFARETag(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := NewMIFARETag(tt.device, tt.uid, tt.sak)
+			result := NewMIFARETag(tt.device, tt.uid, tt.sak, tt.targetNumber)
 
 			assert.NotNil(t, result)
 			assert.Equal(t, TagTypeMIFARE, result.Type())
 			assert.Equal(t, tt.uid, result.UIDBytes())
 			assert.Equal(t, tt.device, result.device)
 			assert.Equal(t, tt.sak, result.sak)
+			assert.Equal(t, tt.targetNumber, result.TargetNumber())
 			assert.Equal(t, -1, result.lastAuthSector) // Should start unauthenticated
 		})
 	}

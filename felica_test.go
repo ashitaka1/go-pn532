@@ -89,22 +89,22 @@ func buildFeliCaRequestServiceResponse(idm []byte, nodeCount int) []byte {
 	return append([]byte{0x41, 0x00}, feliCaResponse...)
 }
 
-func TestNewFeliCaTag(t *testing.T) {
-	t.Parallel()
+type newFeliCaTagTestCase struct {
+	name            string
+	errorContains   string
+	targetData      []byte
+	expectedIDm     []byte
+	expectedPMm     []byte
+	expectedSysCode uint16
+	targetNumber    byte
+	expectError     bool
+}
 
-	tests := []struct {
-		name            string
-		errorContains   string
-		targetData      []byte
-		expectedIDm     []byte
-		expectedPMm     []byte
-		expectedSysCode uint16
-		expectError     bool
-	}{
+func getNewFeliCaTagTestCases() []newFeliCaTagTestCase {
+	return []newFeliCaTagTestCase{
 		{
 			name:            "valid_polling_response_with_system_code",
 			targetData:      buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC),
-			expectError:     false,
 			expectedIDm:     testFeliCaIDm,
 			expectedPMm:     testFeliCaPMm,
 			expectedSysCode: 0x12FC,
@@ -112,7 +112,6 @@ func TestNewFeliCaTag(t *testing.T) {
 		{
 			name:            "valid_polling_response_minimal",
 			targetData:      buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0xFFFF)[:18],
-			expectError:     false,
 			expectedIDm:     testFeliCaIDm,
 			expectedPMm:     testFeliCaPMm,
 			expectedSysCode: 0xFFFF, // Default wildcard when no system code in response
@@ -129,15 +128,34 @@ func TestNewFeliCaTag(t *testing.T) {
 			expectError:   true,
 			errorContains: "too short",
 		},
+		{
+			name:            "with_target_number_1",
+			targetData:      buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x88B4),
+			expectedIDm:     testFeliCaIDm,
+			expectedPMm:     testFeliCaPMm,
+			expectedSysCode: 0x88B4,
+			targetNumber:    1,
+		},
+		{
+			name:            "with_target_number_2",
+			targetData:      buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x88B4),
+			expectedIDm:     testFeliCaIDm,
+			expectedPMm:     testFeliCaPMm,
+			expectedSysCode: 0x88B4,
+			targetNumber:    2,
+		},
 	}
+}
 
-	for _, tt := range tests {
+func TestNewFeliCaTag(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range getNewFeliCaTagTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
 			device := createMockDevice(t)
-
-			tag, err := NewFeliCaTag(device, tt.targetData)
+			tag, err := NewFeliCaTag(device, tt.targetData, tt.targetNumber)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -145,16 +163,17 @@ func TestNewFeliCaTag(t *testing.T) {
 					assert.Contains(t, err.Error(), tt.errorContains)
 				}
 				assert.Nil(t, tag)
-			} else {
-				require.NoError(t, err)
-				require.NotNil(t, tag)
-
-				assert.Equal(t, TagTypeFeliCa, tag.Type())
-				assert.Equal(t, tt.expectedIDm, tag.GetIDm())
-				assert.Equal(t, tt.expectedPMm, tag.GetPMm())
-				assert.Equal(t, tt.expectedSysCode, tag.GetSystemCode())
-				assert.Equal(t, tt.expectedIDm, tag.UIDBytes()) // IDm is used as UID
+				return
 			}
+
+			require.NoError(t, err)
+			require.NotNil(t, tag)
+			assert.Equal(t, TagTypeFeliCa, tag.Type())
+			assert.Equal(t, tt.expectedIDm, tag.GetIDm())
+			assert.Equal(t, tt.expectedPMm, tag.GetPMm())
+			assert.Equal(t, tt.expectedSysCode, tag.GetSystemCode())
+			assert.Equal(t, tt.expectedIDm, tag.UIDBytes()) // IDm is used as UID
+			assert.Equal(t, tt.targetNumber, tag.TargetNumber())
 		})
 	}
 }
@@ -165,7 +184,7 @@ func TestFeliCaTag_Accessors(t *testing.T) {
 	device := createMockDevice(t)
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
 
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	t.Run("GetIDm", func(t *testing.T) {
@@ -181,7 +200,7 @@ func TestFeliCaTag_Accessors(t *testing.T) {
 	t.Run("GetSetSystemCode", func(t *testing.T) {
 		t.Parallel()
 		// Create a separate tag for this test to avoid race conditions
-		tag2, _ := NewFeliCaTag(device, targetData)
+		tag2, _ := NewFeliCaTag(device, targetData, 0)
 
 		assert.Equal(t, uint16(0x12FC), tag2.GetSystemCode())
 		tag2.SetSystemCode(0xFFFF)
@@ -191,7 +210,7 @@ func TestFeliCaTag_Accessors(t *testing.T) {
 	t.Run("GetSetServiceCode", func(t *testing.T) {
 		t.Parallel()
 		// Create a separate tag for this test to avoid race conditions
-		tag3, _ := NewFeliCaTag(device, targetData)
+		tag3, _ := NewFeliCaTag(device, targetData, 0)
 
 		assert.Equal(t, uint16(feliCaServiceCodeNDEFRead), tag3.GetServiceCode())
 		tag3.SetServiceCode(0x0009)
@@ -268,7 +287,7 @@ func TestFeliCaTag_ReadBlockExtended(t *testing.T) {
 			tt.setupMock(mockTransport)
 
 			targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-			tag, err := NewFeliCaTag(device, targetData)
+			tag, err := NewFeliCaTag(device, targetData, 0)
 			require.NoError(t, err)
 
 			data, err := tag.ReadBlockExtended(context.Background(), tt.block)
@@ -342,7 +361,7 @@ func TestFeliCaTag_WriteBlockExtended(t *testing.T) {
 			tt.setupMock(mockTransport)
 
 			targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-			tag, err := NewFeliCaTag(device, targetData)
+			tag, err := NewFeliCaTag(device, targetData, 0)
 			require.NoError(t, err)
 
 			err = tag.WriteBlockExtended(context.Background(), tt.block, tt.data)
@@ -409,7 +428,7 @@ func TestFeliCaTag_RequestService(t *testing.T) {
 			tt.setupMock(mockTransport)
 
 			targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-			tag, err := NewFeliCaTag(device, targetData)
+			tag, err := NewFeliCaTag(device, targetData, 0)
 			require.NoError(t, err)
 
 			_, err = tag.RequestService(context.Background(), tt.serviceCodes)
@@ -431,7 +450,7 @@ func TestFeliCaTag_ValidateAIB(t *testing.T) {
 
 	device := createMockDevice(t)
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -487,7 +506,7 @@ func TestFeliCaTag_UpdateAIBWithLength(t *testing.T) {
 
 	device := createMockDevice(t)
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	// Create a valid AIB
@@ -538,7 +557,7 @@ func TestFeliCaTag_ValidateWritePermissions(t *testing.T) {
 
 	device := createMockDevice(t)
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -604,7 +623,7 @@ func TestFeliCaTag_ValidateDataSize(t *testing.T) {
 
 	device := createMockDevice(t)
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -663,7 +682,7 @@ func TestFeliCaTag_ReadBlock_UsesReadBlockExtended(t *testing.T) {
 	mockTransport.SetResponse(0x40, buildFeliCaReadResponse(testFeliCaIDm, testBlockData))
 
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	// ReadBlock should delegate to ReadBlockExtended
@@ -680,7 +699,7 @@ func TestFeliCaTag_WriteBlock_UsesWriteBlockExtended(t *testing.T) {
 	mockTransport.SetResponse(0x40, buildFeliCaWriteSuccessResponse(testFeliCaIDm))
 
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	// WriteBlock should delegate to WriteBlockExtended
@@ -771,7 +790,7 @@ func TestFeliCaTag_Polling(t *testing.T) {
 			tt.setupMock(mockTransport)
 
 			targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-			tag, err := NewFeliCaTag(device, targetData)
+			tag, err := NewFeliCaTag(device, targetData, 0)
 			require.NoError(t, err)
 
 			err = tag.Polling(context.Background(), tt.systemCode)
@@ -857,7 +876,7 @@ func TestFeliCaTag_WriteNDEF(t *testing.T) {
 			tt.setupMock(mockTransport)
 
 			targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-			tag, err := NewFeliCaTag(device, targetData)
+			tag, err := NewFeliCaTag(device, targetData, 0)
 			require.NoError(t, err)
 
 			err = tag.WriteNDEF(context.Background(), tt.message)
@@ -888,7 +907,7 @@ func TestFeliCaTag_WriteText(t *testing.T) {
 	}
 
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	err = tag.WriteText(context.Background(), "Hello")
@@ -944,7 +963,7 @@ func TestFeliCaTag_ReadNDEF(t *testing.T) {
 			tt.setupMock(mockTransport)
 
 			targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-			tag, err := NewFeliCaTag(device, targetData)
+			tag, err := NewFeliCaTag(device, targetData, 0)
 			require.NoError(t, err)
 
 			message, err := tag.ReadNDEF(context.Background())
@@ -971,7 +990,7 @@ func TestFeliCaTag_DebugInfo(t *testing.T) {
 	mockTransport.SetError(0x40, assert.AnError)
 
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	info := tag.DebugInfo()
@@ -984,7 +1003,7 @@ func TestFeliCaTag_RestoreSystemCodes(t *testing.T) {
 
 	device := createMockDevice(t)
 	targetData := buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC)
-	tag, err := NewFeliCaTag(device, targetData)
+	tag, err := NewFeliCaTag(device, targetData, 0)
 	require.NoError(t, err)
 
 	// Set initial values

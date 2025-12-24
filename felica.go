@@ -64,7 +64,7 @@ type FeliCaTag struct {
 
 // NewFeliCaTag creates a new FeliCa tag instance from polling response data
 // targetData should contain the FeliCa polling response (POL_RES)
-func NewFeliCaTag(device *Device, targetData []byte) (*FeliCaTag, error) {
+func NewFeliCaTag(device *Device, targetData []byte, targetNumber byte) (*FeliCaTag, error) {
 	if len(targetData) < 18 {
 		return nil, fmt.Errorf("FeliCa target data too short: %d bytes, need at least 18", len(targetData))
 	}
@@ -95,10 +95,11 @@ func NewFeliCaTag(device *Device, targetData []byte) (*FeliCaTag, error) {
 
 	tag := &FeliCaTag{
 		BaseTag: BaseTag{
-			device:  device,
-			tagType: TagTypeFeliCa,
-			uid:     idm, // Use IDm as UID for FeliCa
-			sak:     0,   // FeliCa doesn't use SAK
+			device:       device,
+			tagType:      TagTypeFeliCa,
+			uid:          idm, // Use IDm as UID for FeliCa
+			sak:          0,   // FeliCa doesn't use SAK
+			targetNumber: targetNumber,
 		},
 		blockSize:   feliCaBlockSize,
 		idm:         idm,
