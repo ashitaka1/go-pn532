@@ -380,3 +380,196 @@ func TestTagOperations_WriteNDEF_UnsupportedType(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported tag type")
 }
+
+// --- UserMemory Tests (Regression) ---
+// These tests verify the corrected UserMemory calculations in GetTagInfo()
+
+func TestTagInfo_NTAGUserMemory(t *testing.T) {
+	tests := []struct {
+		name               string
+		totalPages         int
+		expectedUserMemory int
+	}{
+		{
+			name:               "NTAG213_UserMemory",
+			totalPages:         45,
+			expectedUserMemory: 144, // 36 pages * 4 bytes
+		},
+		{
+			name:               "NTAG215_UserMemory",
+			totalPages:         135,
+			expectedUserMemory: 504, // 126 pages * 4 bytes
+		},
+		{
+			name:               "NTAG216_UserMemory",
+			totalPages:         231,
+			expectedUserMemory: 888, // 222 pages * 4 bytes
+		},
+		{
+			name:               "Unknown_NTAG_UserMemory",
+			totalPages:         100,
+			expectedUserMemory: 364, // (100 - 9) * 4 = 91 * 4 = 364
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &TagOperations{
+				tagType:    pn532.TagTypeNTAG,
+				totalPages: tc.totalPages,
+				tag:        &pn532.DetectedTag{UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}},
+			}
+
+			info, err := ops.GetTagInfo()
+			require.NoError(t, err)
+			assert.Equal(t, tc.expectedUserMemory, info.UserMemory,
+				"UserMemory should be calculated correctly for %s", tc.name)
+		})
+	}
+}
+
+func TestTagInfo_MIFAREUserMemory(t *testing.T) {
+	tests := []struct {
+		name               string
+		uid                []byte
+		expectedUserMemory int
+	}{
+		{
+			name:               "MIFARE_Classic_1K_UserMemory",
+			uid:                []byte{0x01, 0x02, 0x03, 0x04}, // 4-byte UID = 1K
+			expectedUserMemory: 720,                            // 15 sectors * 3 blocks * 16 bytes
+		},
+		{
+			name:               "MIFARE_Unknown_Size_UserMemory",
+			uid:                []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}, // 7-byte UID = unknown
+			expectedUserMemory: 720,                                              // defaults to 720
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &TagOperations{
+				tagType: pn532.TagTypeMIFARE,
+				tag:     &pn532.DetectedTag{UIDBytes: tc.uid},
+			}
+
+			info, err := ops.GetTagInfo()
+			require.NoError(t, err)
+			assert.Equal(t, tc.expectedUserMemory, info.UserMemory,
+				"UserMemory should be calculated correctly for %s", tc.name)
+		})
+	}
+}
+
+// --- Detection Fallback Logic Tests (Regression) ---
+// These tests verify the refactored detectAndInitializeTag that avoids
+// redundant detection attempts when one type fails.
+
+func TestDetectAndInitializeTag_NoTag_ReturnsError(t *testing.T) {
+	ops := &TagOperations{
+		tag: nil,
+	}
+
+	err := ops.detectAndInitializeTag(context.Background())
+
+	require.Error(t, err)
+	assert.Equal(t, ErrNoTag, err)
+}
+
+func TestTryInitNTAG_FailsOn4ByteUID(t *testing.T) {
+	// Verify that tryInitNTAG correctly fails for non-7-byte UIDs
+	// This is important because the UID length check happens before
+	// any device I/O, so we can test it without mocking device responses
+
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	ops := New(device)
+	ops.tag = &pn532.DetectedTag{
+		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}, // 4-byte UID - invalid for NTAG
+	}
+
+	result := ops.tryInitNTAG(context.Background())
+
+	assert.False(t, result, "tryInitNTAG should fail for 4-byte UID")
+}
+
+func TestTryInitNTAG_SucceedsWithValidTag(t *testing.T) {
+	// Verify tryInitNTAG succeeds with a valid 7-byte UID and proper mocking
+
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// Mock valid CC read
+	ccData := make([]byte, 16)
+	ccData[0] = 0xE1 // NDEF magic
+	ccData[1] = 0x10 // Version
+	ccData[2] = 0x12 // Size
+	mockTransport.QueueResponses(0x40,
+		append([]byte{0x41, 0x00}, ccData...),                              // CC read succeeds
+		[]byte{0x41, 0x00, 0x00, 0x04, 0x04, 0x02, 0x01, 0x00, 0x0F, 0x03}, // GET_VERSION response for NTAG213
+	)
+
+	ops := New(device)
+	ops.tag = &pn532.DetectedTag{
+		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, // 7-byte NXP UID
+	}
+
+	result := ops.tryInitNTAG(context.Background())
+
+	assert.True(t, result, "tryInitNTAG should succeed with valid 7-byte UID")
+	assert.Equal(t, pn532.TagTypeNTAG, ops.tagType)
+}
+
+func TestTryInitMIFARE_SucceedsWithValidAuth(t *testing.T) {
+	// Verify that tryInitMIFARE succeeds when auth works
+
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// Mock successful auth and read response
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, make([]byte, 16)...))
+
+	ops := New(device)
+	ops.tag = &pn532.DetectedTag{
+		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04},
+		SAK:      0x08, // MIFARE Classic 1K SAK
+	}
+
+	result := ops.tryInitMIFARE(context.Background())
+
+	assert.True(t, result, "tryInitMIFARE should succeed with valid auth")
+	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType)
+}
+
+func TestDetectAndInitializeTag_NTAG_FallsBackToMIFARE(t *testing.T) {
+	// Test that when pre-detected as NTAG with invalid UID,
+	// the code falls back to MIFARE detection
+
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// Mock successful MIFARE auth (NTAG will fail on 4-byte UID check)
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, make([]byte, 16)...))
+
+	ops := New(device)
+	ops.tag = &pn532.DetectedTag{
+		Type:     pn532.TagTypeNTAG,              // Pre-detected as NTAG
+		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}, // But 4-byte UID = invalid for NTAG
+		SAK:      0x08,
+	}
+
+	err = ops.detectAndInitializeTag(context.Background())
+
+	// Should succeed with MIFARE (fallback from NTAG)
+	require.NoError(t, err)
+	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType, "Should fall back to MIFARE when NTAG fails")
+}

@@ -57,18 +57,22 @@ func (t *TagOperations) GetTagInfo() (*TagInfo, error) {
 	case pn532.TagTypeNTAG:
 		info.TypeName = ntagTypeName
 		info.TotalPages = t.totalPages
-		info.UserMemory = (t.totalPages - 4) * 4 // Exclude first 4 pages
 
-		// Determine specific NTAG type based on total pages
+		// Determine specific NTAG type and NDEF-usable memory based on total pages
+		// User memory excludes: first 4 pages (UID/CC) and last 5 pages (config/password)
 		switch t.totalPages {
 		case 45:
 			info.NTAGType = "NTAG213"
+			info.UserMemory = 144 // 36 pages * 4 bytes
 		case 135:
 			info.NTAGType = "NTAG215"
+			info.UserMemory = 504 // 126 pages * 4 bytes
 		case 231:
 			info.NTAGType = "NTAG216"
+			info.UserMemory = 888 // 222 pages * 4 bytes
 		default:
 			info.NTAGType = fmt.Sprintf("NTAG (unknown, %d pages)", t.totalPages)
+			info.UserMemory = (t.totalPages - 9) * 4 // Conservative: exclude 4 header + 5 config pages
 		}
 
 	case pn532.TagTypeMIFARE:
@@ -79,11 +83,15 @@ func (t *TagOperations) GetTagInfo() (*TagInfo, error) {
 			info.MIFAREType = "MIFARE Classic 1K"
 			info.Sectors = 16
 			info.TotalMemory = 1024
+			// NDEF usable: sectors 1-15, 3 data blocks each, 16 bytes per block
+			// = 15 sectors × 3 blocks × 16 bytes = 720 bytes
+			info.UserMemory = 720
 		} else {
 			// Could be 4K, but need more checks
 			info.MIFAREType = "MIFARE Classic (unknown size)"
 			info.Sectors = 16 // Default to 1K
 			info.TotalMemory = 1024
+			info.UserMemory = 720
 		}
 
 	case pn532.TagTypeUnknown, pn532.TagTypeFeliCa, pn532.TagTypeAny:

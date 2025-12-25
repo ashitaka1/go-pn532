@@ -577,6 +577,11 @@ func (*Device) parseISO14443BData(targetData []byte) []byte {
 // SendDataExchange sends a data exchange command with context support
 func (d *Device) SendDataExchange(ctx context.Context, data []byte) ([]byte, error) {
 	targetNum := d.getCurrentTarget()
+	if len(data) > 0 {
+		Debugf("SendDataExchange: target=%d, data[0]=0x%02X, len=%d", targetNum, data[0], len(data))
+	} else {
+		Debugf("SendDataExchange: target=%d, data=(empty), len=0", targetNum)
+	}
 	res, err := d.transport.SendCommandWithContext(ctx, cmdInDataExchange, append([]byte{targetNum}, data...))
 	if err != nil {
 		return nil, fmt.Errorf("failed to send data exchange command: %w", err)
@@ -643,8 +648,10 @@ func (d *Device) InRelease(ctx context.Context, targetNumber byte) error {
 
 // InSelect selects the specified target with context support
 func (d *Device) InSelect(ctx context.Context, targetNumber byte) error {
+	Debugf("InSelect: selecting target %d", targetNumber)
 	res, err := d.transport.SendCommandWithContext(ctx, cmdInSelect, []byte{targetNumber})
 	if err != nil {
+		Debugf("InSelect: command failed: %v", err)
 		return fmt.Errorf("InSelect command failed: %w", err)
 	}
 
@@ -660,9 +667,11 @@ func (d *Device) InSelect(ctx context.Context, targetNumber byte) error {
 		return nil
 	}
 	if res[1] != 0x00 {
+		Debugf("InSelect: failed with status: %02x", res[1])
 		return fmt.Errorf("InSelect failed with status: %02x", res[1])
 	}
 
+	Debugf("InSelect: success, currentTarget set to %d", targetNumber)
 	d.setCurrentTarget(targetNumber)
 	return nil
 }

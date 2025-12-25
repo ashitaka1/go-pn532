@@ -1404,3 +1404,63 @@ func TestMIFARETag_authenticateNDEFAlternative(t *testing.T) {
 		})
 	}
 }
+
+// Regression Tests - Key Fallback with Re-Select
+//
+// These tests verify the fix for MIFARE key fallback.
+// When the first key fails, the code should:
+// 1. Call InListPassiveTarget to re-select the tag (failed auth puts tag in HALT)
+// 2. Try the alternative key
+// 3. Proceed with the read/write operation
+
+func TestMIFARETag_ReadBlockAuto_KeyFallbackSucceeds(t *testing.T) {
+	t.Parallel()
+
+	// Test that ReadBlockAuto successfully falls back from Key A to Key B
+	// This implicitly tests the re-select fix - without it, Key B would also fail
+
+	tag, mockTransport := setupMIFARETagTest(t, func(mt *MockTransport) {
+		// Auth with Key A fails, auth with Key B succeeds, read succeeds
+		mt.QueueResponses(0x40,
+			[]byte{0x41, 0x14}, // Key A auth fails (status 0x14)
+			[]byte{0x41, 0x00}, // Key B auth succeeds
+			append([]byte{0x41, 0x00}, make([]byte, 16)...), // Read returns 16 bytes
+		)
+		// InListPassiveTarget response for re-select
+		mt.SetResponse(0x4A, []byte{0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04})
+	})
+	tag.SetConfig(testMIFAREConfig())
+
+	data, err := tag.ReadBlockAuto(context.Background(), 4)
+
+	require.NoError(t, err, "ReadBlockAuto should succeed with Key B fallback")
+	assert.Len(t, data, 16)
+	// The fact that this succeeds proves the re-select is working
+	// (without re-select, Key B auth would fail due to HALT state)
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x4A), 1,
+		"InListPassiveTarget should be called for re-select")
+}
+
+func TestMIFARETag_WriteBlockAuto_KeyFallbackSucceeds(t *testing.T) {
+	t.Parallel()
+
+	// Test that WriteBlockAuto successfully falls back from Key B to Key A
+
+	tag, mockTransport := setupMIFARETagTest(t, func(mt *MockTransport) {
+		// Auth with Key B fails, auth with Key A succeeds, write succeeds
+		mt.QueueResponses(0x40,
+			[]byte{0x41, 0x14}, // Key B auth fails (status 0x14)
+			[]byte{0x41, 0x00}, // Key A auth succeeds
+			[]byte{0x41, 0x00}, // Write succeeds
+		)
+		// InListPassiveTarget response for re-select
+		mt.SetResponse(0x4A, []byte{0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04})
+	})
+	tag.SetConfig(testMIFAREConfig())
+
+	err := tag.WriteBlockAuto(context.Background(), 4, make([]byte, 16))
+
+	require.NoError(t, err, "WriteBlockAuto should succeed with Key A fallback")
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x4A), 1,
+		"InListPassiveTarget should be called for re-select")
+}

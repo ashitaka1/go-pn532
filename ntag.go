@@ -997,7 +997,13 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 		return err
 	}
 
-	// First verify this is an NTAG by reading the capability container (CC) at page 3
+	// NTAG21x tags have 7-byte UIDs (distinguishes from MIFARE Classic which has 4-byte UIDs)
+	// Note: Genuine NXP NTAGs start with 0x04, but clones/compatibles may use other prefixes
+	if len(t.uid) != 7 {
+		return fmt.Errorf("not an NTAG tag: UID must be 7 bytes, got %d bytes", len(t.uid))
+	}
+
+	// Verify by reading the capability container (CC) at page 3
 	// NTAG tags should have a valid CC with NDEF magic number 0xE1 at byte 0
 	ccData, err := t.ReadBlock(ctx, ntagPageCC)
 	if err != nil {
@@ -1008,6 +1014,17 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// NTAG CC format: [E1] [Version] [Size] [Access]
 	if len(ccData) < 4 || ccData[0] != 0xE1 {
 		return errors.New("not an NTAG tag: invalid capability container")
+	}
+
+	// Check if this is likely a genuine NXP tag (UID starts with 0x04)
+	// Clone tags use different UID prefixes and typically don't support GET_VERSION.
+	// Sending GET_VERSION (0x60) to a clone tag that doesn't understand it causes
+	// the tag to enter IDLE state per ISO14443-3A, breaking subsequent writes.
+	// Skip GET_VERSION for non-NXP UIDs to keep clone tags in ACTIVE state.
+	if len(t.uid) > 0 && t.uid[0] != 0x04 {
+		Debugf("NTAG DetectType: non-NXP UID prefix 0x%02X, skipping GET_VERSION to avoid IDLE state", t.uid[0])
+		t.tagType = t.detectTypeFromCapabilityContainer(ccData)
+		return nil
 	}
 
 	// Now try to get the actual version information using GET_VERSION
@@ -1132,6 +1149,85 @@ func (t *NTAGTag) validateWriteBoundary(ctx context.Context, block uint8) error 
 	}
 
 	return nil
+}
+
+// ProbeActualMemorySize probes the tag to find its actual memory size.
+// This is useful for clone tags that lie about their capacity in the CC.
+// The claimedBytes parameter (from CC) is used to set a reasonable upper bound
+// to avoid reading wildly out-of-range pages which can corrupt tag state.
+// Returns the last readable page number and total user memory in bytes.
+func (t *NTAGTag) ProbeActualMemorySize(ctx context.Context, claimedBytes int) (lastPage uint8, userMemory int) {
+	low := uint8(4) // First user page
+
+	// Calculate upper bound from claimed size - be conservative to avoid NAKs
+	// Formula: claimedBytes/4 + 4 (header) + 5 (config) - 1 = last page index
+	// We subtract 1 because pages are 0-indexed
+	high := uint8(44) // Default to NTAG213 last page if no claim
+	if claimedBytes > 0 {
+		lastPageIndex := claimedBytes/4 + 4 + 5 - 1
+		if lastPageIndex > 230 {
+			high = 230 // Cap at NTAG216 max
+		} else {
+			high = uint8(lastPageIndex) //nolint:gosec // bounds checked above
+		}
+	}
+
+	// Quick check: if page 4 isn't readable, tag has no user memory
+	if !t.canAccessPageWithContext(ctx, low) {
+		return 3, 0
+	}
+
+	// Binary search for the last readable page
+	for low < high {
+		mid := low + (high-low+1)/2
+		if t.canAccessPageWithContext(ctx, mid) {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+
+	lastPage = low
+	// User memory = (lastPage - 3) * 4 bytes (pages 4 to lastPage inclusive)
+	// But we need to exclude config pages at the end (usually last 5 pages)
+	// For safety, subtract 5 pages for config area
+	userPages := int(lastPage) - 3 - 5
+	if userPages < 0 {
+		userPages = 0
+	}
+	userMemory = userPages * 4
+
+	Debugf("NTAG ProbeActualMemorySize: last readable page=%d, user memory=%d bytes", lastPage, userMemory)
+	return lastPage, userMemory
+}
+
+// canAccessPageWithContext tests if a specific page can be read (with context support)
+func (t *NTAGTag) canAccessPageWithContext(ctx context.Context, page uint8) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, page})
+	if err != nil {
+		// Re-select target to recover from NAK/timeout errors
+		_ = t.device.InSelect(ctx, t.targetNumber)
+		return false
+	}
+	return len(data) >= 4
+}
+
+// ReadCapabilityContainer reads the CC (page 3) and returns it
+func (t *NTAGTag) ReadCapabilityContainer(ctx context.Context) ([]byte, error) {
+	return t.ReadBlock(ctx, ntagPageCC)
+}
+
+// GetClaimedSizeFromCC returns the claimed memory size from the CC size field
+func GetClaimedSizeFromCC(ccData []byte) int {
+	if len(ccData) < 3 {
+		return 0
+	}
+	// CC format: [Magic 0xE1] [Version] [Size] [Access]
+	// Size field * 8 = total memory in bytes
+	return int(ccData[2]) * 8
 }
 
 // getTagTypeName returns a human-readable name for the current tag type

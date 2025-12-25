@@ -68,12 +68,7 @@ func parseConfig() *config {
 		stressTest: flagStressTest,
 	}
 
-	// Force debug mode when stress test is enabled
-	if cfg.stressTest {
-		cfg.debug = true
-	}
-
-	// Enable debug output if --debug flag is set (or stress test enabled)
+	// Enable debug output only if --debug flag is explicitly set
 	if cfg.debug {
 		pn532.SetDebugEnabled(true)
 	}

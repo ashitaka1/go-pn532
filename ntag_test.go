@@ -1492,4 +1492,161 @@ func TestCalculateStaticLockPosition(t *testing.T) {
 	}
 }
 
-// NDEF Message Tests
+// GetClaimedSizeFromCC Tests
+
+func TestGetClaimedSizeFromCC(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		ccData   []byte
+		expected int
+	}{
+		{
+			name:     "NTAG213_CC",
+			ccData:   []byte{0xE1, 0x10, 0x12, 0x00}, // 0x12 * 8 = 144 bytes
+			expected: 144,
+		},
+		{
+			name:     "NTAG215_CC",
+			ccData:   []byte{0xE1, 0x10, 0x3E, 0x00}, // 0x3E * 8 = 496 bytes
+			expected: 496,
+		},
+		{
+			name:     "NTAG216_CC",
+			ccData:   []byte{0xE1, 0x10, 0x6D, 0x00}, // 0x6D * 8 = 872 bytes
+			expected: 872,
+		},
+		{
+			name:     "Zero_Size",
+			ccData:   []byte{0xE1, 0x10, 0x00, 0x00},
+			expected: 0,
+		},
+		{
+			name:     "Max_Size",
+			ccData:   []byte{0xE1, 0x10, 0xFF, 0x00}, // 0xFF * 8 = 2040 bytes
+			expected: 2040,
+		},
+		{
+			name:     "Short_CC_Data",
+			ccData:   []byte{0xE1, 0x10},
+			expected: 0,
+		},
+		{
+			name:     "Empty_CC_Data",
+			ccData:   []byte{},
+			expected: 0,
+		},
+		{
+			name:     "Nil_CC_Data",
+			ccData:   nil,
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := GetClaimedSizeFromCC(tt.ccData)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// NTAG DetectType UID Validation Tests
+
+func TestNTAGDetectType_UIDLengthValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		errorMsg    string
+		uid         []byte
+		expectError bool
+	}{
+		{
+			name:        "Valid_7_Byte_UID",
+			uid:         []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expectError: false,
+		},
+		{
+			name:        "Invalid_4_Byte_UID",
+			uid:         []byte{0x04, 0x12, 0x34, 0x56},
+			expectError: true,
+			errorMsg:    "UID must be 7 bytes",
+		},
+		{
+			name:        "Invalid_Empty_UID",
+			uid:         []byte{},
+			expectError: true,
+			errorMsg:    "UID must be 7 bytes",
+		},
+		{
+			name:        "Invalid_10_Byte_UID",
+			uid:         []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12},
+			expectError: true,
+			errorMsg:    "UID must be 7 bytes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			device, mockTransport := createMockDeviceWithTransport(t)
+			tag := NewNTAGTag(device, tt.uid, 0x00, 0)
+
+			if !tt.expectError {
+				// Mock valid CC read for valid UIDs
+				ccData := []byte{0xE1, 0x10, 0x12, 0x00} // Valid NTAG CC
+				mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, ccData...))
+				// Mock GET_VERSION response
+				versionResp := []byte{0x00, 0x04, 0x04, 0x02, 0x01, 0x00, 0x11, 0x03}
+				mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, versionResp...))
+			}
+
+			err := tag.DetectType(context.Background())
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errorMsg)
+			} else if err != nil {
+				// For valid UIDs, we just check no UID-related error
+				// (may still fail on other things in mock, that's ok)
+				assert.NotContains(t, err.Error(), "UID must be 7 bytes")
+			}
+		})
+	}
+}
+
+func TestNTAGDetectType_SkipsGetVersionForCloneTags(t *testing.T) {
+	t.Parallel()
+
+	// This test verifies that for non-NXP UIDs (not starting with 0x04),
+	// the code uses CC-based detection instead of GET_VERSION to avoid
+	// putting clone tags into IDLE state.
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	// Use a clone tag UID (starts with 0x08, not 0x04)
+	cloneUID := []byte{0x08, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}
+	tag := NewNTAGTag(device, cloneUID, 0x00, 0)
+
+	// Mock valid CC read - this should be enough for clone tag detection
+	// CC format: [Magic 0xE1] [Version] [Size] [Access]
+	// Size 0x12 = 18 * 8 = 144 bytes (NTAG213-like)
+	ccData := make([]byte, 16) // Read returns 4 pages = 16 bytes
+	ccData[0] = 0xE1           // NDEF magic
+	ccData[1] = 0x10           // Version 1.0
+	ccData[2] = 0x12           // Size (144 bytes)
+	ccData[3] = 0x00           // Access conditions
+
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, ccData...))
+
+	err := tag.DetectType(context.Background())
+
+	// Should succeed without calling GET_VERSION
+	require.NoError(t, err)
+	// Tag type should be detected from CC
+	assert.NotEqual(t, NTAGTypeUnknown, tag.tagType)
+}

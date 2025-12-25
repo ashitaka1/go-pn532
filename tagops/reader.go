@@ -247,3 +247,45 @@ func (t *TagOperations) GetCapacityInfo() (totalBytes, usableBytes int, err erro
 	}
 	return 0, 0, ErrUnsupportedTag
 }
+
+// ProbeActualMemorySize probes the tag to find its actual memory size.
+// This is useful for clone tags that may report incorrect capacity in their CC.
+// The claimedBytes parameter (from CC) helps set a reasonable upper bound.
+// Returns the last readable page and actual user memory in bytes.
+func (t *TagOperations) ProbeActualMemorySize(
+	ctx context.Context, claimedBytes int,
+) (lastPage uint8, userMemory int, err error) {
+	if t.tag == nil {
+		return 0, 0, ErrNoTag
+	}
+
+	if t.tagType != pn532.TagTypeNTAG || t.ntagInstance == nil {
+		return 0, 0, ErrUnsupportedTag
+	}
+
+	lastPage, userMemory = t.ntagInstance.ProbeActualMemorySize(ctx, claimedBytes)
+	return lastPage, userMemory, nil
+}
+
+// ReadCapabilityContainer reads the capability container (CC) from the tag.
+// For NTAG, this is page 3. Returns the raw CC bytes.
+func (t *TagOperations) ReadCapabilityContainer(ctx context.Context) ([]byte, error) {
+	if t.tag == nil {
+		return nil, ErrNoTag
+	}
+
+	if t.tagType != pn532.TagTypeNTAG || t.ntagInstance == nil {
+		return nil, ErrUnsupportedTag
+	}
+
+	data, err := t.ntagInstance.ReadCapabilityContainer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read capability container: %w", err)
+	}
+	return data, nil
+}
+
+// GetClaimedSizeFromCC returns the claimed memory size from CC data.
+func GetClaimedSizeFromCC(ccData []byte) int {
+	return pn532.GetClaimedSizeFromCC(ccData)
+}

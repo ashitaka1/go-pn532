@@ -474,4 +474,216 @@ func TestTagType_Constants(t *testing.T) {
 	}
 }
 
-// NTAG Operation Tests
+// Manufacturer Tests
+
+func TestGetManufacturer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		expected Manufacturer
+		uid      []byte
+	}{
+		{
+			name:     "NXP_UID_0x04",
+			uid:      []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: ManufacturerNXP,
+		},
+		{
+			name:     "STMicroelectronics_UID_0x02",
+			uid:      []byte{0x02, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: ManufacturerST,
+		},
+		{
+			name:     "Infineon_UID_0x05",
+			uid:      []byte{0x05, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: ManufacturerInfineon,
+		},
+		{
+			name:     "Texas_Instruments_UID_0x07",
+			uid:      []byte{0x07, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: ManufacturerTI,
+		},
+		{
+			name:     "Unknown_UID_0x08",
+			uid:      []byte{0x08, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: ManufacturerUnknown,
+		},
+		{
+			name:     "Unknown_UID_0x00",
+			uid:      []byte{0x00, 0x12, 0x34, 0x56},
+			expected: ManufacturerUnknown,
+		},
+		{
+			name:     "Empty_UID",
+			uid:      []byte{},
+			expected: ManufacturerUnknown,
+		},
+		{
+			name:     "Nil_UID",
+			uid:      nil,
+			expected: ManufacturerUnknown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := GetManufacturer(tt.uid)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestIsGenuineNXP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		uid      []byte
+		expected bool
+	}{
+		{
+			name:     "NXP_UID_0x04",
+			uid:      []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: true,
+		},
+		{
+			name:     "Non_NXP_UID_0x08",
+			uid:      []byte{0x08, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: false,
+		},
+		{
+			name:     "STMicroelectronics_UID",
+			uid:      []byte{0x02, 0x12, 0x34, 0x56},
+			expected: false,
+		},
+		{
+			name:     "Empty_UID",
+			uid:      []byte{},
+			expected: false,
+		},
+		{
+			name:     "Nil_UID",
+			uid:      nil,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := IsGenuineNXP(tt.uid)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestBaseTag_Manufacturer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		expected Manufacturer
+		uid      []byte
+	}{
+		{
+			name:     "NXP_Tag",
+			uid:      []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: ManufacturerNXP,
+		},
+		{
+			name:     "Clone_Tag",
+			uid:      []byte{0x08, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: ManufacturerUnknown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run("BaseTag_"+tt.name, func(t *testing.T) {
+			t.Parallel()
+			tag := &BaseTag{uid: tt.uid}
+			assert.Equal(t, tt.expected, tag.Manufacturer())
+		})
+		t.Run("DetectedTag_"+tt.name, func(t *testing.T) {
+			t.Parallel()
+			tag := &DetectedTag{UIDBytes: tt.uid}
+			assert.Equal(t, tt.expected, tag.Manufacturer())
+		})
+	}
+}
+
+func TestBaseTag_IsGenuine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		uid      []byte
+		expected bool
+	}{
+		{
+			name:     "NXP_Tag_Is_Genuine",
+			uid:      []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: true,
+		},
+		{
+			name:     "ST_Tag_Is_Genuine",
+			uid:      []byte{0x02, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: true,
+		},
+		{
+			name:     "Infineon_Tag_Is_Genuine",
+			uid:      []byte{0x05, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: true,
+		},
+		{
+			name:     "Clone_Tag_Not_Genuine",
+			uid:      []byte{0x08, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: false,
+		},
+		{
+			name:     "Empty_UID_Not_Genuine",
+			uid:      []byte{},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tag := &BaseTag{uid: tt.uid}
+			result := tag.IsGenuine()
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestDetectedTag_IsGenuine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		uid      []byte
+		expected bool
+	}{
+		{
+			name:     "NXP_Tag_Is_Genuine",
+			uid:      []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: true,
+		},
+		{
+			name:     "Clone_Tag_Not_Genuine",
+			uid:      []byte{0x08, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tag := &DetectedTag{UIDBytes: tt.uid}
+			result := tag.IsGenuine()
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
