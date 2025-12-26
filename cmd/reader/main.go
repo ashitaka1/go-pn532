@@ -218,10 +218,14 @@ func printNDEFMessage(ndefMsg *pn532.NDEFMessage, err error) {
 func handleTagDetected(ctx context.Context, ops *tagops.TagOperations, detectedTag *pn532.DetectedTag) error {
 	// Print basic tag information with human-readable type name
 	typeName := tagops.TagTypeDisplayName(detectedTag.Type)
-	_, _ = fmt.Printf("\nTag detected: UID=%s Type=%s\n", detectedTag.UID, typeName)
+	_, _ = fmt.Printf("\nTag detected: UID=%s Type=%s Manufacturer=%s\n",
+		detectedTag.UID, typeName, detectedTag.Manufacturer())
 
-	// Use tagops to detect and get detailed tag info
-	if err := ops.DetectTag(ctx); err != nil {
+	// Initialize tagops from the already-detected tag.
+	// We use InitFromDetectedTag instead of DetectTag because the polling loop
+	// already detected the tag via InListPassiveTarget. Calling DetectTag would
+	// perform a redundant detection with InRelease(0) which can corrupt tag state.
+	if err := ops.InitFromDetectedTag(ctx, detectedTag); err != nil {
 		_, _ = fmt.Printf("  Tag type detection: %v\n", err)
 		return nil // Continue monitoring
 	}
