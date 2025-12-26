@@ -89,22 +89,21 @@ func buildFeliCaRequestServiceResponse(idm []byte, nodeCount int) []byte {
 	return append([]byte{0x41, 0x00}, feliCaResponse...)
 }
 
-func TestNewFeliCaTag(t *testing.T) {
-	t.Parallel()
+type newFeliCaTagTestCase struct {
+	name            string
+	errorContains   string
+	targetData      []byte
+	expectedIDm     []byte
+	expectedPMm     []byte
+	expectedSysCode uint16
+	expectError     bool
+}
 
-	tests := []struct {
-		name            string
-		errorContains   string
-		targetData      []byte
-		expectedIDm     []byte
-		expectedPMm     []byte
-		expectedSysCode uint16
-		expectError     bool
-	}{
+func getNewFeliCaTagTestCases() []newFeliCaTagTestCase {
+	return []newFeliCaTagTestCase{
 		{
 			name:            "valid_polling_response_with_system_code",
 			targetData:      buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0x12FC),
-			expectError:     false,
 			expectedIDm:     testFeliCaIDm,
 			expectedPMm:     testFeliCaPMm,
 			expectedSysCode: 0x12FC,
@@ -112,7 +111,6 @@ func TestNewFeliCaTag(t *testing.T) {
 		{
 			name:            "valid_polling_response_minimal",
 			targetData:      buildFeliCaPollingResponse(testFeliCaIDm, testFeliCaPMm, 0xFFFF)[:18],
-			expectError:     false,
 			expectedIDm:     testFeliCaIDm,
 			expectedPMm:     testFeliCaPMm,
 			expectedSysCode: 0xFFFF, // Default wildcard when no system code in response
@@ -130,13 +128,16 @@ func TestNewFeliCaTag(t *testing.T) {
 			errorContains: "too short",
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestNewFeliCaTag(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range getNewFeliCaTagTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
 			device := createMockDevice(t)
-
 			tag, err := NewFeliCaTag(device, tt.targetData)
 
 			if tt.expectError {
@@ -145,16 +146,16 @@ func TestNewFeliCaTag(t *testing.T) {
 					assert.Contains(t, err.Error(), tt.errorContains)
 				}
 				assert.Nil(t, tag)
-			} else {
-				require.NoError(t, err)
-				require.NotNil(t, tag)
-
-				assert.Equal(t, TagTypeFeliCa, tag.Type())
-				assert.Equal(t, tt.expectedIDm, tag.GetIDm())
-				assert.Equal(t, tt.expectedPMm, tag.GetPMm())
-				assert.Equal(t, tt.expectedSysCode, tag.GetSystemCode())
-				assert.Equal(t, tt.expectedIDm, tag.UIDBytes()) // IDm is used as UID
+				return
 			}
+
+			require.NoError(t, err)
+			require.NotNil(t, tag)
+			assert.Equal(t, TagTypeFeliCa, tag.Type())
+			assert.Equal(t, tt.expectedIDm, tag.GetIDm())
+			assert.Equal(t, tt.expectedPMm, tag.GetPMm())
+			assert.Equal(t, tt.expectedSysCode, tag.GetSystemCode())
+			assert.Equal(t, tt.expectedIDm, tag.UIDBytes()) // IDm is used as UID
 		})
 	}
 }

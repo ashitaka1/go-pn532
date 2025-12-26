@@ -253,7 +253,8 @@ func (t *MIFARETag) ReadBlockAuto(ctx context.Context, block uint8) ([]byte, err
 		// Try Key A first, then Key B
 		err := t.authenticateNDEF(ctx, sector, MIFAREKeyA)
 		if err != nil {
-			// Try Key B
+			// Re-select tag before trying Key B - failed auth leaves tag in HALT state
+			_, _ = t.device.InListPassiveTarget(ctx, 0x00)
 			err = t.authenticateNDEF(ctx, sector, MIFAREKeyB)
 			if err != nil {
 				return nil, fmt.Errorf("failed to authenticate to sector %d: %w", sector, err)
@@ -278,7 +279,8 @@ func (t *MIFARETag) WriteBlockAuto(ctx context.Context, block uint8, data []byte
 		// Try Key B first, then Key A
 		err := t.authenticateNDEF(ctx, sector, MIFAREKeyB)
 		if err != nil {
-			// Try Key A
+			// Re-select tag before trying Key A - failed auth leaves tag in HALT state
+			_, _ = t.device.InListPassiveTarget(ctx, 0x00)
 			err = t.authenticateNDEF(ctx, sector, MIFAREKeyA)
 			if err != nil {
 				return fmt.Errorf("failed to authenticate to sector %d: %w", sector, err)
@@ -461,8 +463,8 @@ func (t *MIFARETag) writeBlockCommunicateThru(ctx context.Context, block uint8, 
 	_, err := t.device.SendRawCommand(ctx, cmd)
 
 	// Re-select target after SendRawCommand to restore PN532 internal state
-	if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
-		Debugf("MIFARE writeBlockCommunicateThru: InSelect failed: %v", selectErr)
+	if selectErr := t.device.InSelect(ctx); selectErr != nil {
+		Debugln("MIFARE writeBlockCommunicateThru: InSelect failed:", selectErr)
 	}
 
 	if err != nil {
@@ -485,8 +487,8 @@ func (t *MIFARETag) readBlockCommunicateThru(ctx context.Context, block uint8) (
 	data, err := t.device.SendRawCommand(ctx, cmd)
 
 	// Re-select target after SendRawCommand to restore PN532 internal state
-	if selectErr := t.device.InSelect(ctx, 0); selectErr != nil {
-		Debugf("MIFARE readBlockCommunicateThru: InSelect failed: %v", selectErr)
+	if selectErr := t.device.InSelect(ctx); selectErr != nil {
+		Debugln("MIFARE readBlockCommunicateThru: InSelect failed:", selectErr)
 	}
 
 	if err != nil {
@@ -909,7 +911,7 @@ func (t *MIFARETag) ResetAuthState(ctx context.Context) error {
 
 	// Force PN532 to reset by attempting to re-detect the tag
 	// This clears any internal authentication state in the PN532 chip
-	_, err := t.device.InListPassiveTarget(ctx, 1, 0x00)
+	_, err := t.device.InListPassiveTarget(ctx, 0x00)
 	return err
 }
 
@@ -1173,7 +1175,9 @@ func (t *MIFARETag) applyRetryStrategy(ctx context.Context, level retryLevel, _ 
 
 	case retryModerate:
 		// Moderate: Card reinitialization (critical fix from research)
-		_, err := t.device.InListPassiveTarget(ctx, 1, 0x00)
+		// InRelease clears HALT/auth states before re-detection
+		_ = t.device.InRelease(ctx)
+		_, err := t.device.InListPassiveTarget(ctx, 0x00)
 		if err != nil {
 			return fmt.Errorf("card reinitialization failed: %w", err)
 		}
@@ -1194,7 +1198,9 @@ func (t *MIFARETag) applyRetryStrategy(ctx context.Context, level retryLevel, _ 
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			_, err := t.device.InListPassiveTarget(ctx, 1, 0x00)
+			// InRelease clears HALT/auth states before re-detection
+			_ = t.device.InRelease(ctx)
+			_, err := t.device.InListPassiveTarget(ctx, 0x00)
 			if err == nil {
 				break
 			}

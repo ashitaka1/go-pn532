@@ -159,12 +159,20 @@ func handleWellKnownType(rec *ndef.Record, result *NDEFRecord, payloadBytes []by
 	switch rec.Type {
 	case "T": // Text
 		result.Type = NDEFTypeText
-		if text, err := parseTextPayload(payloadBytes); err == nil {
+		text, err := parseTextPayload(payloadBytes)
+		if err != nil {
+			Debugf("NDEF: failed to parse text payload (%d bytes): %v", len(payloadBytes), err)
+			result.Text = "" // Return empty string for malformed payload
+		} else {
 			result.Text = text
 		}
 	case "U": // URI
 		result.Type = NDEFTypeURI
-		if uri, err := parseURIPayload(payloadBytes); err == nil {
+		uri, err := parseURIPayload(payloadBytes)
+		if err != nil {
+			Debugf("NDEF: failed to parse URI payload (%d bytes): %v", len(payloadBytes), err)
+			result.URI = "" // Return empty string for malformed payload
+		} else {
 			result.URI = uri
 		}
 	case "Sp": // Smart Poster
@@ -180,12 +188,20 @@ func handleMediaType(rec *ndef.Record, result *NDEFRecord, payloadBytes []byte) 
 	switch rec.Type {
 	case "application/vnd.wfa.wsc":
 		result.Type = NDEFTypeWiFi
-		if wifi, err := parseWiFiCredential(payloadBytes); err == nil {
+		wifi, err := parseWiFiCredential(payloadBytes)
+		if err != nil {
+			Debugf("NDEF: failed to parse WiFi credential (%d bytes): %v", len(payloadBytes), err)
+			result.WiFi = nil // Return nil for malformed payload
+		} else {
 			result.WiFi = wifi
 		}
 	case "text/vcard", "text/x-vcard":
 		result.Type = NDEFTypeVCard
-		if vcard, err := parseVCard(string(payloadBytes)); err == nil {
+		vcard, err := parseVCard(string(payloadBytes))
+		if err != nil {
+			Debugf("NDEF: failed to parse vCard (%d bytes): %v", len(payloadBytes), err)
+			result.VCard = nil // Return nil for malformed payload
+		} else {
 			result.VCard = vcard
 		}
 	default:

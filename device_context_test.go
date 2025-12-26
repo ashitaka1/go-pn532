@@ -86,131 +86,6 @@ func TestDiagnoseCancellation(t *testing.T) {
 		"Expected context.DeadlineExceeded, got: %v", err)
 }
 
-// TestDetectTagsWithInListPassiveTarget_CallsInRelease tests that tag detection calls InRelease first
-func TestDetectTagsWithInListPassiveTarget_CallsInRelease(t *testing.T) {
-	t.Parallel()
-
-	mock := NewMockTransport()
-	defer func() { _ = mock.Close() }()
-
-	// Set up successful InRelease response (command 0x52)
-	mock.SetResponse(0x52, []byte{0x53, 0x00}) // InRelease response + success status
-
-	// Set up successful InListPassiveTarget response (command 0x4A)
-	mock.SetResponse(0x4A, []byte{
-		0x4B,       // InListPassiveTarget response
-		0x01,       // Number of targets found
-		0x01,       // Target number
-		0x00, 0x04, // SENS_RES
-		0x08,                   // SEL_RES
-		0x04,                   // UID length
-		0x12, 0x34, 0x56, 0x78, // UID
-	})
-
-	device, err := New(mock)
-	require.NoError(t, err)
-
-	// Call the internal detectTagsWithInListPassiveTarget method
-	tags, err := device.detectTagsWithInListPassiveTarget(context.Background(), 1, 0x00)
-
-	require.NoError(t, err)
-	require.Len(t, tags, 1)
-	require.Equal(t, "12345678", tags[0].UID)
-
-	// Note: We set up both InRelease and InListPassiveTarget responses above.
-	// The fact that the detection succeeded implies both were called successfully.
-	// We can't easily verify the exact call order without modifying MockTransport,
-	// but the behavior test (success with proper setup) is sufficient.
-}
-
-// TestDetectTagsWithInListPassiveTarget_InReleaseFails tests behavior when InRelease fails
-func TestDetectTagsWithInListPassiveTarget_InReleaseFails(t *testing.T) {
-	t.Parallel()
-
-	mock := NewMockTransport()
-	defer func() { _ = mock.Close() }()
-
-	// Set up InRelease failure (command 0x52)
-	mock.SetError(0x52, ErrTransportTimeout)
-
-	// Set up successful InListPassiveTarget response despite InRelease failure
-	mock.SetResponse(0x4A, []byte{
-		0x4B,       // InListPassiveTarget response
-		0x01,       // Number of targets found
-		0x01,       // Target number
-		0x00, 0x04, // SENS_RES
-		0x08,                   // SEL_RES
-		0x04,                   // UID length
-		0x12, 0x34, 0x56, 0x78, // UID
-	})
-
-	device, err := New(mock)
-	require.NoError(t, err)
-
-	// Call should succeed even if InRelease fails
-	tags, err := device.detectTagsWithInListPassiveTarget(context.Background(), 1, 0x00)
-
-	require.NoError(t, err, "Tag detection should succeed even when InRelease fails")
-	require.Len(t, tags, 1)
-	require.Equal(t, "12345678", tags[0].UID)
-}
-
-// TestDetectTagsWithInListPassiveTarget_WithContext_Cancellation tests context cancellation during delay
-func TestDetectTagsWithInListPassiveTarget_WithContext_Cancellation(t *testing.T) {
-	t.Parallel()
-
-	mock := NewMockTransport()
-	defer func() { _ = mock.Close() }()
-
-	// Set up successful InRelease response
-	mock.SetResponse(0x52, []byte{0x53, 0x00})
-
-	device, err := New(mock)
-	require.NoError(t, err)
-
-	// Create a context that will be cancelled quickly
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-	defer cancel()
-
-	// This should fail due to context cancellation during the delay
-	_, err = device.detectTagsWithInListPassiveTarget(ctx, 1, 0x00)
-
-	require.Error(t, err)
-	assert.ErrorIs(t, err, context.DeadlineExceeded, "Should fail with context deadline exceeded")
-}
-
-// TestDetectTagsWithInListPassiveTarget_Timing tests that there's a delay after InRelease
-func TestDetectTagsWithInListPassiveTarget_Timing(t *testing.T) {
-	t.Parallel()
-
-	mock := NewMockTransport()
-	defer func() { _ = mock.Close() }()
-
-	// Set up responses
-	mock.SetResponse(0x52, []byte{0x53, 0x00}) // InRelease
-	mock.SetResponse(0x4A, []byte{
-		0x4B,       // InListPassiveTarget response
-		0x01,       // Number of targets found
-		0x01,       // Target number
-		0x00, 0x04, // SENS_RES
-		0x08,                   // SEL_RES
-		0x04,                   // UID length
-		0x12, 0x34, 0x56, 0x78, // UID
-	})
-
-	device, err := New(mock)
-	require.NoError(t, err)
-
-	start := time.Now()
-	_, err = device.detectTagsWithInListPassiveTarget(context.Background(), 1, 0x00)
-	elapsed := time.Since(start)
-
-	require.NoError(t, err)
-	// Should have some delay (at least 5ms) due to the stabilization delay
-	assert.GreaterOrEqual(t, elapsed, 5*time.Millisecond,
-		"Should have a delay of at least 5ms for RF field stabilization")
-}
-
 func TestDevice_Reset(t *testing.T) {
 	t.Parallel()
 
@@ -225,15 +100,9 @@ func TestDevice_Reset(t *testing.T) {
 	device, err := New(mock)
 	require.NoError(t, err)
 
-	// Simulate some state
-	device.currentTarget = 1
-
-	// Reset should clear state and reinitialize
+	// Reset should reinitialize
 	err = device.Reset(context.Background())
 	require.NoError(t, err)
-
-	// Verify state was cleared
-	assert.Equal(t, byte(0), device.currentTarget, "currentTarget should be cleared")
 
 	// Verify firmware version was fetched (at least 2 calls - init + reset)
 	assert.GreaterOrEqual(t, mock.GetCallCount(0x02), 2, "GetFirmwareVersion should be called during reset")
@@ -426,7 +295,6 @@ func TestInRelease(t *testing.T) {
 		setupMock     func(*MockTransport)
 		name          string
 		errorContains string
-		targetNumber  byte
 		expectError   bool
 	}{
 		{
@@ -435,8 +303,7 @@ func TestInRelease(t *testing.T) {
 				mock.SelectTarget()
 				mock.SetResponse(0x52, []byte{0x53, 0x00})
 			},
-			targetNumber: 0,
-			expectError:  false,
+			expectError: false,
 		},
 		{
 			name: "Failure_Status",
@@ -444,7 +311,6 @@ func TestInRelease(t *testing.T) {
 				mock.SelectTarget()
 				mock.SetResponse(0x52, []byte{0x53, 0x01})
 			},
-			targetNumber:  0,
 			expectError:   true,
 			errorContains: "failed with status",
 		},
@@ -454,7 +320,6 @@ func TestInRelease(t *testing.T) {
 				mock.SelectTarget()
 				mock.SetResponse(0x52, []byte{0x99, 0x00})
 			},
-			targetNumber:  0,
 			expectError:   true,
 			errorContains: "unexpected",
 		},
@@ -477,7 +342,7 @@ func TestInRelease(t *testing.T) {
 			device, err := New(mock)
 			require.NoError(t, err)
 
-			err = device.InRelease(context.Background(), tt.targetNumber)
+			err = device.InRelease(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -499,7 +364,6 @@ func TestInSelect(t *testing.T) {
 		setupMock     func(*MockTransport)
 		name          string
 		errorContains string
-		targetNumber  byte
 		expectError   bool
 	}{
 		{
@@ -508,8 +372,7 @@ func TestInSelect(t *testing.T) {
 				mock.SelectTarget()
 				mock.SetResponse(0x54, []byte{0x55, 0x00})
 			},
-			targetNumber: 0,
-			expectError:  false,
+			expectError: false,
 		},
 		{
 			name: "Wrong_Context_Treated_As_Success",
@@ -517,8 +380,7 @@ func TestInSelect(t *testing.T) {
 				mock.SelectTarget()
 				mock.SetResponse(0x54, []byte{0x55, 0x27})
 			},
-			targetNumber: 99,
-			expectError:  false, // 0x27 treated as "already selected"
+			expectError: false, // 0x27 treated as "already selected"
 		},
 		{
 			name: "Other_Failure",
@@ -526,7 +388,6 @@ func TestInSelect(t *testing.T) {
 				mock.SelectTarget()
 				mock.SetResponse(0x54, []byte{0x55, 0x01})
 			},
-			targetNumber:  0,
 			expectError:   true,
 			errorContains: "failed with status",
 		},
@@ -549,7 +410,7 @@ func TestInSelect(t *testing.T) {
 			device, err := New(mock)
 			require.NoError(t, err)
 
-			err = device.InSelect(context.Background(), tt.targetNumber)
+			err = device.InSelect(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -561,49 +422,6 @@ func TestInSelect(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestSelectTag tests the SelectTag convenience method
-func TestSelectTag(t *testing.T) {
-	t.Parallel()
-
-	t.Run("Nil_Tag", func(t *testing.T) {
-		t.Parallel()
-		mock := NewMockTransport()
-		defer func() { _ = mock.Close() }()
-
-		// Set up initialization responses
-		mock.SetResponse(0x02, []byte{0x03, 0x32, 0x01, 0x06, 0x07})
-		mock.SetResponse(0x14, []byte{0x15})
-		mock.SetResponse(0x32, []byte{0x33})
-
-		device, err := New(mock)
-		require.NoError(t, err)
-
-		err = device.SelectTag(context.Background(), nil)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "cannot be nil")
-	})
-
-	t.Run("Valid_Tag", func(t *testing.T) {
-		t.Parallel()
-		mock := NewMockTransport()
-		defer func() { _ = mock.Close() }()
-
-		// Set up initialization responses
-		mock.SetResponse(0x02, []byte{0x03, 0x32, 0x01, 0x06, 0x07})
-		mock.SetResponse(0x14, []byte{0x15})
-		mock.SetResponse(0x32, []byte{0x33})
-		mock.SetResponse(0x54, []byte{0x55, 0x00}) // InSelect response
-		mock.SelectTarget()                        // Select a target first
-
-		device, err := New(mock)
-		require.NoError(t, err)
-
-		tag := &DetectedTag{TargetNumber: 1}
-		err = device.SelectTag(context.Background(), tag)
-		assert.NoError(t, err)
-	})
 }
 
 // TestPowerDown tests the PowerDown command

@@ -57,6 +57,23 @@ func (t *TagOperations) DetectTag(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to detect tag: %w", err)
 	}
+	if tag == nil {
+		return ErrNoTag
+	}
+
+	t.tag = tag
+
+	// Determine tag type and initialize appropriate handler
+	return t.detectAndInitializeTag(ctx)
+}
+
+// InitFromDetectedTag initializes operations from an already-detected tag.
+// Use this when the tag was detected via polling and you want to avoid
+// re-detection which can put the tag in a different state.
+func (t *TagOperations) InitFromDetectedTag(ctx context.Context, tag *pn532.DetectedTag) error {
+	if tag == nil {
+		return ErrNoTag
+	}
 
 	t.tag = tag
 
@@ -88,25 +105,63 @@ func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 		return ErrNoTag
 	}
 
-	// Try NTAG detection first
-	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK)
-	if err := ntag.DetectType(ctx); err == nil {
-		t.tagType = pn532.TagTypeNTAG
-		t.ntagInstance = ntag
-		t.totalPages = int(ntag.GetTotalPages())
-		return nil
+	// If tag type is already known from detection, try that first then fallback.
+	// Each case tries the expected type, then the alternative - no redundant attempts.
+	switch t.tag.Type {
+	case pn532.TagTypeMIFARE:
+		if t.tryInitMIFARE(ctx) {
+			return nil
+		}
+		if t.tryInitNTAG(ctx) {
+			return nil
+		}
+		return ErrUnsupportedTag
+
+	case pn532.TagTypeNTAG:
+		if t.tryInitNTAG(ctx) {
+			return nil
+		}
+		if t.tryInitMIFARE(ctx) {
+			return nil
+		}
+		return ErrUnsupportedTag
+
+	case pn532.TagTypeFeliCa, pn532.TagTypeUnknown, pn532.TagTypeAny:
+		// Unknown or other types - try both in order
+		if t.tryInitNTAG(ctx) {
+			return nil
+		}
+		if t.tryInitMIFARE(ctx) {
+			return nil
+		}
+		return ErrUnsupportedTag
 	}
 
-	// Try MIFARE detection
-	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
-	// Try to authenticate with common keys to verify it's MIFARE
-	if t.tryMIFAREAuth(ctx, mifare) {
-		t.tagType = pn532.TagTypeMIFARE
-		t.mifareInstance = mifare
-		return nil
-	}
-
+	// Unreachable - all TagType values handled above
 	return ErrUnsupportedTag
+}
+
+// tryInitNTAG attempts to initialize as an NTAG tag. Returns true on success.
+func (t *TagOperations) tryInitNTAG(ctx context.Context) bool {
+	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK)
+	if err := ntag.DetectType(ctx); err != nil {
+		return false
+	}
+	t.tagType = pn532.TagTypeNTAG
+	t.ntagInstance = ntag
+	t.totalPages = int(ntag.GetTotalPages())
+	return true
+}
+
+// tryInitMIFARE attempts to initialize as a MIFARE tag. Returns true on success.
+func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
+	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
+	if !t.tryMIFAREAuth(ctx, mifare) {
+		return false
+	}
+	t.tagType = pn532.TagTypeMIFARE
+	t.mifareInstance = mifare
+	return true
 }
 
 // tryMIFAREAuth attempts to read a block to verify MIFARE functionality

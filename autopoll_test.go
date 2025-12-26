@@ -132,14 +132,6 @@ func verifyBasicFields(t *testing.T, detected *DetectedTag, testCase *autoPollTe
 }
 
 func verifyInAutoPollFields(t *testing.T, detected *DetectedTag, testCase *autoPollTestCase) {
-	if !detected.FromInAutoPoll {
-		t.Error("Expected FromInAutoPoll to be true")
-	}
-
-	if detected.TargetNumber != 1 {
-		t.Errorf("Expected TargetNumber 1, got %d", detected.TargetNumber)
-	}
-
 	if len(detected.TargetData) != len(testCase.result.TargetData) {
 		t.Errorf("Expected TargetData length %d, got %d",
 			len(testCase.result.TargetData), len(detected.TargetData))
@@ -209,13 +201,9 @@ func TestToDetectedTagWithEmptyData(t *testing.T) {
 		t.Errorf("Expected empty UIDBytes, got length %d", len(detected.UIDBytes))
 	}
 
-	// Critical flags should still be set correctly
-	if !detected.FromInAutoPoll {
-		t.Error("FromInAutoPoll should be true even with empty data")
-	}
-
-	if detected.TargetNumber != 1 {
-		t.Errorf("TargetNumber should be 1, got %d", detected.TargetNumber)
+	// DetectedAt should still be set correctly
+	if detected.DetectedAt.IsZero() {
+		t.Error("DetectedAt should be set even with empty data")
 	}
 }
 
@@ -242,13 +230,9 @@ func TestToDetectedTagCompatibilityWithExistingLogic(t *testing.T) {
 		t.Errorf("Expected TagTypeNTAG, got %s", detected.Type)
 	}
 
-	// Should have critical flags set
-	if !detected.FromInAutoPoll {
-		t.Error("FromInAutoPoll must be true for InAutoPoll results")
-	}
-
-	if detected.TargetNumber != 1 {
-		t.Error("TargetNumber must be 1 for compatibility")
+	// Should have DetectedAt set
+	if detected.DetectedAt.IsZero() {
+		t.Error("DetectedAt must be set for InAutoPoll results")
 	}
 }
 

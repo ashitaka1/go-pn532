@@ -39,6 +39,52 @@ const (
 	TagTypeAny TagType = "ANY"
 )
 
+// Manufacturer represents the chip manufacturer identified from the UID.
+// The first byte of a 7-byte UID contains the manufacturer code per ISO/IEC 7816-6.
+type Manufacturer string
+
+const (
+	// ManufacturerNXP is NXP Semiconductors (0x04) - maker of genuine NTAG chips.
+	ManufacturerNXP Manufacturer = "NXP"
+	// ManufacturerST is STMicroelectronics (0x02) - maker of ST25TN chips.
+	ManufacturerST Manufacturer = "STMicroelectronics"
+	// ManufacturerInfineon is Infineon Technologies (0x05) - maker of MIFARE-compatible chips.
+	ManufacturerInfineon Manufacturer = "Infineon"
+	// ManufacturerTI is Texas Instruments (0x07).
+	ManufacturerTI Manufacturer = "Texas Instruments"
+	// ManufacturerUnknown indicates an unrecognized manufacturer code.
+	// This typically indicates a clone or counterfeit chip.
+	ManufacturerUnknown Manufacturer = "Unknown"
+)
+
+// GetManufacturer returns the chip manufacturer based on the UID's first byte.
+// For 7-byte UIDs (NTAG, ST25TN, etc.), the first byte is the manufacturer code.
+// For 4-byte UIDs (MIFARE Classic), manufacturer detection is less reliable.
+func GetManufacturer(uid []byte) Manufacturer {
+	if len(uid) == 0 {
+		return ManufacturerUnknown
+	}
+
+	switch uid[0] {
+	case 0x04:
+		return ManufacturerNXP
+	case 0x02:
+		return ManufacturerST
+	case 0x05:
+		return ManufacturerInfineon
+	case 0x07:
+		return ManufacturerTI
+	default:
+		return ManufacturerUnknown
+	}
+}
+
+// IsGenuineNXP returns true if the UID indicates a genuine NXP chip.
+// Clone tags typically have non-0x04 first bytes.
+func IsGenuineNXP(uid []byte) bool {
+	return len(uid) > 0 && uid[0] == 0x04
+}
+
 // Tag represents an NFC tag interface
 type Tag interface {
 	// Type returns the tag type
@@ -103,6 +149,17 @@ func (t *BaseTag) IsMIFARE4K() bool {
 	// MIFARE Classic 4K cards have SAK = 0x18
 	// MIFARE Classic 1K cards have SAK = 0x08
 	return t.sak == 0x18
+}
+
+// Manufacturer returns the chip manufacturer identified from the UID.
+func (t *BaseTag) Manufacturer() Manufacturer {
+	return GetManufacturer(t.uid)
+}
+
+// IsGenuine returns true if the chip appears to be from a known manufacturer.
+// Returns false for unknown/clone chips.
+func (t *BaseTag) IsGenuine() bool {
+	return t.Manufacturer() != ManufacturerUnknown
 }
 
 // ReadBlock provides a default implementation that returns an error
@@ -211,19 +268,23 @@ func (t *BaseTag) DebugInfoWithNDEF(ndefReader interface {
 }
 
 // DetectedTag represents a tag that was detected by the reader
-// Field ordering optimized for memory alignment to reduce struct size from 120 to 112 bytes
 type DetectedTag struct {
-	// 8-byte aligned fields first (largest to smallest)
-	DetectedAt time.Time // 24 bytes (time.Time contains wall, ext, loc)
-	UID        string    // 16 bytes (string header: pointer + length)
-	Type       TagType   // 16 bytes (string header: pointer + length)
-	UIDBytes   []byte    // 24 bytes (slice header: pointer + len + cap)
-	ATQ        []byte    // 24 bytes (slice header: pointer + len + cap)
-	TargetData []byte    // 24 bytes (slice header: pointer + len + cap) - Full target response data (needed for FeliCa)
-	// 1-byte fields grouped together to minimize padding
-	SAK            byte // 1 byte
-	TargetNumber   byte // 1 byte
-	FromInAutoPoll bool // 1 byte - indicates this tag was detected via InAutoPoll (skip InSelect)
-	// 5 bytes padding to align to 8-byte boundary
-	// Total: 112 bytes (previously 120 bytes, saved 8 bytes)
+	DetectedAt time.Time // When the tag was detected
+	UID        string    // UID as hex string
+	Type       TagType   // Tag type
+	UIDBytes   []byte    // UID as raw bytes
+	ATQ        []byte    // Answer to Request bytes
+	TargetData []byte    // Full target response data (needed for FeliCa)
+	SAK        byte      // Select Acknowledge byte
+}
+
+// Manufacturer returns the chip manufacturer identified from the UID.
+func (t *DetectedTag) Manufacturer() Manufacturer {
+	return GetManufacturer(t.UIDBytes)
+}
+
+// IsGenuine returns true if the chip appears to be from a known manufacturer.
+// Returns false for unknown/clone chips.
+func (t *DetectedTag) IsGenuine() bool {
+	return t.Manufacturer() != ManufacturerUnknown
 }

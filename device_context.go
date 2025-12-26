@@ -72,7 +72,6 @@ func (d *Device) InitContext(ctx context.Context) error {
 // If Reset fails, consider closing and reopening the transport entirely.
 func (d *Device) Reset(ctx context.Context) error {
 	// Clear internal state
-	d.currentTarget = 0
 	d.firmwareVersion = nil
 
 	// Reinitialize the device
@@ -356,34 +355,6 @@ func (d *Device) SAMConfiguration(ctx context.Context, mode SAMMode, timeout, ir
 
 // DetectTag detects a single tag in the field with context support
 func (d *Device) DetectTag(ctx context.Context) (*DetectedTag, error) {
-	tags, err := d.DetectTags(ctx, 1, 0x00)
-	if err != nil {
-		return nil, err
-	}
-	if len(tags) == 0 {
-		return nil, ErrNoTagDetected
-	}
-	return tags[0], nil
-}
-
-// DetectTags detects multiple tags in the field with context support
-// Uses polling strategy system with InListPassiveTarget as the preferred default
-func (d *Device) DetectTags(ctx context.Context, maxTags, baudRate byte) ([]*DetectedTag, error) {
-	if maxTags > 2 {
-		maxTags = 2 // PN532 can handle maximum 2 targets
-	}
-	if maxTags == 0 {
-		maxTags = 1
-	}
-
-	// Use simple InListPassiveTarget approach - no complex strategy selection needed
-	return d.detectTagsWithInListPassiveTarget(ctx, maxTags, baudRate)
-}
-
-// detectTagsWithInListPassiveTarget uses traditional InListPassiveTarget polling
-func (d *Device) detectTagsWithInListPassiveTarget(
-	ctx context.Context, maxTags, baudRate byte,
-) ([]*DetectedTag, error) {
 	Debugln("Using InListPassiveTarget strategy")
 
 	// Apply transport-specific optimizations and timing
@@ -394,7 +365,7 @@ func (d *Device) detectTagsWithInListPassiveTarget(
 
 	// Release any previously selected targets to clear HALT states
 	// This addresses intermittent "empty valid tag" issues where tags get stuck
-	if err := d.InRelease(ctx, 0); err != nil {
+	if err := d.InRelease(ctx); err != nil {
 		Debugf("InRelease failed, continuing anyway: %v", err)
 		// Don't fail the operation if InRelease fails - it's an optimization
 	}
@@ -406,8 +377,7 @@ func (d *Device) detectTagsWithInListPassiveTarget(
 	case <-time.After(10 * time.Millisecond):
 	}
 
-	// Use InListPassiveTarget for legacy compatibility
-	return d.InListPassiveTarget(ctx, maxTags, baudRate)
+	return d.InListPassiveTarget(ctx, 0x00)
 }
 
 // prepareTransportForInListPassiveTarget applies transport-specific preparations for InListPassiveTarget
@@ -427,45 +397,27 @@ func (d *Device) prepareTransportForInListPassiveTarget(_ context.Context) error
 	}
 }
 
-// convertAutoPollResults converts InAutoPoll results to DetectedTag format
-func (d *Device) convertAutoPollResults(
-	_ context.Context, results []AutoPollResult, maxTags byte,
-) ([]*DetectedTag, error) {
-	tags := make([]*DetectedTag, 0, len(results))
-	for index, result := range results {
-		if index >= int(maxTags) {
-			break // Respect maxTags limit
-		}
-
-		// Parse the target data to extract UID, ATQ, SAK
-		uid, atq, sak := d.parseTargetData(result.Type, result.TargetData)
-
-		// Determine tag type based on AutoPoll target type first, then ATQ/SAK
-		tagType := d.identifyTagTypeFromTarget(result.Type, atq, sak)
-
-		tag := &DetectedTag{
-			Type:           tagType,
-			UID:            fmt.Sprintf("%x", uid),
-			UIDBytes:       uid,
-			ATQ:            atq,
-			SAK:            sak,
-			TargetNumber:   d.getTargetNumber(index), // Use appropriate target number
-			DetectedAt:     time.Now(),
-			TargetData:     result.TargetData, // Store full target data for FeliCa
-			FromInAutoPoll: true,              // Mark as from InAutoPoll to skip InSelect
-		}
-		tags = append(tags, tag)
+// convertAutoPollResult converts a single InAutoPoll result to DetectedTag format
+func (d *Device) convertAutoPollResult(result *AutoPollResult) *DetectedTag {
+	if result == nil {
+		return nil
 	}
 
-	return tags, nil
-}
+	// Parse the target data to extract UID, ATQ, SAK
+	uid, atq, sak := d.parseTargetData(result.Type, result.TargetData)
 
-// getTargetNumber returns the appropriate target number for the given index
-// This ensures proper PN532 protocol compliance for target selection
-func (*Device) getTargetNumber(index int) byte {
-	// Target numbers are now 0-based as InListPassiveTarget assigns them this way
-	// This change aligns with the protocol used by all transport types
-	return byte(index)
+	// Determine tag type based on AutoPoll target type first, then ATQ/SAK
+	tagType := d.identifyTagTypeFromTarget(result.Type, atq, sak)
+
+	return &DetectedTag{
+		Type:       tagType,
+		UID:        fmt.Sprintf("%x", uid),
+		UIDBytes:   uid,
+		ATQ:        atq,
+		SAK:        sak,
+		DetectedAt: time.Now(),
+		TargetData: result.TargetData, // Store full target data for FeliCa
+	}
 }
 
 // identifyTagTypeFromTarget identifies tag type from AutoPollTarget type and ATQ/SAK
@@ -576,7 +528,12 @@ func (*Device) parseISO14443BData(targetData []byte) []byte {
 
 // SendDataExchange sends a data exchange command with context support
 func (d *Device) SendDataExchange(ctx context.Context, data []byte) ([]byte, error) {
-	targetNum := d.getCurrentTarget()
+	const targetNum byte = 1
+	if len(data) > 0 {
+		Debugf("SendDataExchange: target=%d, data[0]=0x%02X, len=%d", targetNum, data[0], len(data))
+	} else {
+		Debugf("SendDataExchange: target=%d, data=(empty), len=0", targetNum)
+	}
 	res, err := d.transport.SendCommandWithContext(ctx, cmdInDataExchange, append([]byte{targetNum}, data...))
 	if err != nil {
 		return nil, fmt.Errorf("failed to send data exchange command: %w", err)
@@ -600,7 +557,7 @@ func (d *Device) SendDataExchange(ctx context.Context, data []byte) ([]byte, err
 
 // SendRawCommand sends a raw command with context support
 func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error) {
-	targetNum := d.getCurrentTarget()
+	const targetNum byte = 1
 	res, err := d.transport.SendCommandWithContext(ctx, cmdInCommunicateThru, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send communicate through command: %w", err)
@@ -622,9 +579,10 @@ func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error
 	return res[2:], nil
 }
 
-// InRelease releases the selected target(s) with context support
-func (d *Device) InRelease(ctx context.Context, targetNumber byte) error {
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInRelease, []byte{targetNumber})
+// InRelease releases all selected targets with context support
+func (d *Device) InRelease(ctx context.Context) error {
+	// Always release all targets (target 0 = release all)
+	res, err := d.transport.SendCommandWithContext(ctx, cmdInRelease, []byte{0x00})
 	if err != nil {
 		return fmt.Errorf("InRelease command failed: %w", err)
 	}
@@ -641,10 +599,13 @@ func (d *Device) InRelease(ctx context.Context, targetNumber byte) error {
 	return nil
 }
 
-// InSelect selects the specified target with context support
-func (d *Device) InSelect(ctx context.Context, targetNumber byte) error {
+// InSelect selects target 1 for communication with context support
+func (d *Device) InSelect(ctx context.Context) error {
+	const targetNumber byte = 1
+	Debugf("InSelect: selecting target %d", targetNumber)
 	res, err := d.transport.SendCommandWithContext(ctx, cmdInSelect, []byte{targetNumber})
 	if err != nil {
+		Debugf("InSelect: command failed: %v", err)
 		return fmt.Errorf("InSelect command failed: %w", err)
 	}
 
@@ -656,30 +617,21 @@ func (d *Device) InSelect(ctx context.Context, targetNumber byte) error {
 	if res[1] == 0x27 {
 		// 0x27 = Wrong Context - target likely already selected by InListPassiveTarget
 		Debugf("InSelect returned 0x27 for target %d - assuming already selected", targetNumber)
-		d.setCurrentTarget(targetNumber)
 		return nil
 	}
 	if res[1] != 0x00 {
+		Debugf("InSelect: failed with status: %02x", res[1])
 		return fmt.Errorf("InSelect failed with status: %02x", res[1])
 	}
 
-	d.setCurrentTarget(targetNumber)
+	Debugf("InSelect: success for target %d", targetNumber)
 	return nil
 }
 
-// SelectTag selects the specified detected tag for communication.
-// This is a convenience wrapper around InSelect that uses the tag's stored target number.
-func (d *Device) SelectTag(ctx context.Context, tag *DetectedTag) error {
-	if tag == nil {
-		return errors.New("tag cannot be nil")
-	}
-	return d.InSelect(ctx, tag.TargetNumber)
-}
-
-// InAutoPoll polls for targets with context support
+// InAutoPoll polls for a single target with context support
 func (d *Device) InAutoPoll(
 	ctx context.Context, pollCount, pollPeriod byte, targetTypes []AutoPollTarget,
-) ([]AutoPollResult, error) {
+) (*AutoPollResult, error) {
 	if pollPeriod < 1 || pollPeriod > 15 {
 		return nil, errors.New("poll period must be between 1 and 15")
 	}
@@ -705,48 +657,41 @@ func (d *Device) InAutoPoll(
 
 	numTargets := res[1]
 	if numTargets == 0 {
-		return []AutoPollResult{}, nil
+		return nil, nil //nolint:nilnil // nil result, nil error is valid "no tag detected" response
 	}
 
-	// Parse results
-	results := []AutoPollResult{}
+	// Parse first result only
 	offset := 2
-
-	for i := range numTargets {
-		if offset+2 > len(res) {
-			return nil, fmt.Errorf("%w: response truncated when expecting target %d header", ErrInvalidResponse, i+1)
-		}
-
-		targetType := AutoPollTarget(res[offset])
-		dataLen := res[offset+1]
-		offset += 2
-
-		if offset+int(dataLen) > len(res) {
-			return nil, errors.New("invalid response data length")
-		}
-
-		targetData := res[offset : offset+int(dataLen)]
-		offset += int(dataLen)
-
-		results = append(results, AutoPollResult{
-			Type:       targetType,
-			TargetData: targetData,
-		})
+	if offset+2 > len(res) {
+		return nil, fmt.Errorf("%w: response truncated when expecting target header", ErrInvalidResponse)
 	}
 
-	return results, nil
+	targetType := AutoPollTarget(res[offset])
+	dataLen := res[offset+1]
+	offset += 2
+
+	if offset+int(dataLen) > len(res) {
+		return nil, errors.New("invalid response data length")
+	}
+
+	targetData := res[offset : offset+int(dataLen)]
+
+	return &AutoPollResult{
+		Type:       targetType,
+		TargetData: targetData,
+	}, nil
 }
 
-// InListPassiveTarget detects passive targets using InListPassiveTarget command
-func (d *Device) InListPassiveTarget(ctx context.Context, maxTg, brTy byte) ([]*DetectedTag, error) {
-	maxTg = d.normalizeMaxTargets(maxTg)
+// InListPassiveTarget detects a single passive target using InListPassiveTarget command
+func (d *Device) InListPassiveTarget(ctx context.Context, brTy byte) (*DetectedTag, error) {
+	const maxTg byte = 1
 	data := []byte{maxTg, brTy}
 
 	Debugf("InListPassiveTarget - maxTg=%d, brTy=0x%02X, transport=%s", maxTg, brTy, d.transport.Type())
 
 	res, err := d.executeInListPassiveTarget(ctx, data)
 	if err != nil {
-		return d.handleInListPassiveTargetError(ctx, err, maxTg, brTy)
+		return d.handleInListPassiveTargetError(ctx, err, brTy)
 	}
 
 	Debugf("InListPassiveTarget response (%d bytes): %X", len(res), res)
@@ -758,7 +703,7 @@ func (d *Device) InListPassiveTarget(ctx context.Context, maxTg, brTy byte) ([]*
 	return d.parseInListPassiveTargetResponse(res)
 }
 
-// InListPassiveTargetWithTimeout detects passive targets using InListPassiveTarget command with timeout support.
+// InListPassiveTargetWithTimeout detects a single passive target with timeout support.
 // The mxRtyATR parameter controls the maximum retry count for target detection:
 // - 0x00: Try once, no retry
 // - 0x01-0xFE: Retry count (each retry is ~150ms according to PN532 datasheet)
@@ -767,9 +712,9 @@ func (d *Device) InListPassiveTarget(ctx context.Context, maxTg, brTy byte) ([]*
 // For continuous polling with card removal detection, use low values (0x01-0x10) to ensure
 // the command returns quickly when no card is present.
 func (d *Device) InListPassiveTargetWithTimeout(
-	ctx context.Context, maxTg, brTy, mxRtyATR byte,
-) ([]*DetectedTag, error) {
-	maxTg = d.normalizeMaxTargets(maxTg)
+	ctx context.Context, brTy, mxRtyATR byte,
+) (*DetectedTag, error) {
+	const maxTg byte = 1
 	data := []byte{maxTg, brTy, mxRtyATR}
 
 	Debugf("InListPassiveTargetWithTimeout - maxTg=%d, brTy=0x%02X, mxRtyATR=0x%02X, transport=%s",
@@ -777,7 +722,7 @@ func (d *Device) InListPassiveTargetWithTimeout(
 
 	res, err := d.executeInListPassiveTarget(ctx, data)
 	if err != nil {
-		return d.handleInListPassiveTargetError(ctx, err, maxTg, brTy)
+		return d.handleInListPassiveTargetError(ctx, err, brTy)
 	}
 
 	Debugf("InListPassiveTargetWithTimeout response (%d bytes): %X", len(res), res)
@@ -787,17 +732,6 @@ func (d *Device) InListPassiveTargetWithTimeout(
 	}
 
 	return d.parseInListPassiveTargetResponse(res)
-}
-
-// normalizeMaxTargets ensures maxTg is within valid range
-func (*Device) normalizeMaxTargets(maxTg byte) byte {
-	if maxTg > 2 {
-		maxTg = 2 // PN532 can handle maximum 2 targets
-	}
-	if maxTg == 0 {
-		maxTg = 1
-	}
-	return maxTg
 }
 
 // executeInListPassiveTarget sends the InListPassiveTarget command
@@ -891,15 +825,15 @@ func (*Device) getContextTimeoutOrFallback(ctx context.Context, fallback time.Du
 
 // handleInListPassiveTargetError handles command errors with clone device fallback
 func (d *Device) handleInListPassiveTargetError(
-	ctx context.Context, err error, maxTg, brTy byte,
-) ([]*DetectedTag, error) {
+	ctx context.Context, err error, brTy byte,
+) (*DetectedTag, error) {
 	Debugf("InListPassiveTarget command failed: %v", err)
 
 	// Check if this looks like a clone device compatibility issue
 	if strings.Contains(err.Error(), "clone device returned empty response") ||
 		strings.Contains(err.Error(), "need at least 2 bytes for status") {
 		Debugln("Clone device detected - InListPassiveTarget not supported, falling back to InAutoPoll")
-		return d.fallbackToInAutoPoll(ctx, maxTg, brTy)
+		return d.fallbackToInAutoPoll(ctx, brTy)
 	}
 
 	return nil, fmt.Errorf("InListPassiveTarget command failed: %w", err)
@@ -907,7 +841,7 @@ func (d *Device) handleInListPassiveTargetError(
 
 // validateInListPassiveTargetResponse validates the response format
 func (*Device) validateInListPassiveTargetResponse(res []byte) error {
-	if len(res) < 2 {
+	if res == nil || len(res) < 2 { //nolint:staticcheck // explicit nil check for nilaway
 		Debugf("Response too short (%d bytes) - may indicate clone device timing issue", len(res))
 		return fmt.Errorf("InListPassiveTarget response too short: got %d bytes, expected at least 2", len(res))
 	}
@@ -927,29 +861,26 @@ func (*Device) validateInListPassiveTargetResponse(res []byte) error {
 	return nil
 }
 
-// parseInListPassiveTargetResponse parses the response and creates DetectedTag objects
-func (d *Device) parseInListPassiveTargetResponse(res []byte) ([]*DetectedTag, error) {
+// parseInListPassiveTargetResponse parses the response and creates a DetectedTag
+func (d *Device) parseInListPassiveTargetResponse(res []byte) (*DetectedTag, error) {
+	if len(res) < 2 {
+		return nil, fmt.Errorf("response too short: %d bytes", len(res))
+	}
 	numTargets := res[1]
 	Debugf("InListPassiveTarget found %d targets", numTargets)
 
 	if numTargets == 0 {
 		Debugln("No targets detected - this may indicate clone device needs different timing or initialization")
-		return []*DetectedTag{}, nil
+		return nil, nil //nolint:nilnil // nil tag, nil error is valid "no tag detected" response
 	}
 
-	tags := make([]*DetectedTag, 0, int(numTargets))
-	offset := 2
-
-	for i := range numTargets {
-		tag, newOffset, err := d.parseTargetAtOffset(res, offset, int(i)+1)
-		if err != nil {
-			return nil, err
-		}
-		tags = append(tags, tag)
-		offset = newOffset
+	// Parse first target only
+	tag, _, err := d.parseTargetAtOffset(res, 2, 1)
+	if err != nil {
+		return nil, err
 	}
 
-	return tags, nil
+	return tag, nil
 }
 
 // parseTargetAtOffset parses a single target from the response at the given offset
@@ -960,10 +891,8 @@ func (d *Device) parseTargetAtOffset(res []byte, offset, targetIndex int) (*Dete
 		return nil, 0, fmt.Errorf("response truncated when expecting target %d", targetIndex)
 	}
 
-	// Target number (logical number assigned by PN532)
-	targetNumber := res[offset]
+	// Skip target number byte (logical number assigned by PN532, no longer used)
 	offset++
-	Debugf("Target %d - targetNumber=%d", targetIndex, targetNumber)
 
 	result, err := d.parseInListTargetData(res, offset, targetIndex)
 	if err != nil {
@@ -974,13 +903,12 @@ func (d *Device) parseTargetAtOffset(res []byte, offset, targetIndex int) (*Dete
 	Debugf("Target %d - Identified as %v", targetIndex, tagType)
 
 	tag := &DetectedTag{
-		Type:         tagType,
-		UID:          fmt.Sprintf("%x", result.uid),
-		UIDBytes:     result.uid,
-		ATQ:          result.atq,
-		SAK:          result.sak,
-		TargetNumber: targetNumber,
-		DetectedAt:   time.Now(),
+		Type:       tagType,
+		UID:        fmt.Sprintf("%x", result.uid),
+		UIDBytes:   result.uid,
+		ATQ:        result.atq,
+		SAK:        result.sak,
+		DetectedAt: time.Now(),
 	}
 
 	return tag, result.newOffset, nil
@@ -1037,7 +965,7 @@ func (*Device) parseInListTargetData(res []byte, offset, targetIndex int) (*targ
 
 // fallbackToInAutoPoll provides a fallback detection method for clone devices
 // that don't support InListPassiveTarget command properly
-func (d *Device) fallbackToInAutoPoll(ctx context.Context, maxTg, brTy byte) ([]*DetectedTag, error) {
+func (d *Device) fallbackToInAutoPoll(ctx context.Context, brTy byte) (*DetectedTag, error) {
 	Debugln("Using InAutoPoll fallback for clone device compatibility")
 
 	// Convert baudRate parameter to appropriate AutoPoll target types
@@ -1066,21 +994,21 @@ func (d *Device) fallbackToInAutoPoll(ctx context.Context, maxTg, brTy byte) ([]
 
 	// Use InAutoPoll with shorter timeout for faster failure detection
 	// Use period=3 (3*150ms = 450ms) for quicker response
-	results, err := d.InAutoPoll(ctx, maxTg, 3, targetTypes)
+	result, err := d.InAutoPoll(ctx, 1, 3, targetTypes)
 	if err != nil {
 		Debugf("InAutoPoll fallback also failed: %v", err)
 		return nil, fmt.Errorf("both InListPassiveTarget and InAutoPoll failed for clone device: %w", err)
 	}
 
-	if len(results) == 0 {
+	if result == nil {
 		Debugln("No targets detected via InAutoPoll fallback")
-		return []*DetectedTag{}, nil
+		return nil, nil //nolint:nilnil // nil tag, nil error is valid "no tag detected" response
 	}
 
-	Debugf("InAutoPoll fallback detected %d targets", len(results))
+	Debugln("InAutoPoll fallback detected 1 target")
 
-	// Convert AutoPoll results to DetectedTag format
-	return d.convertAutoPollResults(ctx, results, maxTg)
+	// Convert AutoPoll result to DetectedTag format
+	return d.convertAutoPollResult(result), nil
 }
 
 // PowerDown puts the PN532 into power down mode with context support

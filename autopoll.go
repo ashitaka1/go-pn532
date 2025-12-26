@@ -53,9 +53,8 @@ type AutoPollResult struct {
 	Type       AutoPollTarget
 }
 
-// ToDetectedTag converts an AutoPollResult to a DetectedTag with proper configuration
-// for InAutoPoll results. This method automatically sets FromInAutoPoll=true and
-// handles UID extraction and tag type mapping.
+// ToDetectedTag converts an AutoPollResult to a DetectedTag.
+// Handles UID extraction and tag type mapping.
 func (a *AutoPollResult) ToDetectedTag() *DetectedTag {
 	// Map AutoPollTarget to TagType first
 	tagType := a.mapToTagType()
@@ -67,13 +66,11 @@ func (a *AutoPollResult) ToDetectedTag() *DetectedTag {
 	uidBytes, uid = a.extractUID(tagType)
 
 	return &DetectedTag{
-		Type:           tagType,
-		UID:            uid,
-		UIDBytes:       uidBytes,
-		TargetData:     a.TargetData,
-		FromInAutoPoll: true, // Critical: Skip InSelect since InAutoPoll handles selection
-		TargetNumber:   1,    // Use target 1 for compatibility
-		DetectedAt:     time.Now(),
+		Type:       tagType,
+		UID:        uid,
+		UIDBytes:   uidBytes,
+		TargetData: a.TargetData,
+		DetectedAt: time.Now(),
 	}
 }
 
