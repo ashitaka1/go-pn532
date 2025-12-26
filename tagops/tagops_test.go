@@ -573,3 +573,123 @@ func TestDetectAndInitializeTag_NTAG_FallsBackToMIFARE(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType, "Should fall back to MIFARE when NTAG fails")
 }
+
+// --- Reader Function Tests ---
+
+func TestProbeActualMemorySize_NoTag(t *testing.T) {
+	ops := &TagOperations{}
+
+	lastPage, userMemory, err := ops.ProbeActualMemorySize(context.Background(), 144)
+
+	require.Error(t, err)
+	assert.Equal(t, ErrNoTag, err)
+	assert.Equal(t, uint8(0), lastPage)
+	assert.Equal(t, 0, userMemory)
+}
+
+func TestProbeActualMemorySize_UnsupportedTag(t *testing.T) {
+	ops := &TagOperations{
+		tag:     &pn532.DetectedTag{UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}},
+		tagType: pn532.TagTypeMIFARE, // Not NTAG
+	}
+
+	lastPage, userMemory, err := ops.ProbeActualMemorySize(context.Background(), 144)
+
+	require.Error(t, err)
+	assert.Equal(t, ErrUnsupportedTag, err)
+	assert.Equal(t, uint8(0), lastPage)
+	assert.Equal(t, 0, userMemory)
+}
+
+func TestProbeActualMemorySize_NilNtagInstance(t *testing.T) {
+	ops := &TagOperations{
+		tag:          &pn532.DetectedTag{UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}},
+		tagType:      pn532.TagTypeNTAG,
+		ntagInstance: nil, // NTAG type but no instance
+	}
+
+	lastPage, userMemory, err := ops.ProbeActualMemorySize(context.Background(), 144)
+
+	require.Error(t, err)
+	assert.Equal(t, ErrUnsupportedTag, err)
+	assert.Equal(t, uint8(0), lastPage)
+	assert.Equal(t, 0, userMemory)
+}
+
+func TestReadCapabilityContainer_NoTag(t *testing.T) {
+	ops := &TagOperations{}
+
+	data, err := ops.ReadCapabilityContainer(context.Background())
+
+	require.Error(t, err)
+	assert.Equal(t, ErrNoTag, err)
+	assert.Nil(t, data)
+}
+
+func TestReadCapabilityContainer_UnsupportedTag(t *testing.T) {
+	ops := &TagOperations{
+		tag:     &pn532.DetectedTag{UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}},
+		tagType: pn532.TagTypeMIFARE, // Not NTAG
+	}
+
+	data, err := ops.ReadCapabilityContainer(context.Background())
+
+	require.Error(t, err)
+	assert.Equal(t, ErrUnsupportedTag, err)
+	assert.Nil(t, data)
+}
+
+func TestReadCapabilityContainer_NilNtagInstance(t *testing.T) {
+	ops := &TagOperations{
+		tag:          &pn532.DetectedTag{UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}},
+		tagType:      pn532.TagTypeNTAG,
+		ntagInstance: nil, // NTAG type but no instance
+	}
+
+	data, err := ops.ReadCapabilityContainer(context.Background())
+
+	require.Error(t, err)
+	assert.Equal(t, ErrUnsupportedTag, err)
+	assert.Nil(t, data)
+}
+
+func TestGetClaimedSizeFromCC(t *testing.T) {
+	tests := []struct {
+		name     string
+		ccData   []byte
+		expected int
+	}{
+		{
+			name:     "NTAG213_Size",
+			ccData:   []byte{0xE1, 0x10, 0x12, 0x00}, // 0x12 * 8 = 144 bytes
+			expected: 144,
+		},
+		{
+			name:     "NTAG215_Size",
+			ccData:   []byte{0xE1, 0x10, 0x3E, 0x00}, // 0x3E * 8 = 496 bytes
+			expected: 496,
+		},
+		{
+			name:     "NTAG216_Size",
+			ccData:   []byte{0xE1, 0x10, 0x6D, 0x00}, // 0x6D * 8 = 872 bytes
+			expected: 872,
+		},
+		{
+			name:     "Empty_CC",
+			ccData:   []byte{},
+			expected: 0,
+		},
+		{
+			name:     "Short_CC",
+			ccData:   []byte{0xE1, 0x10},
+			expected: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := GetClaimedSizeFromCC(tc.ccData)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
