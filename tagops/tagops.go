@@ -19,8 +19,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ZaparooProject/go-pn532"
+)
+
+// Retry constants for tag initialization
+const (
+	initMaxRetries = 3
+	initRetryDelay = 10 * time.Millisecond
 )
 
 var (
@@ -142,32 +149,53 @@ func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 }
 
 // tryInitNTAG attempts to initialize as an NTAG tag. Returns true on success.
+// Uses retry logic to handle transient RF communication failures.
 func (t *TagOperations) tryInitNTAG(ctx context.Context) bool {
 	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK)
-	if err := ntag.DetectType(ctx); err != nil {
-		return false
+
+	for i := range initMaxRetries {
+		if err := ctx.Err(); err != nil {
+			return false
+		}
+
+		if err := ntag.DetectType(ctx); err == nil {
+			t.tagType = pn532.TagTypeNTAG
+			t.ntagInstance = ntag
+			t.totalPages = int(ntag.GetTotalPages())
+			return true
+		} else if i < initMaxRetries-1 && pn532.IsRetryable(err) {
+			pn532.Debugf("NTAG init attempt %d failed (retrying): %v", i+1, err)
+			time.Sleep(initRetryDelay)
+			continue
+		}
+		break
 	}
-	t.tagType = pn532.TagTypeNTAG
-	t.ntagInstance = ntag
-	t.totalPages = int(ntag.GetTotalPages())
-	return true
+	return false
 }
 
 // tryInitMIFARE attempts to initialize as a MIFARE tag. Returns true on success.
+// Uses retry logic to handle transient RF communication failures.
 func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
 	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
-	if !t.tryMIFAREAuth(ctx, mifare) {
-		return false
-	}
-	t.tagType = pn532.TagTypeMIFARE
-	t.mifareInstance = mifare
-	return true
-}
 
-// tryMIFAREAuth attempts to read a block to verify MIFARE functionality
-func (*TagOperations) tryMIFAREAuth(ctx context.Context, mifare *pn532.MIFARETag) bool {
-	// Try to read block 4 (first block of sector 1) using automatic authentication
-	// This will use the built-in NDEF key authentication
-	_, err := mifare.ReadBlockAuto(ctx, 4)
-	return err == nil
+	for i := range initMaxRetries {
+		if err := ctx.Err(); err != nil {
+			return false
+		}
+
+		// Try to read block 4 (first block of sector 1) using automatic authentication
+		// This will use the built-in NDEF key authentication
+		_, err := mifare.ReadBlockAuto(ctx, 4)
+		if err == nil {
+			t.tagType = pn532.TagTypeMIFARE
+			t.mifareInstance = mifare
+			return true
+		} else if i < initMaxRetries-1 && pn532.IsRetryable(err) {
+			pn532.Debugf("MIFARE init attempt %d failed (retrying): %v", i+1, err)
+			time.Sleep(initRetryDelay)
+			continue
+		}
+		break
+	}
+	return false
 }
