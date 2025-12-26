@@ -145,7 +145,7 @@ func TestTransportErrorWrapping(t *testing.T) {
 	// Test that transport error is still detectable
 	var te *TransportError
 	if !errors.As(wrappedErr, &te) {
-		t.Error("errors.As() failed to find TransportError")
+		t.Fatal("errors.As() failed to find TransportError")
 	}
 
 	// Test transport error properties are preserved

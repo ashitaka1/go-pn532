@@ -36,7 +36,7 @@ func TestReadNDEFRobust_FunctionExists(t *testing.T) {
 
 	// Test NTAG ReadNDEFRobust exists
 	uid := []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB}
-	ntagTag := NewNTAGTag(device, uid, 0x00, 0)
+	ntagTag := NewNTAGTag(device, uid, 0x00)
 
 	// Mock an empty NDEF response that should trigger ErrNoNDEF
 	mockTransport.SetResponse(0x40, []byte{
@@ -51,7 +51,7 @@ func TestReadNDEFRobust_FunctionExists(t *testing.T) {
 
 	// Test MIFARE ReadNDEFRobust exists
 	mifareUID := []byte{0x04, 0x12, 0x34, 0x56}
-	mifareTag := NewMIFARETag(device, mifareUID, 0x00, 0)
+	mifareTag := NewMIFARETag(device, mifareUID, 0x00)
 
 	// Reset mock for MIFARE test
 	mockTransport.Reset()
@@ -349,7 +349,7 @@ func TestNTAGReadNDEFRobust(t *testing.T) {
 			tt.setupMock(mockTransport)
 
 			uid := []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB}
-			tag := NewNTAGTag(device, uid, 0x00, 0)
+			tag := NewNTAGTag(device, uid, 0x00)
 
 			_, err := tag.ReadNDEFRobust(context.Background())
 
@@ -415,7 +415,7 @@ func TestMIFAREReadNDEFRobust(t *testing.T) {
 			tt.setupMock(mockTransport)
 
 			uid := []byte{0x04, 0x12, 0x34, 0x56}
-			tag := NewMIFARETag(device, uid, 0x00, 0)
+			tag := NewMIFARETag(device, uid, 0x00)
 
 			_, err := tag.ReadNDEFRobust(context.Background())
 

@@ -150,8 +150,8 @@ func (t *TagOperations) tryFastRead(ctx context.Context, currentPage, chunkEnd b
 
 	// Re-select target after SendRawCommand to restore PN532 internal state
 	// SendRawCommand uses InCommunicateThru which doesn't maintain target selection
-	if selectErr := t.device.InSelect(ctx, t.tag.TargetNumber); selectErr != nil {
-		pn532.Debugf("tagops tryFastRead: InSelect(target=%d) failed (non-fatal): %v", t.tag.TargetNumber, selectErr)
+	if selectErr := t.device.InSelect(ctx); selectErr != nil {
+		pn532.Debugln("tagops tryFastRead: InSelect failed (non-fatal):", selectErr)
 	}
 
 	if err == nil {

@@ -427,7 +427,7 @@ func diagnoseTagDetection(ctx context.Context, device *pn532.Device) {
 	detectCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	tag, err := device.DetectTag(detectCtx)
-	if err != nil {
+	if err != nil || tag == nil {
 		_, _ = fmt.Println("[✓] Tag detection: Ready (no tag present)")
 	} else {
 		_, _ = fmt.Printf("[✓] Tag detection: %s (UID: %s)\n", tag.Type, tag.UID)

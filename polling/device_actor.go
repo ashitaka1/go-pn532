@@ -121,7 +121,7 @@ func (da *DeviceActor) performPoll() {
 	}
 
 	start := time.Now()
-	detectedTags, err := da.device.InitiatorListPassiveTargets(context.Background(), 1, pn532.TagTypeAny, nil)
+	detectedTag, err := da.device.InitiatorListPassiveTargets(context.Background(), pn532.TagTypeAny, nil)
 	pollDuration := time.Since(start)
 
 	// Track poll cycle
@@ -133,11 +133,11 @@ func (da *DeviceActor) performPoll() {
 		atomic.AddInt64(&da.pollErrors, 1)
 	}
 
-	if err == nil && len(detectedTags) > 0 {
+	if err == nil && detectedTag != nil {
 		// Track card detected and update timestamp
 		atomic.AddInt64(&da.cardsDetected, 1)
 		atomic.StoreInt64(&da.lastCardDetection, start.UnixNano())
-		_ = da.callbacks.OnCardDetected(detectedTags[0])
+		_ = da.callbacks.OnCardDetected(detectedTag)
 	}
 }
 

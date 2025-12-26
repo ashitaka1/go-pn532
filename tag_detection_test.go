@@ -157,15 +157,13 @@ func TestDetectedTagStructure(t *testing.T) {
 	targetData := []byte{0x01, 0x02, 0x03, 0x04}
 
 	tag := &DetectedTag{
-		DetectedAt:     now,
-		UID:            uidStr,
-		Type:           TagTypeNTAG,
-		UIDBytes:       uid,
-		ATQ:            atq,
-		TargetData:     targetData,
-		SAK:            0x00,
-		TargetNumber:   1,
-		FromInAutoPoll: true,
+		DetectedAt: now,
+		UID:        uidStr,
+		Type:       TagTypeNTAG,
+		UIDBytes:   uid,
+		ATQ:        atq,
+		TargetData: targetData,
+		SAK:        0x00,
 	}
 
 	// Test all fields are properly set
@@ -189,12 +187,6 @@ func TestDetectedTagStructure(t *testing.T) {
 	}
 	if tag.SAK != 0x00 {
 		t.Errorf("SAK = 0x%02X, want 0x00", tag.SAK)
-	}
-	if tag.TargetNumber != 1 {
-		t.Errorf("TargetNumber = %d, want 1", tag.TargetNumber)
-	}
-	if !tag.FromInAutoPoll {
-		t.Error("FromInAutoPoll should be true")
 	}
 }
 

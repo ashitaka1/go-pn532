@@ -53,7 +53,7 @@ func TestDevice_DetectTag(t *testing.T) {
 				mock.SetResponse(testutil.CmdInListPassiveTarget, testutil.BuildNoTagResponse())
 			},
 			expectTag:   false,
-			expectError: true, // Should return ErrNoTagDetected
+			expectError: false, // Returns nil, nil when no tag found
 		},
 		{
 			name: "Detection_Error",
@@ -269,260 +269,6 @@ func TestDevice_SimplePoll(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestDevice_DetectTags_WithFilters(t *testing.T) {
-	t.Parallel()
-
-	// Setup mock with multiple tag types
-	mock := NewMockTransport()
-	mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-	mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
-	mock.SetResponse(testutil.CmdInListPassiveTarget,
-		testutil.BuildTagDetectionResponse("NTAG213", testutil.TestNTAG213UID))
-
-	device, err := New(mock)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	err = device.InitContext(ctx)
-	require.NoError(t, err)
-
-	// Test detection with basic parameters (maxTags=1, baudRate=0)
-	tags, err := device.DetectTags(ctx, 1, 0)
-	require.NoError(t, err)
-	assert.Len(t, tags, 1)
-
-	// Test detection with multiple targets
-	tags, err = device.DetectTags(ctx, 2, 0)
-	require.NoError(t, err)
-	// Should still return just 1 tag since mock only provides 1
-	assert.LessOrEqual(t, len(tags), 1)
-}
-
-func TestFilterDetectedTags(t *testing.T) {
-	t.Parallel()
-
-	// Create test tags
-	testTags := []*DetectedTag{
-		{
-			Type:     TagTypeNTAG,
-			UID:      "04abcdef123456",
-			UIDBytes: testutil.TestNTAG213UID,
-		},
-		{
-			Type:     TagTypeMIFARE,
-			UID:      "12345678",
-			UIDBytes: testutil.TestMIFARE1KUID,
-		},
-	}
-
-	tests := []struct {
-		name        string
-		tags        []*DetectedTag
-		tagType     TagType
-		uidFilter   []byte
-		expectedLen int
-	}{
-		{
-			name:        "No_Filter",
-			tags:        testTags,
-			tagType:     TagTypeAny,
-			uidFilter:   nil,
-			expectedLen: 2,
-		},
-		{
-			name:        "NTAG_Filter",
-			tags:        testTags,
-			tagType:     TagTypeNTAG,
-			uidFilter:   nil,
-			expectedLen: 1,
-		},
-		{
-			name:        "MIFARE_Filter",
-			tags:        testTags,
-			tagType:     TagTypeMIFARE,
-			uidFilter:   nil,
-			expectedLen: 1,
-		},
-		{
-			name:        "UID_Bytes_Filter",
-			tags:        testTags,
-			tagType:     TagTypeAny,
-			uidFilter:   testutil.TestNTAG213UID,
-			expectedLen: 1,
-		},
-		{
-			name:        "No_Match_Filter",
-			tags:        testTags,
-			tagType:     TagTypeFeliCa,
-			uidFilter:   nil,
-			expectedLen: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			filtered := filterDetectedTags(tt.tags, tt.tagType, tt.uidFilter)
-			assert.Len(t, filtered, tt.expectedLen)
-
-			// Verify filtering logic
-			for _, tag := range filtered {
-				if tt.tagType != TagTypeAny {
-					assert.Equal(t, tt.tagType, tag.Type)
-				}
-				if tt.uidFilter != nil {
-					assert.Equal(t, tt.uidFilter, tag.UIDBytes)
-				}
-			}
-		})
-	}
-}
-
-// Helper function for testing In commands (InRelease/InSelect)
-func testInCommand(t *testing.T, testName string, cmd byte, deviceFunc func(*Device, context.Context, byte) error) {
-	t.Helper()
-
-	tests := []struct {
-		setupMock   func(*MockTransport)
-		name        string
-		targetID    byte
-		expectError bool
-	}{
-		{
-			name: "Successful_" + testName,
-			setupMock: func(mock *MockTransport) {
-				// Correct format: cmd response + success status
-				mock.SetResponse(cmd, []byte{cmd + 1, 0x00})
-			},
-			targetID:    1,
-			expectError: false,
-		},
-		{
-			name: testName + "_Error",
-			setupMock: func(mock *MockTransport) {
-				mock.SetError(cmd, errors.New(testName+" failed"))
-			},
-			targetID:    1,
-			expectError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			// Setup mock transport
-			mock := NewMockTransport()
-			mock.SelectTarget() // InRelease/InSelect require a target to be selected
-			tt.setupMock(mock)
-
-			// Create device
-			device, err := New(mock)
-			require.NoError(t, err)
-
-			// Test the command
-			err = deviceFunc(device, context.Background(), tt.targetID)
-
-			if tt.expectError {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, 1, mock.GetCallCount(cmd))
-			}
-		})
-	}
-}
-
-func TestDevice_InRelease(t *testing.T) {
-	t.Parallel()
-	testInCommand(t, "Release", testutil.CmdInRelease, (*Device).InRelease)
-}
-
-func TestDevice_InSelect(t *testing.T) {
-	t.Parallel()
-	testInCommand(t, "Select", testutil.CmdInSelect, (*Device).InSelect)
-}
-
-func TestDevice_SelectTag(t *testing.T) {
-	t.Parallel()
-
-	t.Run("Success", func(t *testing.T) {
-		t.Parallel()
-		mock := NewMockTransport()
-		defer func() { _ = mock.Close() }()
-
-		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-		mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00}) // Success
-		mock.SelectTarget()                                        // Simulate a tag was detected
-
-		device, err := New(mock)
-		require.NoError(t, err)
-
-		tag := &DetectedTag{TargetNumber: 1}
-		err = device.SelectTag(context.Background(), tag)
-		assert.NoError(t, err)
-	})
-
-	t.Run("NilTag", func(t *testing.T) {
-		t.Parallel()
-		mock := NewMockTransport()
-		defer func() { _ = mock.Close() }()
-
-		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-
-		device, err := New(mock)
-		require.NoError(t, err)
-
-		err = device.SelectTag(context.Background(), nil)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "nil")
-	})
-
-	t.Run("WrongContext_TreatedAsSuccess", func(t *testing.T) {
-		t.Parallel()
-		mock := NewMockTransport()
-		defer func() { _ = mock.Close() }()
-
-		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-		mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x27}) // 0x27 = Wrong Context
-		mock.SelectTarget()
-
-		device, err := New(mock)
-		require.NoError(t, err)
-
-		tag := &DetectedTag{TargetNumber: 2}
-		err = device.SelectTag(context.Background(), tag)
-		assert.NoError(t, err, "0x27 should be treated as success (target already selected)")
-	})
-
-	t.Run("SelectTag_SetsCurrentTarget", func(t *testing.T) {
-		t.Parallel()
-		mock := NewMockTransport()
-		defer func() { _ = mock.Close() }()
-
-		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-		mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00}) // Success
-		mock.SelectTarget()
-
-		device, err := New(mock)
-		require.NoError(t, err)
-
-		// Initially currentTarget should default to 1
-		assert.Equal(t, byte(1), device.getCurrentTarget())
-
-		// Select target 2
-		tag := &DetectedTag{TargetNumber: 2}
-		err = device.SelectTag(context.Background(), tag)
-		require.NoError(t, err)
-
-		// Now currentTarget should be 2
-		assert.Equal(t, byte(2), device.getCurrentTarget())
-	})
 }
 
 // TestHandleDetectionError tests the error counting and threshold behavior
@@ -746,7 +492,7 @@ func TestIdentifyTagType(t *testing.T) {
 
 // TestCreateTag tests tag creation for different tag types
 //
-//nolint:funlen // Table-driven test with multiple test cases
+
 func TestCreateTag(t *testing.T) {
 	t.Parallel()
 
@@ -759,29 +505,23 @@ func TestCreateTag(t *testing.T) {
 		expectError   bool
 	}{
 		{
-			name: "Create_NTAG",
-			setupMock: func(mock *MockTransport) {
-				mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00})
-			},
+			name:      "Create_NTAG",
+			setupMock: func(_ *MockTransport) {},
 			detected: &DetectedTag{
-				Type:         TagTypeNTAG,
-				UIDBytes:     []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
-				SAK:          0x00,
-				TargetNumber: 1,
+				Type:     TagTypeNTAG,
+				UIDBytes: []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+				SAK:      0x00,
 			},
 			expectedType: "*pn532.NTAGTag",
 			expectError:  false,
 		},
 		{
-			name: "Create_MIFARE",
-			setupMock: func(mock *MockTransport) {
-				mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00})
-			},
+			name:      "Create_MIFARE",
+			setupMock: func(_ *MockTransport) {},
 			detected: &DetectedTag{
-				Type:         TagTypeMIFARE,
-				UIDBytes:     []byte{0x12, 0x34, 0x56, 0x78},
-				SAK:          0x08,
-				TargetNumber: 1,
+				Type:     TagTypeMIFARE,
+				UIDBytes: []byte{0x12, 0x34, 0x56, 0x78},
+				SAK:      0x08,
 			},
 			expectedType: "*pn532.MIFARETag",
 			expectError:  false,
@@ -790,9 +530,8 @@ func TestCreateTag(t *testing.T) {
 			name:      "Create_Unknown_Tag_Fails",
 			setupMock: func(_ *MockTransport) {},
 			detected: &DetectedTag{
-				Type:         TagTypeUnknown,
-				UIDBytes:     []byte{0x12, 0x34, 0x56, 0x78},
-				TargetNumber: 1,
+				Type:     TagTypeUnknown,
+				UIDBytes: []byte{0x12, 0x34, 0x56, 0x78},
 			},
 			expectError:   true,
 			errorContains: "",
@@ -801,27 +540,11 @@ func TestCreateTag(t *testing.T) {
 			name:      "Create_TagTypeAny_Fails",
 			setupMock: func(_ *MockTransport) {},
 			detected: &DetectedTag{
-				Type:         TagTypeAny,
-				UIDBytes:     []byte{0x12, 0x34, 0x56, 0x78},
-				TargetNumber: 1,
+				Type:     TagTypeAny,
+				UIDBytes: []byte{0x12, 0x34, 0x56, 0x78},
 			},
 			expectError:   true,
 			errorContains: "",
-		},
-		{
-			name: "Create_From_InAutoPoll_Skips_Select",
-			setupMock: func(_ *MockTransport) {
-				// No InSelect call expected
-			},
-			detected: &DetectedTag{
-				Type:           TagTypeNTAG,
-				UIDBytes:       []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
-				SAK:            0x00,
-				TargetNumber:   1,
-				FromInAutoPoll: true, // This skips InSelect
-			},
-			expectedType: "*pn532.NTAGTag",
-			expectError:  false,
 		},
 	}
 
@@ -862,78 +585,49 @@ func typeName(v any) string {
 	return "*pn532." + string(v.(Tag).Type()) + "Tag"
 }
 
-// TestHandleTargetSelection tests target selection handling
-func TestHandleTargetSelection(t *testing.T) {
-	t.Parallel()
-
-	t.Run("FromInAutoPoll_Skips_InSelect", func(t *testing.T) {
-		t.Parallel()
-
-		mock := NewMockTransport()
-		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-		mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
-		mock.SelectTarget()
-
-		device, _ := New(mock)
-
-		detected := &DetectedTag{
-			Type:           TagTypeNTAG,
-			TargetNumber:   1,
-			FromInAutoPoll: true,
-		}
-
-		err := device.handleTargetSelection(detected)
-		require.NoError(t, err)
-		// Verify InSelect was NOT called
-		assert.Equal(t, 0, mock.GetCallCount(testutil.CmdInSelect))
-	})
-
-	t.Run("Standard_Detection_Calls_InSelect", func(t *testing.T) {
-		t.Parallel()
-
-		mock := NewMockTransport()
-		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-		mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
-		mock.SetResponse(testutil.CmdInSelect, []byte{0x55, 0x00})
-		mock.SelectTarget()
-
-		device, _ := New(mock)
-
-		detected := &DetectedTag{
-			Type:           TagTypeNTAG,
-			TargetNumber:   1,
-			FromInAutoPoll: false, // Standard detection
-		}
-
-		err := device.handleTargetSelection(detected)
-		require.NoError(t, err)
-		// Verify InSelect WAS called
-		assert.Equal(t, 1, mock.GetCallCount(testutil.CmdInSelect))
-	})
-}
-
 // TestInitiatorListPassiveTargets tests the InitiatorListPassiveTargets method
+//
+//nolint:dupl // Subtests have similar structure but test different scenarios
 func TestInitiatorListPassiveTargets(t *testing.T) {
 	t.Parallel()
 
-	mock := NewMockTransport()
-	mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
-	mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
-	mock.SetResponse(testutil.CmdInListPassiveTarget,
-		testutil.BuildTagDetectionResponse("NTAG213", testutil.TestNTAG213UID))
+	t.Run("Successful_Detection", func(t *testing.T) {
+		t.Parallel()
 
-	device, err := New(mock)
-	require.NoError(t, err)
+		mock := NewMockTransport()
+		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+		mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
+		mock.SetResponse(testutil.CmdInListPassiveTarget,
+			testutil.BuildTagDetectionResponse("NTAG213", testutil.TestNTAG213UID))
 
-	ctx := context.Background()
+		device, err := New(mock)
+		require.NoError(t, err)
 
-	// Test with no filters
-	tags, err := device.InitiatorListPassiveTargets(ctx, 1, TagTypeAny, nil)
-	require.NoError(t, err)
-	assert.Len(t, tags, 1)
+		ctx := context.Background()
 
-	// Test with type filter that doesn't match
-	tags, err = device.InitiatorListPassiveTargets(ctx, 1, TagTypeFeliCa, nil)
-	require.NoError(t, err)
-	assert.Empty(t, tags)
+		// Test with no filters
+		tag, err := device.InitiatorListPassiveTargets(ctx, TagTypeAny, nil)
+		require.NoError(t, err)
+		assert.NotNil(t, tag)
+	})
+
+	t.Run("Type_Filter_No_Match", func(t *testing.T) {
+		t.Parallel()
+
+		mock := NewMockTransport()
+		mock.SetResponse(testutil.CmdGetFirmwareVersion, testutil.BuildFirmwareVersionResponse())
+		mock.SetResponse(testutil.CmdSAMConfiguration, testutil.BuildSAMConfigurationResponse())
+		mock.SetResponse(testutil.CmdInListPassiveTarget,
+			testutil.BuildTagDetectionResponse("NTAG213", testutil.TestNTAG213UID))
+
+		device, err := New(mock)
+		require.NoError(t, err)
+
+		ctx := context.Background()
+
+		// Test with type filter that doesn't match
+		tag, err := device.InitiatorListPassiveTargets(ctx, TagTypeFeliCa, nil)
+		require.NoError(t, err)
+		assert.Nil(t, tag)
+	})
 }

@@ -76,7 +76,7 @@ func TestNTAGTag_WriteNDEFContext_Cancellation(t *testing.T) {
 			device, mockTransport := createMockDeviceWithTransport(t)
 			tt.setupMock(mockTransport)
 
-			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00, 0)
+			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 			tag.tagType = NTAGType213 // Set explicitly to skip DetectType
 
 			// Create a context that will be cancelled

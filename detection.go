@@ -140,16 +140,16 @@ func (d *Device) SimplePoll(ctx context.Context, interval time.Duration) (*Detec
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-ticker.C:
-			// Try to detect tags
-			tags, err := d.InListPassiveTarget(ctx, 1, 0x00)
+			// Try to detect a tag
+			tag, err := d.InListPassiveTarget(ctx, 0x00)
 			if err != nil {
 				// Continue polling on errors (device might be temporarily busy)
 				Debugf("Polling error (continuing): %v", err)
 				continue
 			}
 
-			if len(tags) > 0 {
-				return tags[0], nil
+			if tag != nil {
+				return tag, nil
 			}
 			// No tag detected this cycle, continue polling
 		}
@@ -159,30 +159,27 @@ func (d *Device) SimplePoll(ctx context.Context, interval time.Duration) (*Detec
 // selectDetectionStrategy chooses the appropriate detection strategy
 // Integrates with the polling strategy system for intelligent strategy selection
 
-// InitiatorListPassiveTargets detects passive targets with optional filtering
+// InitiatorListPassiveTargets detects a passive target with optional filtering
 // This is a compatibility method for the PN532 InListPassiveTarget command
 func (d *Device) InitiatorListPassiveTargets(
-	ctx context.Context, maxTags int, tagType TagType, uid []byte,
-) ([]*DetectedTag, error) {
-	// Get all tags first using standard detection
-	// The baudRate is set to 0x00 for 106 kbps Type A
-	allTags, err := d.DetectTags(ctx, byte(maxTags), 0x00)
+	ctx context.Context, tagType TagType, uid []byte,
+) (*DetectedTag, error) {
+	// Detect tag using standard detection (baudRate 0x00 for 106 kbps Type A)
+	tag, err := d.DetectTag(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	return filterDetectedTags(allTags, tagType, uid), nil
-}
-
-// filterDetectedTags applies tag type and UID filtering to detected tags
-func filterDetectedTags(allTags []*DetectedTag, tagType TagType, uid []byte) []*DetectedTag {
-	var filteredTags []*DetectedTag
-	for _, tag := range allTags {
-		if shouldIncludeTag(tag, tagType, uid) {
-			filteredTags = append(filteredTags, tag)
-		}
+	if tag == nil {
+		return nil, nil //nolint:nilnil // nil tag, nil error is valid "no tag found" response
 	}
-	return filteredTags
+
+	// Apply filtering
+	if !shouldIncludeTag(tag, tagType, uid) {
+		return nil, nil //nolint:nilnil // nil tag, nil error is valid "tag filtered out" response
+	}
+
+	return tag, nil
 }
 
 // shouldIncludeTag determines if a tag should be included based on filters
@@ -317,44 +314,15 @@ func (*Device) isMIFAREPattern(atq []byte, sak byte) bool {
 	return false
 }
 
-// handleTargetSelection handles target selection based on transport capabilities
-func (d *Device) handleTargetSelection(detected *DetectedTag) error {
-	isFromInAutoPoll := detected.FromInAutoPoll
-
-	if isFromInAutoPoll {
-		// Skip InSelect for tags detected via InAutoPoll - InAutoPoll handles target selection internally
-		Debugf("InAutoPoll detected tag - skipping InSelect for target %d (InAutoPoll handles selection)",
-			detected.TargetNumber)
-		d.setCurrentTarget(detected.TargetNumber)
-		return nil
-	}
-
-	// Standard devices: Always use InSelect for proper target selection
-	Debugf("Standard device - performing InSelect for target %d", detected.TargetNumber)
-	return d.selectTargetWithError(detected.TargetNumber)
-}
-
-// selectTargetWithError wraps selectTarget with error formatting
-func (d *Device) selectTargetWithError(targetNumber byte) error {
-	if err := d.selectTarget(targetNumber); err != nil {
-		return fmt.Errorf("failed to select target %d: %w", targetNumber, err)
-	}
-	return nil
-}
-
 // CreateTag creates a Tag instance based on the detected tag
 func (d *Device) CreateTag(detected *DetectedTag) (Tag, error) {
-	// Handle target selection based on transport capabilities
-	if err := d.handleTargetSelection(detected); err != nil {
-		return nil, err
-	}
 	switch detected.Type {
 	case TagTypeNTAG:
-		return NewNTAGTag(d, detected.UIDBytes, detected.SAK, detected.TargetNumber), nil
+		return NewNTAGTag(d, detected.UIDBytes, detected.SAK), nil
 	case TagTypeMIFARE:
-		return NewMIFARETag(d, detected.UIDBytes, detected.SAK, detected.TargetNumber), nil
+		return NewMIFARETag(d, detected.UIDBytes, detected.SAK), nil
 	case TagTypeFeliCa:
-		return NewFeliCaTag(d, detected.TargetData, detected.TargetNumber)
+		return NewFeliCaTag(d, detected.TargetData)
 	case TagTypeUnknown:
 		return nil, ErrInvalidTag
 	case TagTypeAny:

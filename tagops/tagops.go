@@ -57,6 +57,9 @@ func (t *TagOperations) DetectTag(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to detect tag: %w", err)
 	}
+	if tag == nil {
+		return ErrNoTag
+	}
 
 	t.tag = tag
 
@@ -140,7 +143,7 @@ func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 
 // tryInitNTAG attempts to initialize as an NTAG tag. Returns true on success.
 func (t *TagOperations) tryInitNTAG(ctx context.Context) bool {
-	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK, t.tag.TargetNumber)
+	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK)
 	if err := ntag.DetectType(ctx); err != nil {
 		return false
 	}
@@ -152,7 +155,7 @@ func (t *TagOperations) tryInitNTAG(ctx context.Context) bool {
 
 // tryInitMIFARE attempts to initialize as a MIFARE tag. Returns true on success.
 func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
-	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK, t.tag.TargetNumber)
+	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
 	if !t.tryMIFAREAuth(ctx, mifare) {
 		return false
 	}

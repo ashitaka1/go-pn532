@@ -19,7 +19,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/ZaparooProject/go-pn532/detection"
@@ -65,12 +64,6 @@ type Device struct {
 	transport       Transport
 	config          *DeviceConfig
 	firmwareVersion *FirmwareVersion
-	currentTarget   byte
-}
-
-// setCurrentTarget sets the active target number for data exchange operations
-func (d *Device) setCurrentTarget(targetNumber byte) {
-	d.currentTarget = targetNumber
 }
 
 // hasCapability checks if the transport has the specified capability
@@ -79,56 +72,6 @@ func (d *Device) hasCapability(capability TransportCapability) bool {
 		return checker.HasCapability(capability)
 	}
 	return false
-}
-
-// selectTarget performs explicit target selection using InSelect command
-func (d *Device) selectTarget(targetNumber byte) error {
-	// Send InSelect command to explicitly select the target
-	resp, err := d.transport.SendCommand(cmdInSelect, []byte{targetNumber})
-	if err != nil {
-		// Check if this is the specific clone device empty response issue
-		if strings.Contains(err.Error(), "clone device returned empty response") {
-			Debugln("InSelect failed due to clone device compatibility issue, falling back to direct target usage")
-			// Fall back to direct target usage like non-InSelect devices
-			d.setCurrentTarget(targetNumber)
-			Debugf("Using target %d directly without InSelect (clone device fallback)", targetNumber)
-			return nil
-		}
-		return fmt.Errorf("InSelect failed: %w", err)
-	}
-
-	// Check response
-	if len(resp) < 2 {
-		return fmt.Errorf("InSelect response too short: %d bytes", len(resp))
-	}
-
-	// Response format: [response_cmd, status, ...]
-	if resp[0] != cmdInSelect+1 {
-		return fmt.Errorf("unexpected InSelect response command: %02X", resp[0])
-	}
-
-	if resp[1] != 0x00 {
-		if resp[1] == 0x27 {
-			// 0x27 = Wrong Context - target likely already selected by InListPassiveTarget
-			Debugf("InSelect returned 0x27 for target %d - assuming already selected", targetNumber)
-			d.setCurrentTarget(targetNumber)
-			return nil
-		}
-		return fmt.Errorf("InSelect failed with status: %02X", resp[1])
-	}
-
-	// Set the current target after successful selection
-	d.setCurrentTarget(targetNumber)
-	Debugf("InSelect successful for target %d", targetNumber)
-	return nil
-}
-
-// getCurrentTarget returns the active target number (defaults to 1 if not set)
-func (d *Device) getCurrentTarget() byte {
-	if d.currentTarget == 0 {
-		return 1 // Default to target 1 if not explicitly set
-	}
-	return d.currentTarget
 }
 
 // Option is a functional option for configuring a Device
@@ -312,6 +255,9 @@ func setupDeviceWithRetry(transport Transport, config *connectConfig) (*Device, 
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup device after %d attempts: %w", config.connectionRetries, err)
+	}
+	if device == nil {
+		return nil, errors.New("device setup succeeded but device is nil")
 	}
 
 	return device, nil

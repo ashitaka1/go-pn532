@@ -96,10 +96,6 @@ type Tag interface {
 	// UIDBytes returns the tag's unique identifier as bytes
 	UIDBytes() []byte
 
-	// TargetNumber returns the PN532 target number assigned during detection.
-	// This is used for InSelect when multiple tags are in the field.
-	TargetNumber() byte
-
 	// ReadBlock reads a block of data from the tag
 	ReadBlock(ctx context.Context, block uint8) ([]byte, error)
 
@@ -127,11 +123,10 @@ type Tag interface {
 
 // BaseTag provides common tag functionality
 type BaseTag struct {
-	device       *Device
-	tagType      TagType
-	uid          []byte
-	sak          byte // SAK (Select Acknowledge) response for card type detection
-	targetNumber byte // PN532 target number assigned during detection (for InSelect)
+	device  *Device
+	tagType TagType
+	uid     []byte
+	sak     byte // SAK (Select Acknowledge) response for card type detection
 }
 
 // Type returns the tag type
@@ -147,12 +142,6 @@ func (t *BaseTag) UID() string {
 // UIDBytes returns the tag's unique identifier as bytes
 func (t *BaseTag) UIDBytes() []byte {
 	return t.uid
-}
-
-// TargetNumber returns the PN532 target number assigned during detection.
-// This is used for InSelect when multiple tags are in the field.
-func (t *BaseTag) TargetNumber() byte {
-	return t.targetNumber
 }
 
 // IsMIFARE4K returns true if this is a MIFARE Classic 4K card
@@ -279,21 +268,14 @@ func (t *BaseTag) DebugInfoWithNDEF(ndefReader interface {
 }
 
 // DetectedTag represents a tag that was detected by the reader
-// Field ordering optimized for memory alignment to reduce struct size from 120 to 112 bytes
 type DetectedTag struct {
-	// 8-byte aligned fields first (largest to smallest)
-	DetectedAt time.Time // 24 bytes (time.Time contains wall, ext, loc)
-	UID        string    // 16 bytes (string header: pointer + length)
-	Type       TagType   // 16 bytes (string header: pointer + length)
-	UIDBytes   []byte    // 24 bytes (slice header: pointer + len + cap)
-	ATQ        []byte    // 24 bytes (slice header: pointer + len + cap)
-	TargetData []byte    // 24 bytes (slice header: pointer + len + cap) - Full target response data (needed for FeliCa)
-	// 1-byte fields grouped together to minimize padding
-	SAK            byte // 1 byte
-	TargetNumber   byte // 1 byte
-	FromInAutoPoll bool // 1 byte - indicates this tag was detected via InAutoPoll (skip InSelect)
-	// 5 bytes padding to align to 8-byte boundary
-	// Total: 112 bytes (previously 120 bytes, saved 8 bytes)
+	DetectedAt time.Time // When the tag was detected
+	UID        string    // UID as hex string
+	Type       TagType   // Tag type
+	UIDBytes   []byte    // UID as raw bytes
+	ATQ        []byte    // Answer to Request bytes
+	TargetData []byte    // Full target response data (needed for FeliCa)
+	SAK        byte      // Select Acknowledge byte
 }
 
 // Manufacturer returns the chip manufacturer identified from the UID.

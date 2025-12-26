@@ -148,14 +148,13 @@ type AccessControlConfig struct {
 }
 
 // NewNTAGTag creates a new NTAG tag instance
-func NewNTAGTag(device *Device, uid []byte, sak, targetNumber byte) *NTAGTag {
+func NewNTAGTag(device *Device, uid []byte, sak byte) *NTAGTag {
 	return &NTAGTag{
 		BaseTag: BaseTag{
-			tagType:      TagTypeNTAG,
-			uid:          uid,
-			device:       device,
-			sak:          sak,
-			targetNumber: targetNumber,
+			tagType: TagTypeNTAG,
+			uid:     uid,
+			device:  device,
+			sak:     sak,
 		},
 	}
 }
@@ -242,8 +241,8 @@ func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 	// which uses GetVersion() via InCommunicateThru - that command doesn't maintain
 	// target selection state. Without re-selection, InDataExchange fails with timeout
 	// error 0x01. See PN532 User Manual §7.3.9.
-	if err := t.device.InSelect(ctx, t.targetNumber); err != nil {
-		Debugf("NTAG ReadNDEF: InSelect(target=%d) failed, continuing anyway: %v", t.targetNumber, err)
+	if err := t.device.InSelect(ctx); err != nil {
+		Debugln("NTAG ReadNDEF: InSelect failed, continuing anyway:", err)
 	}
 
 	header, err := t.readNDEFHeader(ctx)
@@ -778,8 +777,8 @@ func (t *NTAGTag) FastRead(ctx context.Context, startAddr, endAddr uint8) ([]byt
 	// See PN532 User Manual §7.3.9: "The host controller has to take care of the
 	// selection of the target it wants to reach (whereas when using the
 	// InDataExchange command, it is done automatically)."
-	if selectErr := t.device.InSelect(ctx, t.targetNumber); selectErr != nil {
-		Debugf("NTAG FastRead: InSelect(target=%d) after raw command failed: %v", t.targetNumber, selectErr)
+	if selectErr := t.device.InSelect(ctx); selectErr != nil {
+		Debugln("NTAG FastRead: InSelect after raw command failed:", selectErr)
 	}
 
 	if err != nil {
@@ -1037,8 +1036,8 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// See PN532 User Manual §7.3.9: "The host controller has to take care of the
 	// selection of the target it wants to reach (whereas when using the
 	// InDataExchange command, it is done automatically)."
-	if selectErr := t.device.InSelect(ctx, t.targetNumber); selectErr != nil {
-		Debugf("NTAG DetectType: InSelect(target=%d) after GetVersion failed: %v", t.targetNumber, selectErr)
+	if selectErr := t.device.InSelect(ctx); selectErr != nil {
+		Debugln("NTAG DetectType: InSelect after GetVersion failed:", selectErr)
 	}
 
 	if err != nil {
@@ -1209,7 +1208,7 @@ func (t *NTAGTag) canAccessPageWithContext(ctx context.Context, page uint8) bool
 	data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, page})
 	if err != nil {
 		// Re-select target to recover from NAK/timeout errors
-		_ = t.device.InSelect(ctx, t.targetNumber)
+		_ = t.device.InSelect(ctx)
 		return false
 	}
 	return len(data) >= 4
@@ -1524,8 +1523,8 @@ func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]
 		data, err = t.device.SendRawCommand(ctx, cmd)
 		if err == nil {
 			// Re-select target after SendRawCommand to restore PN532 internal state
-			if selectErr := t.device.InSelect(ctx, t.targetNumber); selectErr != nil {
-				Debugf("NTAG readBlockCommunicateThru: InSelect(target=%d) failed: %v", t.targetNumber, selectErr)
+			if selectErr := t.device.InSelect(ctx); selectErr != nil {
+				Debugln("NTAG readBlockCommunicateThru: InSelect failed:", selectErr)
 			}
 			successAttempt = attempt
 			break

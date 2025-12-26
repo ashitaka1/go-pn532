@@ -90,7 +90,6 @@ type TagTestState struct {
 	ActualSize   int
 	Passed       int
 	Failed       int
-	TargetNumber byte
 }
 
 // CrashReport contains all information for debugging a failure.
@@ -108,7 +107,6 @@ type CrashReport struct {
 	OperationLog        []LogEntry `json:"operation_log"`
 	ClaimedSize         int        `json:"claimed_size,omitempty"`
 	ActualSize          int        `json:"actual_size,omitempty"`
-	TargetNumber        byte       `json:"target_number"`
 }
 
 // LogEntry represents a single operation in the log.
@@ -213,12 +211,11 @@ func runStressTestForTag(
 	tag *pn532.DetectedTag,
 ) *StressTestResult {
 	state := &TagTestState{
-		UID:          tag.UID,
-		TargetNumber: tag.TargetNumber,
-		TagType:      tag.Type,
-		TagTypeName:  tagops.TagTypeDisplayName(tag.Type),
-		Started:      time.Now(),
-		OpLog:        make([]LogEntry, 0, 32),
+		UID:         tag.UID,
+		TagType:     tag.Type,
+		TagTypeName: tagops.TagTypeDisplayName(tag.Type),
+		Started:     time.Now(),
+		OpLog:       make([]LogEntry, 0, 32),
 	}
 
 	result := &StressTestResult{
@@ -526,7 +523,6 @@ func createCrashReport(info *testFailureInfo, rawDump []byte) *CrashReport {
 		Timestamp:    time.Now(),
 		TagUID:       info.state.UID,
 		TagType:      info.state.TagTypeName,
-		TargetNumber: info.state.TargetNumber,
 		Operation:    info.operation,
 		TestSize:     info.state.CurrentTest,
 		Error:        info.err.Error(),

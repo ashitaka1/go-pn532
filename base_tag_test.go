@@ -161,50 +161,6 @@ func TestBaseTag_UIDBytes(t *testing.T) {
 	}
 }
 
-func TestBaseTag_TargetNumber(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		targetNumber byte
-		expected     byte
-	}{
-		{
-			name:         "Target_0_default",
-			targetNumber: 0,
-			expected:     0,
-		},
-		{
-			name:         "Target_1",
-			targetNumber: 1,
-			expected:     1,
-		},
-		{
-			name:         "Target_2",
-			targetNumber: 2,
-			expected:     2,
-		},
-		{
-			name:         "Max_target_255",
-			targetNumber: 255,
-			expected:     255,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			tag := &BaseTag{
-				targetNumber: tt.targetNumber,
-			}
-
-			result := tag.TargetNumber()
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestBaseTag_IsMIFARE4K(t *testing.T) {
 	t.Parallel()
 
@@ -430,15 +386,13 @@ func TestDetectedTag_Structure(t *testing.T) {
 
 	now := time.Now()
 	tag := DetectedTag{
-		DetectedAt:     now,
-		UID:            "04123456",
-		Type:           TagTypeNTAG,
-		UIDBytes:       []byte{0x04, 0x12, 0x34, 0x56},
-		ATQ:            []byte{0x00, 0x44},
-		TargetData:     []byte{0x04, 0x12, 0x34, 0x56, 0x78},
-		SAK:            0x00,
-		TargetNumber:   1,
-		FromInAutoPoll: true,
+		DetectedAt: now,
+		UID:        "04123456",
+		Type:       TagTypeNTAG,
+		UIDBytes:   []byte{0x04, 0x12, 0x34, 0x56},
+		ATQ:        []byte{0x00, 0x44},
+		TargetData: []byte{0x04, 0x12, 0x34, 0x56, 0x78},
+		SAK:        0x00,
 	}
 
 	// Verify all fields are properly set
@@ -449,8 +403,6 @@ func TestDetectedTag_Structure(t *testing.T) {
 	assert.Equal(t, []byte{0x00, 0x44}, tag.ATQ)
 	assert.Equal(t, []byte{0x04, 0x12, 0x34, 0x56, 0x78}, tag.TargetData)
 	assert.Equal(t, byte(0x00), tag.SAK)
-	assert.Equal(t, byte(1), tag.TargetNumber)
-	assert.True(t, tag.FromInAutoPoll)
 }
 
 func TestTagType_Constants(t *testing.T) {

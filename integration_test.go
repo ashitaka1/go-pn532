@@ -85,12 +85,11 @@ func TestBasicTagDetection(t *testing.T) {
 			require.NoError(t, err)
 
 			// Test tag detection
-			tags, err := device.DetectTags(ctx, 1, 0)
+			tag, err := device.DetectTag(ctx)
 			require.NoError(t, err)
-			require.Len(t, tags, 1)
+			require.NotNil(t, tag)
 
 			// Verify tag properties
-			tag := tags[0]
 			assert.Equal(t, tt.wantUID, tag.UID)
 			assert.Equal(t, tt.uid, tag.UIDBytes)
 
@@ -130,9 +129,9 @@ func TestTagNotFound(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test tag detection - should find no tags
-	tags, err := device.DetectTags(ctx, 1, 0)
+	tag, err := device.DetectTag(ctx)
 	require.NoError(t, err)
-	assert.Len(t, tags, 0)
+	assert.Nil(t, tag)
 }
 
 // TestTagReadWrite tests reading from and writing to a virtual tag
@@ -192,7 +191,7 @@ func TestTransportErrorHandling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test tag detection with error
-	_, err = device.DetectTags(ctx, 1, 0)
+	_, err = device.DetectTag(ctx)
 	assert.Error(t, err)
 
 	// Verify error was injected
@@ -226,9 +225,9 @@ func TestTransportTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	tags, err := device.DetectTags(ctx, 1, 0)
+	tag, err := device.DetectTag(ctx)
 	require.NoError(t, err)
-	assert.Len(t, tags, 1)
+	assert.NotNil(t, tag)
 
 	// Note: Testing actual context timeout requires the transport layer to be context-aware,
 	// which would be a significant architectural change. For now, we verify that operations
@@ -285,9 +284,9 @@ func BenchmarkTagDetection(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		tags, err := device.DetectTags(ctx, 1, 0)
+		tag, err := device.DetectTag(ctx)
 		require.NoError(b, err)
-		require.Len(b, tags, 1)
+		require.NotNil(b, tag)
 	}
 }
 
