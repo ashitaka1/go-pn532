@@ -416,3 +416,79 @@ func TestScanForNDEFTLV_LockAndMemoryControlBothPresent(t *testing.T) {
 	assert.Equal(t, 12, loc.Offset)
 	assert.Equal(t, 4, loc.Length)
 }
+
+// TestScanForNDEFTLV_TruncatedLockControlTLV tests error when Lock Control TLV is truncated
+func TestScanForNDEFTLV_TruncatedLockControlTLV(t *testing.T) {
+	t.Parallel()
+
+	// Lock Control TLV (0x01) with length 3 but only 1 byte of value
+	data := []byte{0x01, 0x03, 0xA0}
+
+	loc, err := ScanForNDEFTLV(data)
+	require.Error(t, err)
+	assert.Nil(t, loc)
+	assert.ErrorIs(t, err, ErrTLVNDEFNotFound)
+}
+
+// TestScanForNDEFTLV_TruncatedProprietaryLongFormat tests error when proprietary TLV
+// uses long format but data is truncated
+func TestScanForNDEFTLV_TruncatedProprietaryLongFormat(t *testing.T) {
+	t.Parallel()
+
+	// Proprietary TLV (0x50) with long format marker 0xFF but incomplete length
+	data := []byte{0x50, 0xFF, 0x00}
+
+	loc, err := ScanForNDEFTLV(data)
+	require.Error(t, err)
+	assert.Nil(t, loc)
+	assert.ErrorIs(t, err, ErrTLVInvalidLength)
+}
+
+// TestScanForNDEFTLV_LockControlTruncatedLength tests Lock Control with truncated length byte
+func TestScanForNDEFTLV_LockControlTruncatedLength(t *testing.T) {
+	t.Parallel()
+
+	// Lock Control TLV (0x01) but no length byte
+	data := []byte{0x01}
+
+	loc, err := ScanForNDEFTLV(data)
+	require.Error(t, err)
+	assert.Nil(t, loc)
+	assert.ErrorIs(t, err, ErrTLVDataTooShort)
+}
+
+// TestTLVDebugInfo_TruncatedLockControl tests debug output with truncated Lock Control TLV
+func TestTLVDebugInfo_TruncatedLockControl(t *testing.T) {
+	t.Parallel()
+
+	// Lock Control TLV with truncated length
+	data := []byte{0x01}
+
+	result := TLVDebugInfo(data)
+	assert.Contains(t, result, "LOCK_CONTROL")
+	assert.Contains(t, result, "parse error")
+}
+
+// TestTLVDebugInfo_TruncatedNDEF tests debug output with truncated NDEF TLV
+func TestTLVDebugInfo_TruncatedNDEF(t *testing.T) {
+	t.Parallel()
+
+	// NDEF TLV with long format but truncated
+	data := []byte{0x03, 0xFF, 0x00}
+
+	result := TLVDebugInfo(data)
+	assert.Contains(t, result, "NDEF")
+	assert.Contains(t, result, "parse error")
+}
+
+// TestTLVDebugInfo_TruncatedProprietary tests debug output with truncated proprietary TLV
+func TestTLVDebugInfo_TruncatedProprietary(t *testing.T) {
+	t.Parallel()
+
+	// Proprietary TLV with truncated length
+	data := []byte{0x50}
+
+	result := TLVDebugInfo(data)
+	assert.Contains(t, result, "PROPRIETARY")
+	assert.Contains(t, result, "parse error")
+}
