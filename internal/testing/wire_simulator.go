@@ -1,4 +1,4 @@
-// Copyright 2025 The Zaparoo Project Contributors.
+// Copyright 2026 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -943,7 +943,7 @@ func (v *VirtualPN532) handleInDataExchange(params []byte) ([]byte, error) {
 
 // processTagCommand handles tag-specific commands
 //
-//nolint:gocognit,revive // Tag command handling requires multiple conditions
+//nolint:cyclop,gocognit,gocyclo,revive // Tag command handling requires multiple conditions
 func (*VirtualPN532) processTagCommand(tag *VirtualTag, cmd []byte) ([]byte, error) {
 	if len(cmd) == 0 {
 		return nil, errors.New("empty command")
@@ -951,12 +951,19 @@ func (*VirtualPN532) processTagCommand(tag *VirtualTag, cmd []byte) ([]byte, err
 
 	// MIFARE/NTAG command handling
 	switch cmd[0] {
-	case 0x30: // READ (16 bytes from block)
+	case 0x30: // READ (returns 16 bytes: 4 consecutive pages for NTAG, or 1 block for MIFARE)
 		if len(cmd) < 2 {
 			return nil, errors.New("invalid read command")
 		}
-		block := int(cmd[1])
-		data, err := tag.ReadBlock(block)
+		page := int(cmd[1])
+
+		// NTAG READ returns 4 consecutive 4-byte pages (16 bytes total)
+		if tag.isNTAG() {
+			return tag.ReadNTAGPages(page, 4)
+		}
+
+		// MIFARE READ returns a single 16-byte block
+		data, err := tag.ReadBlock(page)
 		if err != nil {
 			return nil, err
 		}
@@ -974,6 +981,26 @@ func (*VirtualPN532) processTagCommand(tag *VirtualTag, cmd []byte) ([]byte, err
 			return nil, err
 		}
 		return []byte{0x0A}, nil // ACK
+
+	case 0x3A: // FAST_READ (NTAG specific - read multiple pages)
+		if len(cmd) < 3 {
+			return nil, errors.New("invalid fast_read command")
+		}
+		startPage := int(cmd[1])
+		endPage := int(cmd[2])
+
+		// Check if tag supports FAST_READ (clone tags typically don't)
+		if !tag.SupportsFastRead() {
+			return nil, errors.New("FAST_READ not supported by this tag")
+		}
+
+		if startPage > endPage {
+			return nil, errors.New("invalid page range")
+		}
+
+		// Read all pages from start to end (inclusive)
+		numPages := endPage - startPage + 1
+		return tag.ReadNTAGPages(startPage, numPages)
 
 	case 0x60, 0x61: // MIFARE Auth A/B
 		if len(cmd) < 8 {

@@ -457,6 +457,11 @@ func TestGetManufacturer(t *testing.T) {
 			expected: ManufacturerTI,
 		},
 		{
+			name:     "Fudan_Microelectronics_UID_0x1D",
+			uid:      []byte{0x1D, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: ManufacturerFudan,
+		},
+		{
 			name:     "Unknown_UID_0x08",
 			uid:      []byte{0x08, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
 			expected: ManufacturerUnknown,

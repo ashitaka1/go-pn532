@@ -1,4 +1,4 @@
-// Copyright 2025 The Zaparoo Project Contributors.
+// Copyright 2026 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -171,10 +171,13 @@ func (t *NTAGTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
 	if err != nil {
 		// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
 		if IsPN532AuthenticationError(err) {
+			Debugf("NTAG ReadBlock: page %d auth error, trying InCommunicateThru fallback", block)
 			return t.readBlockCommunicateThru(ctx, block)
 		}
 		return nil, fmt.Errorf("%w (block %d): %w", ErrTagReadFailed, block, err)
 	}
+
+	Debugf("NTAG ReadBlock: page %d raw response = [% 02X] (len=%d)", block, data, len(data))
 
 	// NTAG returns 16 bytes (4 blocks) on read
 	if len(data) < ntagBlockSize {
@@ -265,6 +268,15 @@ func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 		Debugf("NTAG ReadNDEF: tag type detection failed (using conservative bounds): %v", detectErr)
 	}
 
+	// Clone tags (like Fudan FM11NT021 with UID prefix 0x1D) often don't support FAST_READ (0x3A).
+	// Sending FAST_READ to these clones can return garbage data or corrupt the tag state,
+	// causing "no NDEF record found" errors. Skip directly to block-by-block reading for non-NXP tags.
+	// NXP genuine tags have UID prefix 0x04.
+	if len(t.uid) > 0 && t.uid[0] != 0x04 {
+		Debugf("NTAG ReadNDEF: non-NXP UID prefix 0x%02X, skipping FAST_READ for clone compatibility", t.uid[0])
+		return t.readNDEFBlockByBlock(ctx)
+	}
+
 	data, err := t.readNDEFDataWithFastRead(ctx, header, totalBytes)
 	if err != nil {
 		// CRITICAL: Clear transport state after failed InCommunicateThru operation
@@ -298,9 +310,12 @@ func (t *NTAGTag) readNDEFHeader(ctx context.Context) (*ndefHeader, error) {
 		return nil, fmt.Errorf("%w (NDEF header): %w", ErrTagReadFailed, err)
 	}
 
+	Debugf("NTAG readNDEFHeader: page 4 data = [% 02X] (len=%d)", block4, len(block4))
+
 	time.Sleep(5 * time.Millisecond)
 
 	if block4[0] != 0x03 {
+		Debugf("NTAG readNDEFHeader: expected 0x03 (NDEF TLV), got 0x%02X", block4[0])
 		return nil, ErrNoNDEF
 	}
 

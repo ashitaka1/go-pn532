@@ -1,4 +1,4 @@
-// Copyright 2025 The Zaparoo Project Contributors.
+// Copyright 2026 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -1630,4 +1630,103 @@ func TestNTAGDetectType_SkipsGetVersionForCloneTags(t *testing.T) {
 	require.NoError(t, err)
 	// Tag type should be detected from CC
 	assert.NotEqual(t, NTAGTypeUnknown, tag.tagType)
+}
+
+// TestNTAGTag_ReadNDEF_FudanClone tests that Fudan clone tags (UID prefix 0x1D)
+// use block-by-block reading instead of FAST_READ, since Fudan FM11NT021 clones
+// don't support FAST_READ (0x3A) and may return garbage or corrupt tag state.
+// See: https://github.com/RfidResearchGroup/proxmark3/issues/2457
+func TestNTAGTag_ReadNDEF_FudanClone(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	// Use a Fudan clone UID (starts with 0x1D)
+	fudanUID := []byte{0x1D, 0x20, 0xBD, 0xC9, 0x07, 0x10, 0x80}
+	tag := NewNTAGTag(device, fudanUID, 0x00)
+	tag.tagType = NTAGType213
+
+	// NDEF data split by 4-byte pages (NTAG page size)
+	// ReadBlock returns only first 4 bytes of the 16-byte NTAG response
+	page4 := []byte{0x03, 0x0D, 0xD1, 0x01} // TLV header + start of NDEF record
+	page5 := []byte{0x09, 0x54, 0x02, 0x65} // payload len=9, type='T', UTF-8, 'e'
+	page6 := []byte{0x6E, 0x48, 0x65, 0x6C} // 'n', "Hel"
+	page7 := []byte{0x6C, 0x6F, 0x21, 0xFE} // "lo!", terminator
+
+	// Helper to build 16-byte response (NTAG READ returns 4 pages)
+	makeResp := func(firstPage []byte) []byte {
+		resp := make([]byte, 16)
+		copy(resp, firstPage)
+		return resp
+	}
+
+	// Queue responses in order:
+	// 1. InSelect (0x54) for target re-selection
+	mockTransport.QueueResponse(0x54, []byte{0x55, 0x00})
+
+	// 2. ReadBlock for NDEF header (page 4)
+	mockTransport.QueueResponse(0x40, append([]byte{0x41, 0x00}, makeResp(page4)...))
+
+	// 3. Block-by-block reading - queue each page's response
+	mockTransport.QueueResponse(0x40, append([]byte{0x41, 0x00}, makeResp(page4)...)) // page 4
+	mockTransport.QueueResponse(0x40, append([]byte{0x41, 0x00}, makeResp(page5)...)) // page 5
+	mockTransport.QueueResponse(0x40, append([]byte{0x41, 0x00}, makeResp(page6)...)) // page 6
+	mockTransport.QueueResponse(0x40, append([]byte{0x41, 0x00}, makeResp(page7)...)) // page 7 (has terminator)
+
+	msg, err := tag.ReadNDEF(context.Background())
+
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+	require.Len(t, msg.Records, 1)
+	assert.Equal(t, NDEFTypeText, msg.Records[0].Type)
+}
+
+// TestNTAGTag_ReadNDEF_GenuineNXP tests that genuine NXP tags (UID prefix 0x04)
+// still use FastRead for optimal performance.
+func TestNTAGTag_ReadNDEF_GenuineNXP(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	// Use a genuine NXP UID (starts with 0x04)
+	nxpUID := []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}
+	tag := NewNTAGTag(device, nxpUID, 0x00)
+	tag.tagType = NTAGType213
+
+	// NDEF data for pages 4-7 (16 bytes total)
+	ndefData := []byte{
+		0x03, 0x0D, // NDEF TLV: type 0x03, length 13
+		0xD1, 0x01, 0x09, 0x54, // NDEF record header
+		0x02, 0x65, 0x6E, // Text record: UTF-8, "en"
+		0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x21, // "Hello!"
+		0xFE, // Terminator TLV
+	}
+
+	// Pad to 16 bytes for header read response
+	headerResponse := make([]byte, 16)
+	copy(headerResponse, ndefData)
+
+	// Queue responses in order:
+	// 1. InSelect (0x54) for target re-selection
+	mockTransport.QueueResponse(0x54, []byte{0x55, 0x00})
+
+	// 2. ReadBlock for NDEF header (page 4) - returns first 4 bytes
+	mockTransport.QueueResponse(0x40, append([]byte{0x41, 0x00}, headerResponse...))
+
+	// 3. FastRead response (InCommunicateThru 0x42)
+	// Response format: [0x43, 0x00, data...] (0x43=response, 0x00=success)
+	// FastRead pages 4-7 = 16 bytes of NDEF data
+	fastReadData := make([]byte, 16)
+	copy(fastReadData, ndefData)
+	mockTransport.QueueResponse(0x42, append([]byte{0x43, 0x00}, fastReadData...))
+
+	// 4. InSelect (0x54) after FastRead to restore state
+	mockTransport.QueueResponse(0x54, []byte{0x55, 0x00})
+
+	msg, err := tag.ReadNDEF(context.Background())
+
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+	require.Len(t, msg.Records, 1)
+	assert.Equal(t, NDEFTypeText, msg.Records[0].Type)
 }

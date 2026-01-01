@@ -52,6 +52,9 @@ const (
 	ManufacturerInfineon Manufacturer = "Infineon"
 	// ManufacturerTI is Texas Instruments (0x07).
 	ManufacturerTI Manufacturer = "Texas Instruments"
+	// ManufacturerFudan is Fudan Microelectronics (0x1D) - Chinese manufacturer
+	// of NTAG-compatible clone chips like FM11NT021.
+	ManufacturerFudan Manufacturer = "Fudan Microelectronics"
 	// ManufacturerUnknown indicates an unrecognized manufacturer code.
 	// This typically indicates a clone or counterfeit chip.
 	ManufacturerUnknown Manufacturer = "Unknown"
@@ -74,6 +77,8 @@ func GetManufacturer(uid []byte) Manufacturer {
 		return ManufacturerInfineon
 	case 0x07:
 		return ManufacturerTI
+	case 0x1D:
+		return ManufacturerFudan
 	default:
 		return ManufacturerUnknown
 	}
