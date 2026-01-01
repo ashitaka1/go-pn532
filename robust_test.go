@@ -328,7 +328,7 @@ func TestNTAGReadNDEFRobust(t *testing.T) {
 				})
 			},
 			expectError: true,
-			errorType:   ErrNoNDEF, // Still empty data
+			errorType:   ErrTagReadFailed, // Auth error propagates as read failure
 		},
 		{
 			name: "Timeout error triggers retry logic",

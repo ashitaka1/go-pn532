@@ -323,7 +323,7 @@ func (t *MIFARETag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) 
 
 // ReadBlockDirect reads a block directly without authentication (for clone tags)
 //
-//nolint:dupl // Similar pattern to NTAGTag.ReadBlock but different error handling and block sizes
+
 func (t *MIFARETag) ReadBlockDirect(ctx context.Context, block uint8) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
