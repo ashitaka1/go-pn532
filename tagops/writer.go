@@ -1,4 +1,4 @@
-// Copyright 2025 The Zaparoo Project Contributors.
+// Copyright 2026 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
