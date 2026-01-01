@@ -1,4 +1,4 @@
-// Copyright 2025 The Zaparoo Project Contributors.
+// Copyright 2026 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +16,6 @@
 package pn532
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -64,57 +63,15 @@ func ParseNDEFMessage(data []byte) (*NDEFMessage, error) {
 	return result, nil
 }
 
-// extractNDEFPayload extracts the NDEF message from TLV format
+// extractNDEFPayload extracts the NDEF message from TLV format.
+// Uses spec-compliant TLV scanning per NFC Forum Type 2 Tag specification.
 func extractNDEFPayload(data []byte) []byte {
-	// Look for NDEF TLV (0x03)
-	for i := range len(data) - 2 {
-		if data[i] != 0x03 {
-			continue
-		}
-
-		payload := extractTLVPayload(data, i)
-		if payload != nil {
-			return payload
-		}
-	}
-	return nil
-}
-
-// extractTLVPayload extracts the payload from a TLV structure at the given offset
-func extractTLVPayload(data []byte, offset int) []byte {
-	if offset+1 >= len(data) {
+	payload, err := ExtractNDEFFromTLV(data)
+	if err != nil {
+		Debugf("NDEF: TLV extraction failed: %v", err)
 		return nil
 	}
-
-	// Short format
-	if data[offset+1] != 0xFF {
-		return extractShortFormatPayload(data, offset)
-	}
-
-	// Long format
-	return extractLongFormatPayload(data, offset)
-}
-
-// extractShortFormatPayload extracts payload from short format TLV
-func extractShortFormatPayload(data []byte, offset int) []byte {
-	length := int(data[offset+1])
-	if offset+2+length <= len(data) {
-		return data[offset+2 : offset+2+length]
-	}
-	return nil
-}
-
-// extractLongFormatPayload extracts payload from long format TLV
-func extractLongFormatPayload(data []byte, offset int) []byte {
-	if offset+4 > len(data) {
-		return nil
-	}
-
-	length := int(binary.BigEndian.Uint16(data[offset+2 : offset+4]))
-	if offset+4+length <= len(data) {
-		return data[offset+4 : offset+4+length]
-	}
-	return nil
+	return payload
 }
 
 // convertRecord converts a go-ndef record to our format

@@ -1,4 +1,4 @@
-// Copyright 2025 The Zaparoo Project Contributors.
+// Copyright 2026 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -161,7 +161,7 @@ func NewNTAGTag(device *Device, uid []byte, sak byte) *NTAGTag {
 
 // ReadBlock reads a block from the NTAG tag
 //
-//nolint:dupl // Similar pattern to MIFARETag.ReadBlockDirect but different error handling and block sizes
+
 func (t *NTAGTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -171,10 +171,13 @@ func (t *NTAGTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
 	if err != nil {
 		// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
 		if IsPN532AuthenticationError(err) {
+			Debugf("NTAG ReadBlock: page %d auth error, trying InCommunicateThru fallback", block)
 			return t.readBlockCommunicateThru(ctx, block)
 		}
 		return nil, fmt.Errorf("%w (block %d): %w", ErrTagReadFailed, block, err)
 	}
+
+	Debugf("NTAG ReadBlock: page %d raw response = [% 02X] (len=%d)", block, data, len(data))
 
 	// NTAG returns 16 bytes (4 blocks) on read
 	if len(data) < ntagBlockSize {
@@ -265,6 +268,15 @@ func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 		Debugf("NTAG ReadNDEF: tag type detection failed (using conservative bounds): %v", detectErr)
 	}
 
+	// Clone tags (like Fudan FM11NT021 with UID prefix 0x1D) often don't support FAST_READ (0x3A).
+	// Sending FAST_READ to these clones can return garbage data or corrupt the tag state,
+	// causing "no NDEF record found" errors. Skip directly to block-by-block reading for non-NXP tags.
+	// NXP genuine tags have UID prefix 0x04.
+	if len(t.uid) > 0 && t.uid[0] != 0x04 {
+		Debugf("NTAG ReadNDEF: non-NXP UID prefix 0x%02X, skipping FAST_READ for clone compatibility", t.uid[0])
+		return t.readNDEFBlockByBlock(ctx)
+	}
+
 	data, err := t.readNDEFDataWithFastRead(ctx, header, totalBytes)
 	if err != nil {
 		// CRITICAL: Clear transport state after failed InCommunicateThru operation
@@ -290,35 +302,57 @@ func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 type ndefHeader struct {
 	ndefLength int
 	headerSize int
+	// tlvOffset is the byte offset within user memory where NDEF TLV starts
+	// This is needed when there are Lock/Memory Control TLVs before NDEF
+	tlvOffset int
 }
 
 func (t *NTAGTag) readNDEFHeader(ctx context.Context) (*ndefHeader, error) {
-	block4, err := t.ReadBlock(ctx, ntagUserMemStart)
+	// Read user memory pages to scan for NDEF TLV
+	// Per NFC Forum Type 2 Tag spec, the data area can contain:
+	// - NULL TLV (0x00): single padding byte
+	// - Lock Control TLV (0x01): defines lock bit positions
+	// - Memory Control TLV (0x02): defines reserved memory
+	// - NDEF Message TLV (0x03): the actual NDEF data
+	// - Terminator TLV (0xFE): end marker
+	//
+	// We must scan through TLVs to find NDEF, not assume it's at byte 0
+
+	// Read initial pages (16 bytes = 4 pages) for TLV scanning
+	data, err := t.readRawPages(ctx, ntagUserMemStart, 4)
 	if err != nil {
 		return nil, fmt.Errorf("%w (NDEF header): %w", ErrTagReadFailed, err)
 	}
 
-	time.Sleep(5 * time.Millisecond)
+	Debugf("NTAG readNDEFHeader: user data = [% 02X] (len=%d)", data, len(data))
 
-	if block4[0] != 0x03 {
-		return nil, ErrNoNDEF
-	}
-
-	header := &ndefHeader{}
-	if block4[1] < 0xFF {
-		header.ndefLength = int(block4[1])
-		header.headerSize = 2
-	} else {
-		// Check that we have enough bytes for extended length format
-		if len(block4) < 4 {
-			return nil, errors.New("invalid NDEF header: insufficient data for extended length")
+	// Scan for NDEF TLV
+	loc, err := ScanForNDEFTLV(data)
+	if err != nil {
+		// For errors other than "not found", fail immediately
+		if !errors.Is(err, ErrTLVNDEFNotFound) {
+			Debugf("NTAG readNDEFHeader: TLV scan error: %v", err)
+			return nil, ErrNoNDEF
 		}
-
-		// Parse extended length with bounds checking
-		extendedLength := uint16(block4[2])<<8 | uint16(block4[3])
-		header.ndefLength = int(extendedLength)
-		header.headerSize = 4
+		// If we didn't find NDEF in the first 16 bytes and didn't hit terminator,
+		// try reading more pages
+		loc, err = t.scanMorePagesForNDEF(ctx, data)
+		if err != nil {
+			Debugf("NTAG readNDEFHeader: NDEF TLV not found: %v", err)
+			return nil, ErrNoNDEF
+		}
 	}
+
+	Debugf("NTAG readNDEFHeader: found NDEF TLV at offset %d, length %d, headerSize %d",
+		loc.Offset-loc.HeaderSize, loc.Length, loc.HeaderSize)
+
+	header := &ndefHeader{
+		ndefLength: loc.Length,
+		headerSize: loc.HeaderSize,
+		tlvOffset:  loc.Offset - loc.HeaderSize,
+	}
+
+	time.Sleep(5 * time.Millisecond)
 
 	// Validate NDEF length against reasonable bounds
 	if header.ndefLength < 0 || header.ndefLength > 65535 {
@@ -331,6 +365,47 @@ func (t *NTAGTag) readNDEFHeader(ctx context.Context) (*ndefHeader, error) {
 	}
 
 	return header, nil
+}
+
+// readRawPages reads multiple consecutive pages and returns the raw data.
+// Unlike ReadBlock which returns only 4 bytes, this returns all data from the READ command.
+func (t *NTAGTag) readRawPages(ctx context.Context, startPage uint8, pageCount int) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// NTAG READ command returns 16 bytes (4 pages) starting from the specified page
+	data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, startPage})
+	if err != nil {
+		return nil, err
+	}
+
+	// The response should be 16 bytes (4 pages)
+	expectedBytes := pageCount * ntagBlockSize
+	if len(data) < expectedBytes {
+		// Return what we got
+		return data, nil
+	}
+
+	return data[:expectedBytes], nil
+}
+
+// scanMorePagesForNDEF reads additional pages to continue TLV scanning.
+// Called when NDEF wasn't found in the initial read.
+func (t *NTAGTag) scanMorePagesForNDEF(ctx context.Context, existingData []byte) (*NDEFLocation, error) {
+	// Read pages 8-11 (next 16 bytes after initial read of pages 4-7)
+	moreData, err := t.readRawPages(ctx, ntagUserMemStart+4, 4)
+	if err != nil {
+		return nil, err
+	}
+
+	// Combine data into new slice and scan again
+	combined := make([]byte, len(existingData)+len(moreData))
+	copy(combined, existingData)
+	copy(combined[len(existingData):], moreData)
+	Debugf("NTAG scanMorePagesForNDEF: combined data = [% 02X] (len=%d)", combined, len(combined))
+
+	return ScanForNDEFTLV(combined)
 }
 
 // validateNDEFLengthAgainstCapacity checks if the NDEF length is reasonable for the tag type

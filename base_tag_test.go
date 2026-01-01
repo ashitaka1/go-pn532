@@ -1,4 +1,4 @@
-// Copyright 2025 The Zaparoo Project Contributors.
+// Copyright 2026 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -455,6 +455,11 @@ func TestGetManufacturer(t *testing.T) {
 			name:     "Texas_Instruments_UID_0x07",
 			uid:      []byte{0x07, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
 			expected: ManufacturerTI,
+		},
+		{
+			name:     "Fudan_Microelectronics_UID_0x1D",
+			uid:      []byte{0x1D, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC},
+			expected: ManufacturerFudan,
 		},
 		{
 			name:     "Unknown_UID_0x08",

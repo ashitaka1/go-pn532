@@ -1,4 +1,4 @@
-// Copyright 2025 The Zaparoo Project Contributors.
+// Copyright 2026 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -328,7 +328,7 @@ func TestNTAGReadNDEFRobust(t *testing.T) {
 				})
 			},
 			expectError: true,
-			errorType:   ErrNoNDEF, // Still empty data
+			errorType:   ErrTagReadFailed, // Auth error propagates as read failure
 		},
 		{
 			name: "Timeout error triggers retry logic",

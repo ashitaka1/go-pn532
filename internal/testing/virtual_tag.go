@@ -1,4 +1,4 @@
-// Copyright 2025 The Zaparoo Project Contributors.
+// Copyright 2026 The Zaparoo Project Contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,6 +31,7 @@ type VirtualTag struct {
 	authenticatedSector int
 	Present             bool
 	authenticatedKey    byte
+	supportsFastRead    bool // Whether tag supports FAST_READ (0x3A) command
 }
 
 // NewVirtualNTAG213 creates a virtual NTAG213 tag with default content
@@ -40,10 +41,11 @@ func NewVirtualNTAG213(uid []byte) *VirtualTag {
 	}
 
 	tag := &VirtualTag{
-		Type:    "NTAG213",
-		UID:     uid,
-		Memory:  make([][]byte, 45), // NTAG213 has 45 blocks (180 bytes)
-		Present: true,
+		Type:             "NTAG213",
+		UID:              uid,
+		Memory:           make([][]byte, 45), // NTAG213 has 45 blocks (180 bytes)
+		Present:          true,
+		supportsFastRead: true, // Genuine NXP tags support FAST_READ
 	}
 
 	// Initialize with default NTAG213 memory layout
@@ -51,6 +53,33 @@ func NewVirtualNTAG213(uid []byte) *VirtualTag {
 
 	// Set default NDEF message: "Hello World"
 	// Ignore error since this is test setup with known good data
+	_ = tag.SetNDEFText("Hello World")
+
+	return tag
+}
+
+// NewVirtualFudanClone creates a virtual Fudan FM11NT021 clone tag.
+// Fudan clones have UID prefix 0x1D and don't support FAST_READ (0x3A) or GET_VERSION (0x60).
+// They are functionally NTAG213-compatible but with limited command support.
+// See: https://github.com/RfidResearchGroup/proxmark3/issues/2457
+func NewVirtualFudanClone(uid []byte) *VirtualTag {
+	if uid == nil {
+		// Default Fudan UID (starts with 0x1D)
+		uid = []byte{0x1D, 0x20, 0xBD, 0xC9, 0x07, 0x10, 0x80}
+	}
+
+	tag := &VirtualTag{
+		Type:             "NTAG213", // Same type - they're NTAG213 compatible
+		UID:              uid,
+		Memory:           make([][]byte, 45), // Same memory layout as NTAG213
+		Present:          true,
+		supportsFastRead: false, // Fudan clones don't support FAST_READ
+	}
+
+	// Initialize with default NTAG213 memory layout
+	tag.initNTAG213Memory()
+
+	// Set default NDEF message: "Hello World"
 	_ = tag.SetNDEFText("Hello World")
 
 	return tag
@@ -101,6 +130,54 @@ func NewVirtualMIFARE4K(uid []byte) *VirtualTag {
 // GetUIDString returns the UID as a hex string
 func (v *VirtualTag) GetUIDString() string {
 	return hex.EncodeToString(v.UID)
+}
+
+// SupportsFastRead returns whether this tag supports the FAST_READ (0x3A) command.
+// Genuine NXP tags support FAST_READ, but clone tags (like Fudan FM11NT021) typically don't.
+func (v *VirtualTag) SupportsFastRead() bool {
+	return v.supportsFastRead
+}
+
+// isNTAG returns true if this is an NTAG-type tag (uses 4-byte pages)
+func (v *VirtualTag) isNTAG() bool {
+	return v.Type == "NTAG213" || v.Type == "NTAG215" || v.Type == "NTAG216"
+}
+
+// ReadNTAGPages reads multiple consecutive 4-byte pages and returns them concatenated.
+// This simulates the NTAG READ command which returns 4 pages (16 bytes) at once.
+func (v *VirtualTag) ReadNTAGPages(startPage, numPages int) ([]byte, error) {
+	if !v.Present {
+		return nil, errors.New("tag not present")
+	}
+
+	result := make([]byte, 0, numPages*4)
+	for i := range numPages {
+		page := startPage + i
+		if page < 0 || page >= len(v.Memory) {
+			// Return zeros for out-of-range pages (wrap-around behavior)
+			result = append(result, 0, 0, 0, 0)
+			continue
+		}
+		if v.Memory[page] == nil {
+			result = append(result, 0, 0, 0, 0)
+			continue
+		}
+		// Ensure we get exactly 4 bytes
+		pageData := v.Memory[page]
+		if len(pageData) < 4 {
+			padded := make([]byte, 4)
+			copy(padded, pageData)
+			result = append(result, padded...)
+		} else {
+			result = append(result, pageData[:4]...)
+		}
+	}
+	return result, nil
+}
+
+// SetSupportsFastRead allows tests to configure whether the tag supports FAST_READ
+func (v *VirtualTag) SetSupportsFastRead(supported bool) {
+	v.supportsFastRead = supported
 }
 
 // ReadBlock reads a specific memory block
@@ -225,27 +302,55 @@ func (v *VirtualTag) Insert() {
 // Internal helper methods
 
 func (v *VirtualTag) initNTAG213Memory() {
-	// Block 0: UID and BCC (read-only)
-	v.Memory[0] = make([]byte, 16)
-	copy(v.Memory[0][:len(v.UID)], v.UID)
-
-	// Block 1: More UID (read-only)
-	v.Memory[1] = make([]byte, 16)
-
-	// Block 2: Lock bytes and CC (Capability Container)
-	v.Memory[2] = []byte{0x00, 0x00, 0xE1, 0x10, 0x12, 0x00, 0x01, 0x03, 0xA0, 0x10, 0x44, 0x03, 0x00, 0x00, 0x00, 0x00}
-
-	// Block 3: CC continued
-	v.Memory[3] = make([]byte, 16)
-
-	// Blocks 4-39: User data (where NDEF goes)
-	for i := 4; i < 40; i++ {
-		v.Memory[i] = make([]byte, 16)
+	// NTAG213 has 45 pages of 4 bytes each (180 bytes total)
+	// Page 0: UID bytes 0-2 + BCC0
+	v.Memory[0] = make([]byte, 4)
+	if len(v.UID) >= 3 {
+		copy(v.Memory[0][:3], v.UID[:3])
+		// BCC0 = UID0 XOR UID1 XOR UID2 XOR 0x88
+		v.Memory[0][3] = v.UID[0] ^ v.UID[1] ^ v.UID[2] ^ 0x88
 	}
 
-	// Blocks 40-44: Configuration and lock (read-only for most)
+	// Page 1: UID bytes 3-6
+	v.Memory[1] = make([]byte, 4)
+	if len(v.UID) > 3 {
+		// Copy UID[3:min(7, len)] to page 1
+		end := len(v.UID)
+		if end > 7 {
+			end = 7
+		}
+		copy(v.Memory[1], v.UID[3:end])
+	}
+
+	// Page 2: BCC1, Internal, Lock bytes
+	v.Memory[2] = make([]byte, 4)
+	if len(v.UID) >= 7 {
+		// BCC1 = UID3 XOR UID4 XOR UID5 XOR UID6
+		v.Memory[2][0] = v.UID[3] ^ v.UID[4] ^ v.UID[5] ^ v.UID[6]
+	} else if len(v.UID) > 3 {
+		// Calculate BCC1 with available bytes, zero-pad missing
+		var bcc byte
+		for i := 3; i < len(v.UID); i++ {
+			bcc ^= v.UID[i]
+		}
+		v.Memory[2][0] = bcc
+	}
+	v.Memory[2][1] = 0x48 // Internal byte
+	v.Memory[2][2] = 0x00 // Lock byte 0
+	v.Memory[2][3] = 0x00 // Lock byte 1
+
+	// Page 3: Capability Container (CC)
+	// E1 10 12 00 = NDEF magic, version 1.0, 144 bytes user memory, read/write
+	v.Memory[3] = []byte{0xE1, 0x10, 0x12, 0x00}
+
+	// Pages 4-39: User data (where NDEF goes) - 36 pages of 4 bytes = 144 bytes
+	for i := 4; i < 40; i++ {
+		v.Memory[i] = make([]byte, 4)
+	}
+
+	// Pages 40-44: Configuration pages
 	for i := 40; i < 45; i++ {
-		v.Memory[i] = make([]byte, 16)
+		v.Memory[i] = make([]byte, 4)
 	}
 }
 
@@ -330,87 +435,75 @@ func (v *VirtualTag) isBlockWriteProtected(block int) bool {
 }
 
 func (v *VirtualTag) writeNDEFToNTAG() error {
-	if len(v.ndefData) > 144 { // 36 blocks * 4 bytes usable per block
+	if len(v.ndefData) > 144 { // 36 pages * 4 bytes = 144 bytes user memory
 		return errors.New("NDEF data too large for NTAG213")
 	}
 
-	// Write NDEF data starting at block 4
+	// Write NDEF data starting at page 4, 4 bytes per page
 	dataOffset := 0
-	for block := 4; block < 40 && dataOffset < len(v.ndefData); block++ {
-		blockData := make([]byte, 16)
-		endOffset := dataOffset + 16
+	for page := 4; page < 40 && dataOffset < len(v.ndefData); page++ {
+		pageData := make([]byte, 4)
+		endOffset := dataOffset + 4
 		if endOffset > len(v.ndefData) {
 			endOffset = len(v.ndefData)
 		}
-		copy(blockData, v.ndefData[dataOffset:endOffset])
-		v.Memory[block] = blockData
-		dataOffset += 16
+		copy(pageData, v.ndefData[dataOffset:endOffset])
+		v.Memory[page] = pageData
+		dataOffset += 4
 	}
 
 	return nil
 }
 
 func (v *VirtualTag) extractNDEFTextFromNTAG() string {
-	// Simple NDEF text extraction - look for text record in user data area
-	for block := 4; block < 40; block++ {
-		if v.Memory[block] == nil {
+	// Gather all user data pages into contiguous buffer
+	data := v.gatherUserDataPages()
+
+	// Look for NDEF Text record header (0xD1, 0x01)
+	for i := range len(data) - 7 {
+		if data[i] != 0xD1 || data[i+1] != 0x01 {
 			continue
 		}
-
-		if text := v.findNDEFTextInBlock(block); text != "" {
+		if text := v.parseTextRecord(data, i); text != "" {
 			return text
 		}
 	}
-
 	return ""
 }
 
-func (v *VirtualTag) findNDEFTextInBlock(block int) string {
-	// Look for NDEF Text record header (0xD1, 0x01)
-	for i := range len(v.Memory[block]) - 1 {
-		if v.Memory[block][i] == 0xD1 && v.Memory[block][i+1] == 0x01 {
-			return v.extractTextFromNDEFRecord(block, i)
+func (v *VirtualTag) gatherUserDataPages() []byte {
+	var data []byte
+	for page := 4; page < 40; page++ {
+		if v.Memory[page] == nil {
+			data = append(data, 0, 0, 0, 0)
+		} else {
+			data = append(data, v.Memory[page]...)
 		}
 	}
-	return ""
+	return data
 }
 
-func (v *VirtualTag) extractTextFromNDEFRecord(startBlock, recordStart int) string {
-	// Found text record, try to extract text
-	if recordStart+7 >= len(v.Memory[startBlock]) {
+func (*VirtualTag) parseTextRecord(data []byte, i int) string {
+	// Structure: [0xD1][0x01][payload_len][0x54][lang_len][lang...][text...]
+	payloadLen := int(data[i+2])
+	if data[i+3] != 0x54 { // Not a text record (type 'T')
 		return ""
 	}
-
-	// Skip header, type length, payload length, type, language encoding byte, language code (2 bytes)
-	// Structure: [0xD1][0x01][payload_len][0x54][0x02][0x65][0x6E][text...]
-	textStart := recordStart + 7
-	return v.collectTextData(startBlock, textStart)
-}
-
-func (v *VirtualTag) collectTextData(startBlock, textStart int) string {
-	var textData []byte
-
-	// Collect text bytes from this and subsequent blocks
-	for blockIndex := startBlock; blockIndex < 40; blockIndex++ {
-		if v.Memory[blockIndex] == nil {
+	langLen := int(data[i+4])
+	textStart := i + 5 + langLen
+	textLen := payloadLen - 1 - langLen
+	if textLen <= 0 || textStart+textLen > len(data) {
+		return ""
+	}
+	// Collect text bytes until terminator
+	text := make([]byte, 0, textLen)
+	for j := textStart; j < textStart+textLen && j < len(data); j++ {
+		if data[j] == 0xFE || data[j] == 0x00 {
 			break
 		}
-
-		start := 0
-		if blockIndex == startBlock {
-			start = textStart
-		}
-
-		for j := start; j < len(v.Memory[blockIndex]); j++ {
-			if v.Memory[blockIndex][j] == 0xFE || v.Memory[blockIndex][j] == 0x00 {
-				// End of NDEF or null terminator
-				return string(textData)
-			}
-			textData = append(textData, v.Memory[blockIndex][j])
-		}
+		text = append(text, data[j])
 	}
-
-	return string(textData)
+	return string(text)
 }
 
 // MIFARE authentication methods

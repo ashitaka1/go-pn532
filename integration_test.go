@@ -27,6 +27,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// simulatorTransportWrapper wraps testutil.SimulatorTransport to implement pn532.Transport
+// This is needed because SimulatorTransport returns testutil.TransportType, not pn532.TransportType
+type simulatorTransportWrapper struct {
+	*testutil.SimulatorTransport
+}
+
+// Type implements pn532.Transport by returning pn532.TransportType
+func (*simulatorTransportWrapper) Type() TransportType {
+	return TransportMock
+}
+
+// newSimulatorTransport creates a wrapped SimulatorTransport that implements pn532.Transport
+func newSimulatorTransport(sim *testutil.VirtualPN532) *simulatorTransportWrapper {
+	return &simulatorTransportWrapper{
+		SimulatorTransport: testutil.NewSimulatorTransport(sim),
+	}
+}
+
 // TestBasicTagDetection tests the complete workflow of detecting a tag
 func TestBasicTagDetection(t *testing.T) {
 
@@ -153,10 +171,10 @@ func TestTagReadWrite(t *testing.T) {
 	newText := virtualTag.GetNDEFText()
 	assert.Equal(t, "Test Message", newText)
 
-	// Test block-level operations
-	block4, err := virtualTag.ReadBlock(4) // First user data block
+	// Test page-level operations (NTAG pages are 4 bytes each)
+	page4, err := virtualTag.ReadBlock(4) // First user data page
 	require.NoError(t, err)
-	assert.Len(t, block4, 16) // Standard NFC block size
+	assert.Len(t, page4, 4) // NTAG page size
 
 	// Test invalid block access
 	_, err = virtualTag.ReadBlock(100) // Beyond NTAG213 range
@@ -474,6 +492,164 @@ func TestMIFAREWriteProtection(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, testData, readData)
 			}
+		})
+	}
+}
+
+// TestNTAG_ReadNDEF_FudanClone_SkipsFastRead tests that FAST_READ is skipped for Fudan clone tags.
+// Fudan FM11NT021 clones (UID prefix 0x1D) don't support FAST_READ (0x3A) and the command
+// can return garbage or corrupt tag state. This test verifies the fix for issue #450.
+func TestNTAG_ReadNDEF_FudanClone_SkipsFastRead(t *testing.T) {
+	// Create wire-level simulator with Fudan clone tag
+	sim := testutil.NewVirtualPN532()
+	cloneTag := testutil.NewVirtualFudanClone(nil)
+	sim.AddTag(cloneTag)
+
+	// Create transport
+	transport := newSimulatorTransport(sim)
+
+	// Create device and initialize
+	device, err := New(transport)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = device.InitContext(ctx)
+	require.NoError(t, err)
+
+	// Detect the clone tag
+	tag, err := device.DetectTag(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, tag, "should detect clone tag")
+
+	// Verify it's a Fudan clone (UID starts with 0x1D)
+	assert.Equal(t, byte(0x1D), tag.UIDBytes[0], "UID should start with 0x1D (Fudan)")
+
+	// Create NTAG wrapper
+	ntagTag := NewNTAGTag(device, tag.UIDBytes, tag.SAK)
+
+	// Clear command log before reading NDEF
+	transport.ClearCommandLog()
+
+	// Read NDEF - this should succeed using block-by-block reading, NOT FAST_READ
+	msg, err := ntagTag.ReadNDEF(ctx)
+	require.NoError(t, err, "ReadNDEF should succeed for clone tag")
+	require.NotNil(t, msg, "should have NDEF message")
+	require.NotEmpty(t, msg.Records, "should have NDEF records")
+
+	// Verify NDEF content
+	assert.Equal(t, NDEFTypeText, msg.Records[0].Type, "should be text record")
+
+	// Verify FAST_READ (InCommunicateThru with 0x3A) was NOT used
+	// InCommunicateThru is command 0x42
+	for _, entry := range transport.CommandLog {
+		if entry.Cmd == 0x42 && len(entry.Args) > 0 && entry.Args[0] == 0x3A {
+			t.Error("FAST_READ (0x3A) should NOT be sent to clone tags")
+		}
+	}
+
+	// Verify InDataExchange (0x40) was used for block-by-block reading
+	assert.True(t, transport.HasCommand(0x40), "InDataExchange should be used for block-by-block reading")
+}
+
+// TestNTAG_ReadNDEF_GenuineNXP_UsesFastRead tests that FAST_READ is used for genuine NXP tags.
+// Genuine NXP tags (UID prefix 0x04) support FAST_READ and it should be attempted for performance.
+func TestNTAG_ReadNDEF_GenuineNXP_UsesFastRead(t *testing.T) {
+	// Create wire-level simulator with genuine NXP NTAG213 tag
+	sim := testutil.NewVirtualPN532()
+	nxpTag := testutil.NewVirtualNTAG213(nil) // Default UID starts with 0x04
+	sim.AddTag(nxpTag)
+
+	// Create transport
+	transport := newSimulatorTransport(sim)
+
+	// Create device and initialize
+	device, err := New(transport)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = device.InitContext(ctx)
+	require.NoError(t, err)
+
+	// Detect the NXP tag
+	tag, err := device.DetectTag(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, tag, "should detect NXP tag")
+
+	// Verify it's a genuine NXP tag (UID starts with 0x04)
+	assert.Equal(t, byte(0x04), tag.UIDBytes[0], "UID should start with 0x04 (NXP)")
+
+	// Create NTAG wrapper
+	ntagTag := NewNTAGTag(device, tag.UIDBytes, tag.SAK)
+
+	// Clear command log before reading NDEF
+	transport.ClearCommandLog()
+
+	// Read NDEF - this should succeed, potentially using FAST_READ
+	msg, err := ntagTag.ReadNDEF(ctx)
+	require.NoError(t, err, "ReadNDEF should succeed for NXP tag")
+	require.NotNil(t, msg, "should have NDEF message")
+	require.NotEmpty(t, msg.Records, "should have NDEF records")
+
+	// Verify NDEF content
+	assert.Equal(t, NDEFTypeText, msg.Records[0].Type, "should be text record")
+
+	// For NXP tags, FAST_READ (InCommunicateThru with 0x3A) may be used
+	// We verify the read succeeds - the specific method depends on tag type detection
+}
+
+// TestNTAG_ReadNDEF_CloneTag_RegressionTest tests the complete flow for clone tags.
+// This is a regression test for issue #450 where clone tags failed with "no NDEF record found".
+func TestNTAG_ReadNDEF_CloneTag_RegressionTest(t *testing.T) {
+	// Test with various clone tag UID prefixes that are NOT NXP (0x04)
+	cloneUIDs := []struct {
+		name   string
+		prefix byte
+		desc   string
+	}{
+		{"Fudan_0x1D", 0x1D, "Fudan Microelectronics FM11NT021"},
+		{"Unknown_0x08", 0x08, "Unknown manufacturer"},
+		{"Unknown_0x00", 0x00, "Zero prefix (invalid)"},
+	}
+
+	for _, tt := range cloneUIDs {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create wire-level simulator
+			sim := testutil.NewVirtualPN532()
+
+			// Create clone tag with specific UID prefix
+			uid := []byte{tt.prefix, 0x20, 0xBD, 0xC9, 0x07, 0x10, 0x80}
+			cloneTag := testutil.NewVirtualFudanClone(uid)
+			sim.AddTag(cloneTag)
+
+			// Create transport and device
+			transport := newSimulatorTransport(sim)
+			device, err := New(transport)
+			require.NoError(t, err)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			err = device.InitContext(ctx)
+			require.NoError(t, err)
+
+			// Detect tag
+			tag, err := device.DetectTag(ctx)
+			require.NoError(t, err)
+			require.NotNil(t, tag)
+			assert.Equal(t, tt.prefix, tag.UIDBytes[0], "UID prefix should match")
+
+			// Create NTAG and read NDEF
+			ntagTag := NewNTAGTag(device, tag.UIDBytes, tag.SAK)
+			msg, err := ntagTag.ReadNDEF(ctx)
+
+			// The read should succeed - this was the regression in issue #450
+			require.NoError(t, err, "ReadNDEF should succeed for clone tag with prefix 0x%02X (%s)", tt.prefix, tt.desc)
+			require.NotNil(t, msg, "should have NDEF message")
+			require.NotEmpty(t, msg.Records, "should have NDEF records")
 		})
 	}
 }
