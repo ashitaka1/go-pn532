@@ -18,6 +18,7 @@ package pn532
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -201,6 +202,33 @@ func IsRetryable(err error) bool {
 		errors.Is(err, ErrNoACK),
 		errors.Is(err, ErrFrameCorrupted),
 		errors.Is(err, ErrChecksumMismatch):
+		return true
+	default:
+		return false
+	}
+}
+
+// IsFatal returns true if the error indicates the device/connection is gone
+// and polling should stop entirely. This is distinct from IsRetryable which
+// indicates whether a single operation can be retried.
+func IsFatal(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for TransportError with permanent type
+	var te *TransportError
+	if errors.As(err, &te) {
+		return te.Type == ErrorTypePermanent
+	}
+
+	// Check for known fatal error conditions
+	switch {
+	case errors.Is(err, ErrTransportClosed),
+		errors.Is(err, ErrDeviceNotFound),
+		errors.Is(err, ErrDeviceNotSupported),
+		errors.Is(err, io.EOF),
+		errors.Is(err, io.ErrClosedPipe):
 		return true
 	default:
 		return false

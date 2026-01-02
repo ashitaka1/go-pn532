@@ -1260,3 +1260,69 @@ func TestSession_HandleCardRemoval(t *testing.T) {
 		assert.False(t, session.state.Present, "Card should no longer be present")
 	})
 }
+
+func TestSession_ExecuteSinglePollingCycle_FatalError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ReturnsFatalError", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Set up a fatal error (transport closed)
+		mockTransport.SetError(0x4A, pn532.ErrTransportClosed)
+
+		ctx := context.Background()
+		err := session.executeSinglePollingCycle(ctx)
+
+		// Should return the fatal error
+		require.Error(t, err)
+		assert.ErrorIs(t, err, pn532.ErrTransportClosed)
+	})
+
+	t.Run("ContinuesOnRetryableError", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Set up a retryable error (transport timeout)
+		mockTransport.SetError(0x4A, pn532.ErrTransportTimeout)
+
+		ctx := context.Background()
+		err := session.executeSinglePollingCycle(ctx)
+
+		// Should return nil (continue polling)
+		assert.NoError(t, err)
+	})
+
+	t.Run("ContinuesOnErrNoTagInPoll", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Set up no tag response (not an error, just no tag)
+		mockTransport.DeselectTarget() // Simulate no tag present
+
+		ctx := context.Background()
+		err := session.executeSinglePollingCycle(ctx)
+
+		// Should return nil (continue polling)
+		assert.NoError(t, err)
+	})
+
+	t.Run("ReturnsFatalDeviceNotFoundError", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Set up a fatal error (device not found)
+		mockTransport.SetError(0x4A, pn532.ErrDeviceNotFound)
+
+		ctx := context.Background()
+		err := session.executeSinglePollingCycle(ctx)
+
+		// Should return the fatal error
+		require.Error(t, err)
+		assert.ErrorIs(t, err, pn532.ErrDeviceNotFound)
+	})
+}

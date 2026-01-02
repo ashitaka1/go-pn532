@@ -17,6 +17,7 @@ package polling
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -235,5 +236,136 @@ func TestDeviceActor_Stop(t *testing.T) {
 
 	if finalMetrics.PollCycles > initialMetrics.PollCycles {
 		t.Error("Polling should have stopped, but poll cycles continued to increase")
+	}
+}
+
+// TestDeviceActor_FatalError_CallsCallback verifies that fatal errors trigger callback
+func TestDeviceActor_FatalError_CallsCallback(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	var fatalErrorReceived atomic.Bool
+	var receivedError atomic.Value
+
+	callbacks := DeviceCallbacks{
+		OnCardDetected: func(_ *pn532.DetectedTag) error {
+			return nil
+		},
+		OnFatalError: func(err error) {
+			fatalErrorReceived.Store(true)
+			receivedError.Store(err)
+		},
+	}
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+	}
+
+	// Set up a fatal error (transport closed)
+	mockTransport.SetError(0x4A, pn532.ErrTransportClosed)
+
+	actor := NewDeviceActor(device, config, callbacks)
+	err := actor.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer func() { _ = actor.Stop(context.Background()) }()
+
+	// Wait for the fatal error to be detected
+	time.Sleep(50 * time.Millisecond)
+
+	if !fatalErrorReceived.Load() {
+		t.Error("OnFatalError callback should have been called")
+	}
+
+	if storedErr := receivedError.Load(); storedErr != nil {
+		if !errors.Is(storedErr.(error), pn532.ErrTransportClosed) {
+			t.Errorf("Expected ErrTransportClosed, got %v", storedErr)
+		}
+	}
+}
+
+// TestDeviceActor_FatalError_StopsPolling verifies that fatal errors stop polling
+func TestDeviceActor_FatalError_StopsPolling(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	callbacks := DeviceCallbacks{
+		OnCardDetected: func(_ *pn532.DetectedTag) error {
+			return nil
+		},
+	}
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+	}
+
+	// Set up a fatal error (device not found)
+	mockTransport.SetError(0x4A, pn532.ErrDeviceNotFound)
+
+	actor := NewDeviceActor(device, config, callbacks)
+	err := actor.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer func() { _ = actor.Stop(context.Background()) }()
+
+	// Wait for the fatal error to stop polling
+	time.Sleep(50 * time.Millisecond)
+
+	// Get the poll cycle count
+	initialMetrics := actor.GetMetrics()
+
+	// Wait again - if polling stopped, count shouldn't increase
+	time.Sleep(50 * time.Millisecond)
+
+	finalMetrics := actor.GetMetrics()
+	if finalMetrics.PollCycles > initialMetrics.PollCycles {
+		t.Error("Polling should have stopped on fatal error, but poll cycles continued to increase")
+	}
+}
+
+// TestDeviceActor_FatalError_ContinuesOnRetryable verifies polling continues on retryable errors
+func TestDeviceActor_FatalError_ContinuesOnRetryable(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	var fatalErrorReceived atomic.Bool
+
+	callbacks := DeviceCallbacks{
+		OnCardDetected: func(_ *pn532.DetectedTag) error {
+			return nil
+		},
+		OnFatalError: func(_ error) {
+			fatalErrorReceived.Store(true)
+		},
+	}
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+	}
+
+	// Set up a retryable error (transport timeout)
+	mockTransport.SetError(0x4A, pn532.ErrTransportTimeout)
+
+	actor := NewDeviceActor(device, config, callbacks)
+	err := actor.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer func() { _ = actor.Stop(context.Background()) }()
+
+	// Wait for several poll cycles
+	time.Sleep(50 * time.Millisecond)
+
+	// Fatal error callback should NOT have been called
+	if fatalErrorReceived.Load() {
+		t.Error("OnFatalError callback should NOT have been called for retryable error")
+	}
+
+	// Polling should still be active (poll cycles should have increased)
+	metrics := actor.GetMetrics()
+	if metrics.PollCycles == 0 {
+		t.Error("Polling should have continued despite retryable errors")
 	}
 }
