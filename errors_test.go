@@ -115,6 +115,129 @@ func getIsRetryableTestCases() []struct {
 	}
 }
 
+func TestIsFatal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "transport closed is fatal",
+			err:  ErrTransportClosed,
+			want: true,
+		},
+		{
+			name: "device not found is fatal",
+			err:  ErrDeviceNotFound,
+			want: true,
+		},
+		{
+			name: "device not supported is fatal",
+			err:  ErrDeviceNotSupported,
+			want: true,
+		},
+		{
+			name: "transport timeout is not fatal",
+			err:  ErrTransportTimeout,
+			want: false,
+		},
+		{
+			name: "transport read is not fatal",
+			err:  ErrTransportRead,
+			want: false,
+		},
+		{
+			name: "transport write is not fatal",
+			err:  ErrTransportWrite,
+			want: false,
+		},
+		{
+			name: "tag auth failed is not fatal",
+			err:  ErrTagAuthFailed,
+			want: false,
+		},
+		{
+			name: "command not supported is not fatal",
+			err:  ErrCommandNotSupported,
+			want: false,
+		},
+		{
+			name: "random error is not fatal",
+			err:  errors.New("random error"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsFatal(tt.err)
+			if got != tt.want {
+				t.Errorf("IsFatal() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsFatal_TransportError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		transport *TransportError
+		name      string
+		want      bool
+	}{
+		{
+			name: "transport error with permanent type is fatal",
+			transport: &TransportError{
+				Err:       errors.New("device disconnected"),
+				Op:        "read",
+				Port:      "/dev/ttyUSB0",
+				Type:      ErrorTypePermanent,
+				Retryable: false,
+			},
+			want: true,
+		},
+		{
+			name: "transport error with transient type is not fatal",
+			transport: &TransportError{
+				Err:       errors.New("timeout"),
+				Op:        "read",
+				Port:      "/dev/ttyUSB0",
+				Type:      ErrorTypeTransient,
+				Retryable: true,
+			},
+			want: false,
+		},
+		{
+			name: "transport error with timeout type is not fatal",
+			transport: &TransportError{
+				Err:       errors.New("timeout"),
+				Op:        "read",
+				Port:      "/dev/ttyUSB0",
+				Type:      ErrorTypeTimeout,
+				Retryable: true,
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsFatal(tt.transport)
+			if got != tt.want {
+				t.Errorf("IsFatal() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsRetryable_TransportError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

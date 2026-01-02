@@ -428,8 +428,11 @@ func (s *Session) executeSinglePollingCycle(ctx context.Context) error {
 	if err != nil {
 		if !errors.Is(err, ErrNoTagInPoll) {
 			s.handlePollingError(err)
+			if pn532.IsFatal(err) {
+				return err // Fatal error - exit polling loop
+			}
 		}
-		return nil
+		return nil // Transient error or no tag - continue polling
 	}
 
 	if err := s.processPollingResults(detectedTag); err != nil {

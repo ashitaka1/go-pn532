@@ -29,6 +29,7 @@ type DeviceCallbacks struct {
 	OnCardDetected func(tag *pn532.DetectedTag) error
 	OnCardRemoved  func()
 	OnCardChanged  func(tag *pn532.DetectedTag) error
+	OnFatalError   func(error) // Called when a fatal error occurs (device disconnected, etc.)
 }
 
 // DeviceMetrics tracks operational metrics for DeviceActor
@@ -46,6 +47,7 @@ type DeviceActor struct {
 	config    *Config
 	callbacks DeviceCallbacks
 	stopChan  chan struct{}
+	fatalErr  chan error     // Signals fatal error to pollLoop
 	wg        sync.WaitGroup // Tracks polling goroutine lifecycle
 	// Atomic counters for metrics
 	pollCycles      int64
@@ -67,6 +69,7 @@ func NewDeviceActor(device *pn532.Device, config *Config, callbacks DeviceCallba
 		config:            config,
 		callbacks:         callbacks,
 		stopChan:          make(chan struct{}, 1), // Buffered to prevent deadlock in Stop()
+		fatalErr:          make(chan error, 1),    // Buffered to avoid blocking performPoll
 		currentInterval:   config.PollInterval.Nanoseconds(),
 		lastCardDetection: now,
 	}
@@ -108,6 +111,8 @@ func (da *DeviceActor) pollLoop() {
 			// Update ticker with new interval
 			newInterval := time.Duration(atomic.LoadInt64(&da.currentInterval))
 			ticker.Reset(newInterval)
+		case <-da.fatalErr:
+			return // Exit on fatal error
 		case <-da.stopChan:
 			return
 		}
@@ -131,9 +136,23 @@ func (da *DeviceActor) performPoll() {
 	if err != nil {
 		// Track poll error
 		atomic.AddInt64(&da.pollErrors, 1)
+
+		// Check for fatal error (device disconnected, etc.)
+		if pn532.IsFatal(err) {
+			// Notify callback if set
+			if da.callbacks.OnFatalError != nil {
+				da.callbacks.OnFatalError(err)
+			}
+			// Signal pollLoop to exit (non-blocking send)
+			select {
+			case da.fatalErr <- err:
+			default:
+			}
+		}
+		return
 	}
 
-	if err == nil && detectedTag != nil {
+	if detectedTag != nil {
 		// Track card detected and update timestamp
 		atomic.AddInt64(&da.cardsDetected, 1)
 		atomic.StoreInt64(&da.lastCardDetection, start.UnixNano())
