@@ -17,6 +17,43 @@ package polling
 
 import "time"
 
+// SleepRecoveryConfig configures automatic recovery after host sleep/wake
+type SleepRecoveryConfig struct {
+	// Enabled enables sleep detection and recovery attempts
+	Enabled bool
+
+	// TimeDiscontinuityThreshold is the minimum elapsed time beyond the expected
+	// poll interval that indicates a sleep occurred. Default: 2 seconds
+	TimeDiscontinuityThreshold time.Duration
+
+	// MaxRecoveryAttempts is the number of recovery attempts before
+	// treating as a fatal error. Default: 3
+	MaxRecoveryAttempts int
+
+	// RecoveryBackoff is the delay between recovery attempts
+	RecoveryBackoff time.Duration
+}
+
+// DefaultSleepRecoveryConfig returns sensible defaults for sleep recovery
+func DefaultSleepRecoveryConfig() SleepRecoveryConfig {
+	return SleepRecoveryConfig{
+		Enabled:                    true,
+		TimeDiscontinuityThreshold: 2 * time.Second,
+		MaxRecoveryAttempts:        3,
+		RecoveryBackoff:            500 * time.Millisecond,
+	}
+}
+
+// DetectSleep checks if the elapsed time since last poll indicates a system sleep.
+// Returns true if elapsed time exceeds (pollInterval + TimeDiscontinuityThreshold).
+func (cfg SleepRecoveryConfig) DetectSleep(elapsed, pollInterval time.Duration) bool {
+	if !cfg.Enabled {
+		return false
+	}
+	expectedMax := pollInterval + cfg.TimeDiscontinuityThreshold
+	return elapsed > expectedMax
+}
+
 // Config holds polling configuration options
 type Config struct {
 	PollInterval       time.Duration
@@ -25,6 +62,8 @@ type Config struct {
 	// 0x00 = immediate return, 0x01-0xFE = retry count (~150ms each), 0xFF = infinite
 	// Higher values reduce LED blinking frequency but increase detection latency
 	HardwareTimeoutRetries byte
+	// SleepRecovery configures automatic recovery after host sleep/wake cycles
+	SleepRecovery SleepRecoveryConfig
 }
 
 // DefaultConfig returns the default polling configuration
@@ -33,5 +72,6 @@ func DefaultConfig() *Config {
 		PollInterval:           250 * time.Millisecond,
 		CardRemovalTimeout:     600 * time.Millisecond,
 		HardwareTimeoutRetries: 0x20, // ~4.8s timeout (32 * 150ms) for reduced LED blinking
+		SleepRecovery:          DefaultSleepRecoveryConfig(),
 	}
 }
