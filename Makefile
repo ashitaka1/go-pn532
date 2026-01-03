@@ -3,7 +3,7 @@
 # Go parameters
 GOCMD=go
 GOBUILD=$(GOCMD) build
-GOTEST=GOEXPERIMENT=synctest $(GOCMD) test
+GOTEST=$(GOCMD) test
 
 # Default target
 all: lint test build

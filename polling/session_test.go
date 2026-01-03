@@ -1461,6 +1461,81 @@ func TestSession_SleepDetection_RecoveryFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "sleep recovery failed")
 }
 
+// TestSession_SleepDetection_NilRecoverer tests that nil recoverer is handled gracefully
+func TestSession_SleepDetection_NilRecoverer(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+		SleepRecovery: SleepRecoveryConfig{
+			Enabled:                    true,
+			TimeDiscontinuityThreshold: 50 * time.Millisecond,
+		},
+	}
+
+	session := NewSession(device, config)
+
+	// Explicitly set recoverer to nil (overriding the auto-created one)
+	session.SetRecoverer(nil)
+
+	// Setup mock response for polling
+	mockTransport.SetResponse(0x4A, []byte{0x4B, 0x00}) // No tag
+
+	// Simulate sleep
+	session.lastPollTime = time.Now().Add(-100 * time.Millisecond)
+
+	ctx := context.Background()
+	err := session.executeSinglePollingCycle(ctx)
+
+	// Should succeed - nil recoverer means no recovery attempted, but no error
+	assert.NoError(t, err)
+}
+
+// TestSession_SleepDetection_DeviceUpdatedAfterRecovery tests that device is updated after recovery
+func TestSession_SleepDetection_DeviceUpdatedAfterRecovery(t *testing.T) {
+	t.Parallel()
+	oldDevice, oldTransport := createMockDeviceWithTransport(t)
+	newDevice, newTransport := createMockDeviceWithTransport(t)
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+		SleepRecovery: SleepRecoveryConfig{
+			Enabled:                    true,
+			TimeDiscontinuityThreshold: 50 * time.Millisecond,
+			MaxRecoveryAttempts:        2,
+			RecoveryBackoff:            10 * time.Millisecond,
+		},
+	}
+
+	session := NewSession(oldDevice, config)
+
+	// Old device fails SAMConfiguration
+	oldTransport.SetError(0x14, errors.New("soft reset failed"))
+
+	// New device succeeds
+	newTransport.SetResponse(0x14, []byte{0x15})
+	newTransport.SetResponse(0x4A, []byte{0x4B, 0x00}) // No tag
+
+	// Set up recoverer that returns new device on reopen
+	reopenCalled := false
+	recoverer := NewDefaultRecoverer(oldDevice, func() (*pn532.Device, error) {
+		reopenCalled = true
+		return newDevice, nil
+	}, 10*time.Millisecond, 2)
+	session.SetRecoverer(recoverer)
+
+	// Simulate sleep
+	session.lastPollTime = time.Now().Add(-100 * time.Millisecond)
+
+	ctx := context.Background()
+	err := session.executeSinglePollingCycle(ctx)
+
+	require.NoError(t, err)
+	assert.True(t, reopenCalled, "Reopen should have been called")
+	assert.Equal(t, newDevice, session.GetDevice(), "Device should be updated to new device")
+}
+
 // TestSleepRecoveryConfig_DetectSleep tests the DetectSleep helper
 func TestSleepRecoveryConfig_DetectSleep(t *testing.T) {
 	t.Parallel()
