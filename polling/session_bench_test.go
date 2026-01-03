@@ -34,29 +34,8 @@ func createMockDeviceWithTransportForBench(b *testing.B) (*pn532.Device, *pn532.
 	return device, mockTransport
 }
 
-// BenchmarkSession_TraditionalVsActor compares performance between traditional and actor-based sessions
-func BenchmarkSession_TraditionalVsActor(b *testing.B) {
-	b.Run("Traditional_Session", func(b *testing.B) {
-		benchmarkTraditionalSession(b)
-	})
-
-	b.Run("Actor_Based_Session", func(b *testing.B) {
-		benchmarkActorBasedSession(b)
-	})
-}
-
-// benchmarkTraditionalSession measures traditional Session.Start() performance
-func benchmarkTraditionalSession(b *testing.B) {
-	benchmarkSessionImpl(b, NewSession)
-}
-
-// benchmarkActorBasedSession measures actor-based Session.Start() performance
-func benchmarkActorBasedSession(b *testing.B) {
-	benchmarkSessionImpl(b, NewActorBasedSession)
-}
-
-// benchmarkSessionImpl contains the shared benchmark implementation
-func benchmarkSessionImpl(b *testing.B, sessionFactory func(device *pn532.Device, config *Config) *Session) {
+// BenchmarkSession_Start measures Session.Start() performance
+func BenchmarkSession_Start(b *testing.B) {
 	device, mockTransport := createMockDeviceWithTransportForBench(b)
 
 	// Setup mock to return a card on poll
@@ -70,7 +49,7 @@ func benchmarkSessionImpl(b *testing.B, sessionFactory func(device *pn532.Device
 		CardRemovalTimeout: 10 * time.Millisecond,
 	}
 
-	session := sessionFactory(device, config)
+	session := NewSession(device, config)
 
 	// Pre-allocate context for benchmark accuracy
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
@@ -89,8 +68,8 @@ func benchmarkSessionImpl(b *testing.B, sessionFactory func(device *pn532.Device
 	_ = session.Close()
 }
 
-// BenchmarkWriteLatency measures write operation latency
-func BenchmarkWriteLatency(b *testing.B) {
+// BenchmarkSession_WriteLatency measures write operation latency
+func BenchmarkSession_WriteLatency(b *testing.B) {
 	device, mockTransport := createMockDeviceWithTransportForBench(b)
 
 	// Setup successful write responses
@@ -105,17 +84,8 @@ func BenchmarkWriteLatency(b *testing.B) {
 		CardRemovalTimeout: 100 * time.Millisecond,
 	}
 
-	b.Run("Traditional_Session_Write", func(b *testing.B) {
-		benchmarkWriteOperation(b, NewSession(device, config))
-	})
+	session := NewSession(device, config)
 
-	b.Run("Actor_Based_Session_Write", func(b *testing.B) {
-		benchmarkWriteOperation(b, NewActorBasedSession(device, config))
-	})
-}
-
-// benchmarkWriteOperation measures WriteToTag latency
-func benchmarkWriteOperation(b *testing.B, session *Session) {
 	// Create mock detected tag
 	detectedTag := &pn532.DetectedTag{
 		UID:  "12345678",
@@ -141,8 +111,8 @@ func benchmarkWriteOperation(b *testing.B, session *Session) {
 	_ = session.Close()
 }
 
-// BenchmarkMemoryAllocation measures memory efficiency
-func BenchmarkMemoryAllocation(b *testing.B) {
+// BenchmarkSession_Allocation measures memory efficiency
+func BenchmarkSession_Allocation(b *testing.B) {
 	device, mockTransport := createMockDeviceWithTransportForBench(b)
 	mockTransport.SetResponse(0x4A, []byte{
 		0xD5, 0x4B, 0x01, 0x01, 0x00, 0x04, 0x00, 0x07, 0x04,
@@ -154,19 +124,9 @@ func BenchmarkMemoryAllocation(b *testing.B) {
 		CardRemovalTimeout: 100 * time.Millisecond,
 	}
 
-	b.Run("Traditional_Session_Allocation", func(b *testing.B) {
-		b.ReportAllocs()
-		for range b.N {
-			session := NewSession(device, config)
-			_ = session.Close()
-		}
-	})
-
-	b.Run("Actor_Based_Session_Allocation", func(b *testing.B) {
-		b.ReportAllocs()
-		for range b.N {
-			session := NewActorBasedSession(device, config)
-			_ = session.Close()
-		}
-	})
+	b.ReportAllocs()
+	for range b.N {
+		session := NewSession(device, config)
+		_ = session.Close()
+	}
 }

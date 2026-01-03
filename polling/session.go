@@ -28,28 +28,34 @@ import (
 
 // Session handles continuous card monitoring with state machine
 type Session struct {
-	config         *Config
-	OnCardDetected func(tag *pn532.DetectedTag) error
-	OnCardRemoved  func()
-	OnCardChanged  func(tag *pn532.DetectedTag) error
-	pauseChan      chan struct{}
-	resumeChan     chan struct{}
-	ackChan        chan struct{}
-	actor          *DeviceActor
-	device         *pn532.Device
-	state          CardState
-	stateMutex     syncutil.RWMutex
-	writeMutex     syncutil.Mutex
-	closed         atomic.Bool
-	isPaused       atomic.Bool
+	lastPollTime    time.Time
+	recoverer       DeviceRecoverer
+	device          *pn532.Device
+	OnSleepDetected func()
+	pauseChan       chan struct{}
+	resumeChan      chan struct{}
+	ackChan         chan struct{}
+	config          *Config
+	OnCardChanged   func(tag *pn532.DetectedTag) error
+	OnCardDetected  func(tag *pn532.DetectedTag) error
+	OnCardRemoved   func()
+	state           CardState
+	stateMutex      syncutil.RWMutex
+	writeMutex      syncutil.Mutex
+	closed          atomic.Bool
+	isPaused        atomic.Bool
 }
 
-// NewSession creates a new card monitoring session
+// NewSession creates a new card monitoring session.
+// If sleep recovery is enabled in config, a DefaultRecoverer is automatically
+// created for soft reset recovery. Use SetRecoverer to provide a custom
+// recoverer with full reconnection capability via ReopenFunc.
 func NewSession(device *pn532.Device, config *Config) *Session {
 	if config == nil {
 		config = DefaultConfig()
 	}
-	return &Session{
+
+	session := &Session{
 		device:     device,
 		config:     config,
 		state:      CardState{},
@@ -57,53 +63,22 @@ func NewSession(device *pn532.Device, config *Config) *Session {
 		resumeChan: make(chan struct{}, 1),
 		ackChan:    make(chan struct{}, 1),
 	}
-}
 
-// NewActorBasedSession creates a session using DeviceActor underneath
-func NewActorBasedSession(device *pn532.Device, config *Config) *Session {
-	session := NewSession(device, config)
-
-	// Create DeviceActor with callbacks that delegate to session callbacks
-	callbacks := DeviceCallbacks{
-		OnCardDetected: func(tag *pn532.DetectedTag) error {
-			session.stateMutex.RLock()
-			cb := session.OnCardDetected
-			session.stateMutex.RUnlock()
-			if cb != nil {
-				return cb(tag)
-			}
-			return nil
-		},
-		OnCardRemoved: func() {
-			session.stateMutex.RLock()
-			cb := session.OnCardRemoved
-			session.stateMutex.RUnlock()
-			if cb != nil {
-				cb()
-			}
-		},
-		OnCardChanged: func(tag *pn532.DetectedTag) error {
-			session.stateMutex.RLock()
-			cb := session.OnCardChanged
-			session.stateMutex.RUnlock()
-			if cb != nil {
-				return cb(tag)
-			}
-			return nil
-		},
+	// Auto-create recoverer when sleep recovery is enabled
+	if config.SleepRecovery.Enabled {
+		session.recoverer = NewDefaultRecoverer(
+			device,
+			nil, // No reopen func by default, only soft reset
+			config.SleepRecovery.RecoveryBackoff,
+			config.SleepRecovery.MaxRecoveryAttempts,
+		)
 	}
 
-	session.actor = NewDeviceActor(device, config, callbacks)
 	return session
 }
 
 // Start begins continuous monitoring for cards
 func (s *Session) Start(ctx context.Context) error {
-	// If we have an actor, delegate to it instead of using direct polling
-	if s.actor != nil {
-		return s.actor.Start(ctx)
-	}
-	// Fall back to direct polling for regular sessions
 	return s.continuousPolling(ctx)
 }
 
@@ -114,14 +89,12 @@ func (s *Session) GetState() CardState {
 	return s.state
 }
 
-// GetDevice returns the underlying PN532 device
+// GetDevice returns the underlying PN532 device.
+// This may return a different device after sleep/wake recovery.
 func (s *Session) GetDevice() *pn532.Device {
+	s.stateMutex.RLock()
+	defer s.stateMutex.RUnlock()
 	return s.device
-}
-
-// GetDeviceActor returns the underlying DeviceActor for actor-based sessions
-func (s *Session) GetDeviceActor() *DeviceActor {
-	return s.actor
 }
 
 // SetOnCardDetected sets the callback for when a card is detected.
@@ -143,6 +116,22 @@ func (s *Session) SetOnCardChanged(callback func(*pn532.DetectedTag) error) {
 	s.stateMutex.Lock()
 	defer s.stateMutex.Unlock()
 	s.OnCardChanged = callback
+}
+
+// SetOnSleepDetected sets the callback for when system sleep/wake is detected.
+func (s *Session) SetOnSleepDetected(callback func()) {
+	s.stateMutex.Lock()
+	defer s.stateMutex.Unlock()
+	s.OnSleepDetected = callback
+}
+
+// SetRecoverer configures a custom device recoverer for sleep/wake handling.
+// Use this to provide a recoverer with ReopenFunc for full reconnection
+// capability beyond the default soft reset behavior.
+func (s *Session) SetRecoverer(r DeviceRecoverer) {
+	s.stateMutex.Lock()
+	defer s.stateMutex.Unlock()
+	s.recoverer = r
 }
 
 // Close cleans up the monitor resources
@@ -169,14 +158,6 @@ func (s *Session) Close() error {
 	select {
 	case <-s.resumeChan:
 	default:
-	}
-
-	// If we have an actor, stop it first to stop the polling goroutine
-	if s.actor != nil {
-		ctx := context.Background() // Use background context for cleanup
-		if err := s.actor.Stop(ctx); err != nil {
-			return fmt.Errorf("failed to stop device actor: %w", err)
-		}
 	}
 
 	return nil
@@ -230,14 +211,11 @@ func (s *Session) pauseWithAck(ctx context.Context) error {
 	select {
 	case s.pauseChan <- struct{}{}:
 		// Successfully sent pause signal, now wait for acknowledgment with timeout
-		ackTimeout := time.NewTimer(100 * time.Millisecond)
-		defer ackTimeout.Stop()
-
 		select {
 		case <-s.ackChan:
 			// Polling goroutine has acknowledged the pause
 			return nil
-		case <-ackTimeout.C:
+		case <-time.After(100 * time.Millisecond):
 			// No acknowledgment received - likely no polling loop running
 			// This is OK for testing scenarios, pause state is already set
 			return nil
@@ -263,13 +241,18 @@ func (s *Session) executeWriteToTag(
 	detectedTag *pn532.DetectedTag,
 	writeFn func(context.Context, pn532.Tag) error,
 ) error {
-	tag, tagErr := s.device.CreateTag(detectedTag)
+	// Use GetDevice() to get the current device reference (may be updated after recovery)
+	device := s.GetDevice()
+	if device == nil {
+		return errors.New("device not available")
+	}
+	tag, tagErr := device.CreateTag(detectedTag)
 	if tagErr != nil {
 		return fmt.Errorf("failed to create tag: %w", tagErr)
 	}
 	writeErr := writeFn(writeCtx, tag)
 	if writeErr != nil {
-		_ = s.device.ClearTransportState()
+		_ = device.ClearTransportState()
 	}
 	return writeErr
 }
@@ -424,6 +407,11 @@ func (s *Session) runPollingLoop(ctx context.Context, cycleFunc func(context.Con
 
 // executeSinglePollingCycle performs one polling cycle and processes results
 func (s *Session) executeSinglePollingCycle(ctx context.Context) error {
+	// Check for time discontinuity (sleep detection)
+	if err := s.checkSleepAndRecover(ctx); err != nil {
+		return err // Recovery failed - exit polling loop
+	}
+
 	detectedTag, err := s.performSinglePoll(ctx)
 	if err != nil {
 		if !errors.Is(err, ErrNoTagInPoll) {
@@ -437,6 +425,67 @@ func (s *Session) executeSinglePollingCycle(ctx context.Context) error {
 
 	if err := s.processPollingResults(detectedTag); err != nil {
 		return fmt.Errorf("callback error during polling: %w", err)
+	}
+	return nil
+}
+
+// checkSleepAndRecover detects time discontinuity (system sleep) and attempts recovery
+func (s *Session) checkSleepAndRecover(ctx context.Context) error {
+	cfg := s.config.SleepRecovery
+	if !cfg.Enabled {
+		s.lastPollTime = time.Now()
+		return nil
+	}
+
+	if err := s.handleTimeDiscontinuity(ctx, cfg); err != nil {
+		return err
+	}
+
+	s.lastPollTime = time.Now()
+	return nil
+}
+
+// handleTimeDiscontinuity checks for and handles time discontinuity (sleep detection)
+func (s *Session) handleTimeDiscontinuity(ctx context.Context, cfg SleepRecoveryConfig) error {
+	if s.lastPollTime.IsZero() {
+		return nil
+	}
+
+	elapsed := time.Since(s.lastPollTime)
+	if !cfg.DetectSleep(elapsed, s.config.PollInterval) {
+		return nil
+	}
+
+	// Sleep detected - call callback and attempt recovery
+	s.stateMutex.RLock()
+	onSleep := s.OnSleepDetected
+	recoverer := s.recoverer
+	s.stateMutex.RUnlock()
+
+	if onSleep != nil {
+		onSleep()
+	}
+
+	return s.attemptSleepRecovery(ctx, recoverer)
+}
+
+// attemptSleepRecovery attempts to recover the device after sleep
+func (s *Session) attemptSleepRecovery(ctx context.Context, recoverer DeviceRecoverer) error {
+	if recoverer == nil {
+		return nil
+	}
+
+	if err := recoverer.AttemptRecovery(ctx); err != nil {
+		return fmt.Errorf("sleep recovery failed: %w", err)
+	}
+
+	// Update device reference if it changed during recovery
+	if newDevice := recoverer.GetDevice(); newDevice != nil {
+		s.stateMutex.Lock()
+		if newDevice != s.device {
+			s.device = newDevice
+		}
+		s.stateMutex.Unlock()
 	}
 	return nil
 }

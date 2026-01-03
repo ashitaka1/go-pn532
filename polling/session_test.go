@@ -31,10 +31,10 @@ import (
 
 // createMockDeviceWithTransport creates a device with mock transport for testing.
 // The mock starts with a target selected (simulating successful InListPassiveTarget).
-func createMockDeviceWithTransport(t *testing.T) (*pn532.Device, *pn532.MockTransport) {
+func createMockDeviceWithTransport(t *testing.T, opts ...pn532.Option) (*pn532.Device, *pn532.MockTransport) {
 	mockTransport := pn532.NewMockTransport()
 	mockTransport.SelectTarget() // Simulate that a tag was detected
-	device, err := pn532.New(mockTransport)
+	device, err := pn532.New(mockTransport, opts...)
 	require.NoError(t, err)
 	return device, mockTransport
 }
@@ -1325,4 +1325,229 @@ func TestSession_ExecuteSinglePollingCycle_FatalError(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, pn532.ErrDeviceNotFound)
 	})
+}
+
+// TestSession_SleepDetection_TriggersCallback tests that sleep detection triggers callback
+func TestSession_SleepDetection_TriggersCallback(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+		SleepRecovery: SleepRecoveryConfig{
+			Enabled:                    true,
+			TimeDiscontinuityThreshold: 50 * time.Millisecond,
+			MaxRecoveryAttempts:        3,
+			RecoveryBackoff:            10 * time.Millisecond,
+		},
+	}
+
+	session := NewSession(device, config)
+
+	var sleepDetected atomic.Bool
+	session.SetOnSleepDetected(func() {
+		sleepDetected.Store(true)
+	})
+
+	// Setup mock responses
+	mockTransport.SetResponse(0x4A, []byte{0x4B, 0x00}) // No tag
+	mockTransport.SetResponse(0x14, []byte{0x15})       // SAMConfiguration success
+
+	// Simulate that we had a poll a long time ago
+	session.lastPollTime = time.Now().Add(-100 * time.Millisecond)
+
+	ctx := context.Background()
+	_ = session.executeSinglePollingCycle(ctx)
+
+	assert.True(t, sleepDetected.Load(), "OnSleepDetected callback should have been called")
+}
+
+// TestSession_SleepDetection_Disabled tests that sleep detection can be disabled
+func TestSession_SleepDetection_Disabled(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+		SleepRecovery: SleepRecoveryConfig{
+			Enabled: false, // Disabled
+		},
+	}
+
+	session := NewSession(device, config)
+
+	var sleepDetected atomic.Bool
+	session.SetOnSleepDetected(func() {
+		sleepDetected.Store(true)
+	})
+
+	// Setup mock responses
+	mockTransport.SetResponse(0x4A, []byte{0x4B, 0x00}) // No tag
+
+	// Simulate that we had a poll a long time ago
+	session.lastPollTime = time.Now().Add(-100 * time.Millisecond)
+
+	ctx := context.Background()
+	_ = session.executeSinglePollingCycle(ctx)
+
+	assert.False(t, sleepDetected.Load(), "OnSleepDetected callback should NOT be called when disabled")
+}
+
+// TestSession_SleepDetection_RecoverySuccess tests that successful recovery continues polling
+func TestSession_SleepDetection_RecoverySuccess(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+		SleepRecovery: SleepRecoveryConfig{
+			Enabled:                    true,
+			TimeDiscontinuityThreshold: 50 * time.Millisecond,
+			MaxRecoveryAttempts:        3,
+			RecoveryBackoff:            10 * time.Millisecond,
+		},
+	}
+
+	session := NewSession(device, config)
+
+	// Setup mock responses
+	mockTransport.SetResponse(0x4A, []byte{0x4B, 0x00}) // No tag
+	mockTransport.SetResponse(0x14, []byte{0x15})       // SAMConfiguration success
+
+	// Set up a mock recoverer that succeeds
+	recoverer := NewDefaultRecoverer(device, nil, 10*time.Millisecond, 3)
+	session.SetRecoverer(recoverer)
+
+	// Simulate that we had a poll a long time ago
+	session.lastPollTime = time.Now().Add(-100 * time.Millisecond)
+
+	ctx := context.Background()
+	err := session.executeSinglePollingCycle(ctx)
+
+	assert.NoError(t, err, "Polling should continue after successful recovery")
+}
+
+// TestSession_SleepDetection_RecoveryFails tests that failed recovery exits polling loop
+func TestSession_SleepDetection_RecoveryFails(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+		SleepRecovery: SleepRecoveryConfig{
+			Enabled:                    true,
+			TimeDiscontinuityThreshold: 50 * time.Millisecond,
+			MaxRecoveryAttempts:        1, // Fail fast
+			RecoveryBackoff:            10 * time.Millisecond,
+		},
+	}
+
+	session := NewSession(device, config)
+
+	// Setup mock to fail SAMConfiguration
+	mockTransport.SetError(0x14, errors.New("soft reset failed"))
+
+	// Set up a mock recoverer with no reopen function (will fail)
+	recoverer := NewDefaultRecoverer(device, nil, 10*time.Millisecond, 1)
+	session.SetRecoverer(recoverer)
+
+	// Simulate that we had a poll a long time ago
+	session.lastPollTime = time.Now().Add(-100 * time.Millisecond)
+
+	ctx := context.Background()
+	err := session.executeSinglePollingCycle(ctx)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sleep recovery failed")
+}
+
+// TestSleepRecoveryConfig_DetectSleep tests the DetectSleep helper
+func TestSleepRecoveryConfig_DetectSleep(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		elapsed      time.Duration
+		pollInterval time.Duration
+		threshold    time.Duration
+		enabled      bool
+		want         bool
+	}{
+		{
+			name:         "disabled returns false",
+			enabled:      false,
+			elapsed:      10 * time.Second,
+			pollInterval: 100 * time.Millisecond,
+			threshold:    2 * time.Second,
+			want:         false,
+		},
+		{
+			name:         "normal poll - no sleep",
+			enabled:      true,
+			elapsed:      150 * time.Millisecond,
+			pollInterval: 100 * time.Millisecond,
+			threshold:    2 * time.Second,
+			want:         false,
+		},
+		{
+			name:         "exactly at threshold - no sleep",
+			enabled:      true,
+			elapsed:      2100 * time.Millisecond,
+			pollInterval: 100 * time.Millisecond,
+			threshold:    2 * time.Second,
+			want:         false,
+		},
+		{
+			name:         "exceeds threshold - sleep detected",
+			enabled:      true,
+			elapsed:      5 * time.Second,
+			pollInterval: 100 * time.Millisecond,
+			threshold:    2 * time.Second,
+			want:         true,
+		},
+		{
+			name:         "long poll interval with small gap - no sleep",
+			enabled:      true,
+			elapsed:      1100 * time.Millisecond,
+			pollInterval: 1 * time.Second,
+			threshold:    2 * time.Second,
+			want:         false,
+		},
+		{
+			name:         "long poll interval exceeds threshold - sleep",
+			enabled:      true,
+			elapsed:      4 * time.Second,
+			pollInterval: 1 * time.Second,
+			threshold:    2 * time.Second,
+			want:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := SleepRecoveryConfig{
+				Enabled:                    tt.enabled,
+				TimeDiscontinuityThreshold: tt.threshold,
+			}
+			got := cfg.DetectSleep(tt.elapsed, tt.pollInterval)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestSession_GetState tests the GetState method
+func TestSession_GetState(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+
+	config := &Config{
+		PollInterval: 10 * time.Millisecond,
+	}
+
+	session := NewSession(device, config)
+
+	state := session.GetState()
+	assert.False(t, state.Present)
+	assert.Empty(t, state.LastUID)
 }
