@@ -566,6 +566,102 @@ func TestDevice_SendRawCommand(t *testing.T) {
 	}
 }
 
+func TestDevice_SendDataExchangeWithRetry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success_FirstAttempt", func(t *testing.T) {
+		t.Parallel()
+
+		device, mock := createMockDeviceWithTransport(t)
+
+		// Configure successful response
+		mock.SetResponse(testutil.CmdInDataExchange, []byte{0x41, 0x00, 0xDE, 0xAD, 0xBE, 0xEF})
+
+		result, err := device.SendDataExchangeWithRetry(context.Background(), []byte{0x30, 0x04})
+
+		require.NoError(t, err)
+		assert.Equal(t, []byte{0xDE, 0xAD, 0xBE, 0xEF}, result)
+		assert.Equal(t, 1, mock.GetCallCount(testutil.CmdInDataExchange))
+	})
+
+	t.Run("Success_AfterTimeoutRetry", func(t *testing.T) {
+		t.Parallel()
+
+		device, mock := createMockDeviceWithTransport(t)
+
+		// Queue: first call returns timeout (0x01), second call succeeds
+		// Timeout error is encoded as protocol error in response byte 1
+		mock.QueueResponses(testutil.CmdInDataExchange,
+			[]byte{0x41, 0x01},                         // First call: timeout error
+			[]byte{0x41, 0x00, 0xDE, 0xAD, 0xBE, 0xEF}, // Second call: success
+		)
+
+		result, err := device.SendDataExchangeWithRetry(context.Background(), []byte{0x30, 0x04})
+
+		require.NoError(t, err)
+		assert.Equal(t, []byte{0xDE, 0xAD, 0xBE, 0xEF}, result)
+		assert.Equal(t, 2, mock.GetCallCount(testutil.CmdInDataExchange), "Should have retried once")
+	})
+
+	t.Run("Success_AfterTwoTimeoutRetries", func(t *testing.T) {
+		t.Parallel()
+
+		device, mock := createMockDeviceWithTransport(t)
+
+		// Queue: first two calls timeout, third succeeds
+		mock.QueueResponses(testutil.CmdInDataExchange,
+			[]byte{0x41, 0x01},                         // First call: timeout error
+			[]byte{0x41, 0x01},                         // Second call: timeout error
+			[]byte{0x41, 0x00, 0xDE, 0xAD, 0xBE, 0xEF}, // Third call: success
+		)
+
+		result, err := device.SendDataExchangeWithRetry(context.Background(), []byte{0x30, 0x04})
+
+		require.NoError(t, err)
+		assert.Equal(t, []byte{0xDE, 0xAD, 0xBE, 0xEF}, result)
+		assert.Equal(t, 3, mock.GetCallCount(testutil.CmdInDataExchange), "Should have retried twice")
+	})
+
+	t.Run("Failure_AllThreeTimeoutsExhausted", func(t *testing.T) {
+		t.Parallel()
+
+		device, mock := createMockDeviceWithTransport(t)
+
+		// Queue: all three calls timeout
+		mock.QueueResponses(testutil.CmdInDataExchange,
+			[]byte{0x41, 0x01}, // First call: timeout error
+			[]byte{0x41, 0x01}, // Second call: timeout error
+			[]byte{0x41, 0x01}, // Third call: timeout error
+		)
+
+		result, err := device.SendDataExchangeWithRetry(context.Background(), []byte{0x30, 0x04})
+
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.Equal(t, 3, mock.GetCallCount(testutil.CmdInDataExchange), "Should have tried 3 times")
+
+		// Verify it's a timeout error
+		var pn532Err *PN532Error
+		require.ErrorAs(t, err, &pn532Err)
+		assert.True(t, pn532Err.IsTimeoutError())
+	})
+
+	t.Run("NoRetry_NonTimeoutError", func(t *testing.T) {
+		t.Parallel()
+
+		device, mock := createMockDeviceWithTransport(t)
+
+		// Configure non-timeout error (0x14 = authentication error)
+		mock.SetResponse(testutil.CmdInDataExchange, []byte{0x41, 0x14})
+
+		result, err := device.SendDataExchangeWithRetry(context.Background(), []byte{0x30, 0x04})
+
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.Equal(t, 1, mock.GetCallCount(testutil.CmdInDataExchange), "Should NOT retry non-timeout errors")
+	})
+}
+
 func TestDevice_PowerDown(t *testing.T) {
 	t.Parallel()
 

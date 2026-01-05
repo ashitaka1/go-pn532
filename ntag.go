@@ -167,7 +167,7 @@ func (t *NTAGTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
 		return nil, err
 	}
 
-	data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, block})
+	data, err := t.device.SendDataExchangeWithRetry(ctx, []byte{ntagCmdRead, block})
 	if err != nil {
 		// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
 		if IsPN532AuthenticationError(err) {
@@ -240,10 +240,9 @@ func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 		return nil, err
 	}
 
-	// Ensure target is selected before reading. This is critical after DetectType()
-	// which uses GetVersion() via InCommunicateThru - that command doesn't maintain
-	// target selection state. Without re-selection, InDataExchange fails with timeout
-	// error 0x01. See PN532 User Manual §7.3.9.
+	// Ensure target is selected before reading. This is defensive against any prior
+	// operations that may have used InCommunicateThru (0x42), which doesn't maintain
+	// the PN532's target selection state. See PN532 User Manual §7.3.9.
 	if err := t.device.InSelect(ctx); err != nil {
 		Debugln("NTAG ReadNDEF: InSelect failed, continuing anyway:", err)
 	}
@@ -375,7 +374,7 @@ func (t *NTAGTag) readRawPages(ctx context.Context, startPage uint8, pageCount i
 	}
 
 	// NTAG READ command returns 16 bytes (4 pages) starting from the specified page
-	data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, startPage})
+	data, err := t.device.SendDataExchangeWithRetry(ctx, []byte{ntagCmdRead, startPage})
 	if err != nil {
 		return nil, err
 	}
@@ -1065,7 +1064,15 @@ func (t *NTAGTag) GetTotalPages() uint8 {
 	}
 }
 
-// DetectType attempts to detect the NTAG variant using GET_VERSION command with fallback
+// DetectType detects the NTAG variant using the Capability Container (CC).
+//
+// This function uses CC-based detection exclusively, avoiding the GET_VERSION command
+// which uses InCommunicateThru (0x42). InCommunicateThru doesn't maintain the PN532's
+// target selection state, causing subsequent InDataExchange calls to fail with timeout
+// error 0x01 on readers with marginal RF connections.
+//
+// CC-based detection accurately identifies NTAG213/215/216 from the size field in the
+// capability container, which is sufficient for NDEF operations.
 func (t *NTAGTag) DetectType(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1090,53 +1097,10 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 		return errors.New("not an NTAG tag: invalid capability container")
 	}
 
-	// Check if this is likely a genuine NXP tag (UID starts with 0x04)
-	// Clone tags use different UID prefixes and typically don't support GET_VERSION.
-	// Sending GET_VERSION (0x60) to a clone tag that doesn't understand it causes
-	// the tag to enter IDLE state per ISO14443-3A, breaking subsequent writes.
-	// Skip GET_VERSION for non-NXP UIDs to keep clone tags in ACTIVE state.
-	if len(t.uid) > 0 && t.uid[0] != 0x04 {
-		Debugf("NTAG DetectType: non-NXP UID prefix 0x%02X, skipping GET_VERSION to avoid IDLE state", t.uid[0])
-		t.tagType = t.detectTypeFromCapabilityContainer(ccData)
-		return nil
-	}
-
-	// Now try to get the actual version information using GET_VERSION
-	version, err := t.GetVersion()
-
-	// Re-select target after GetVersion to restore PN532 internal state.
-	// GetVersion uses InCommunicateThru (0x42) which is a raw pass-through command
-	// that doesn't maintain the PN532's target selection state. Without re-selection,
-	// subsequent InDataExchange calls may fail with timeout error 01.
-	// See PN532 User Manual §7.3.9: "The host controller has to take care of the
-	// selection of the target it wants to reach (whereas when using the
-	// InDataExchange command, it is done automatically)."
-	if selectErr := t.device.InSelect(ctx); selectErr != nil {
-		Debugln("NTAG DetectType: InSelect after GetVersion failed:", selectErr)
-	}
-
-	if err != nil {
-		// If GET_VERSION fails, we still know it's an NTAG from the CC check
-		// Use fallback detection method based on capability container
-		Debugf("NTAG GET_VERSION failed, using CC-based detection fallback: %v", err)
-		t.tagType = t.detectTypeFromCapabilityContainer(ccData)
-		return nil // Don't return error if CC-based detection succeeded
-	}
-
-	// Use the version information to determine the exact variant
-	t.tagType = version.GetNTAGType()
-
-	if t.tagType == NTAGTypeUnknown {
-		// Even if storage size is unknown from GET_VERSION, try CC-based detection
-		Debugf("NTAG GET_VERSION returned unknown type, trying CC-based detection fallback")
-		fallbackType := t.detectTypeFromCapabilityContainer(ccData)
-		if fallbackType != NTAGTypeUnknown {
-			t.tagType = fallbackType
-		} else {
-			// Final fallback to conservative choice
-			t.tagType = NTAGType213 // Use smallest variant for safety
-		}
-	}
+	// Use CC-based detection for all tags (genuine NXP and clones alike)
+	// This avoids GET_VERSION which uses InCommunicateThru and can cause
+	// target selection issues on marginal RF connections
+	t.tagType = t.detectTypeFromCapabilityContainer(ccData)
 
 	return nil
 }
@@ -1321,21 +1285,20 @@ func (t *NTAGTag) getTagTypeName() string {
 }
 
 func (t *NTAGTag) readBlockWithRetry(ctx context.Context, block uint8) ([]byte, error) {
-	maxRetries := 3
+	const maxRetries = 3
 	for i := range maxRetries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
-		data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, block})
+		// SendDataExchangeWithRetry handles timeout (0x01) retries internally
+		data, err := t.device.SendDataExchangeWithRetry(ctx, []byte{ntagCmdRead, block})
 		if err != nil {
 			// If we get authentication error 14, try InCommunicateThru as fallback for clone devices
 			if IsPN532AuthenticationError(err) {
 				return t.readBlockCommunicateThru(ctx, block)
 			}
-			if i < maxRetries-1 {
-				continue
-			}
+			// For other errors, fail immediately since SendDataExchangeWithRetry already retried timeouts
 			return nil, err
 		}
 
@@ -1344,6 +1307,7 @@ func (t *NTAGTag) readBlockWithRetry(ctx context.Context, block uint8) ([]byte, 
 			return data[:ntagBlockSize], nil
 		}
 
+		// Short response - retry
 		if i < maxRetries-1 {
 			continue
 		}
@@ -1649,8 +1613,8 @@ func (t *NTAGTag) readBlockDirectFallback(ctx context.Context, block uint8) ([]b
 
 	Debugf("NTAG attempting direct InDataExchange fallback for block %d", block)
 
-	// Try direct InDataExchange, ignoring the error 14 that originally triggered the fallback chain
-	data, err := t.device.SendDataExchange(ctx, []byte{ntagCmdRead, block})
+	// Try direct InDataExchange with retry, ignoring the error 14 that originally triggered the fallback chain
+	data, err := t.device.SendDataExchangeWithRetry(ctx, []byte{ntagCmdRead, block})
 	if err != nil {
 		// If this also fails, the clone device simply doesn't support NTAG properly
 		Debugf("NTAG direct InDataExchange fallback also failed: %v", err)
