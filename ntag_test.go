@@ -1632,6 +1632,45 @@ func TestNTAGDetectType_SkipsGetVersionForCloneTags(t *testing.T) {
 	assert.NotEqual(t, NTAGTypeUnknown, tag.tagType)
 }
 
+// TestNTAGDetectType_UsesCCOnlyForNXPTags verifies that even genuine NXP tags
+// (UID starting with 0x04) use CC-based detection and never call GET_VERSION.
+// This is a regression test for the fix that removed GET_VERSION to avoid
+// timeout errors on marginal RF connections. See issue: NDEF read timeout 0x01.
+func TestNTAGDetectType_UsesCCOnlyForNXPTags(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	// Use a genuine NXP tag UID (starts with 0x04)
+	nxpUID := []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}
+	tag := NewNTAGTag(device, nxpUID, 0x00)
+
+	// Mock valid CC read for NTAG215 (size 0x3E)
+	// CC format: [Magic 0xE1] [Version] [Size] [Access]
+	ccData := make([]byte, 16) // Read returns 4 pages = 16 bytes
+	ccData[0] = 0xE1           // NDEF magic
+	ccData[1] = 0x10           // Version 1.0
+	ccData[2] = 0x3E           // Size field for NTAG215 (504 bytes)
+	ccData[3] = 0x00           // Access conditions
+
+	// Only set up response for InDataExchange (0x40), NOT for InCommunicateThru (0x42)
+	// If GetVersion was being called, it would use InCommunicateThru and fail
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, ccData...))
+
+	err := tag.DetectType(context.Background())
+
+	require.NoError(t, err, "DetectType should succeed with CC-based detection only")
+	assert.Equal(t, NTAGType215, tag.tagType, "Should detect NTAG215 from CC size field")
+
+	// Verify InCommunicateThru was NOT called (GetVersion uses InCommunicateThru)
+	assert.Equal(t, 0, mockTransport.GetCallCount(0x42),
+		"InCommunicateThru should NOT be called - GetVersion is no longer used")
+
+	// Verify InDataExchange WAS called (for CC read)
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x40), 1,
+		"InDataExchange should be called for CC read")
+}
+
 // TestNTAGTag_ReadNDEF_FudanClone tests that Fudan clone tags (UID prefix 0x1D)
 // use block-by-block reading instead of FAST_READ, since Fudan FM11NT021 clones
 // don't support FAST_READ (0x3A) and may return garbage or corrupt tag state.

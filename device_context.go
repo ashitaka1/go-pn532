@@ -555,6 +555,54 @@ func (d *Device) SendDataExchange(ctx context.Context, data []byte) ([]byte, err
 	return res[2:], nil
 }
 
+// isRetryableTimeoutError checks if an error is a PN532 timeout (0x01) that should be retried.
+func isRetryableTimeoutError(err error) bool {
+	var pn532Err *PN532Error
+	return errors.As(err, &pn532Err) && pn532Err.IsTimeoutError()
+}
+
+// SendDataExchangeWithRetry sends a data exchange command with automatic retry on timeout.
+// Error 0x01 (timeout) indicates a transient RF communication failure where the packet was
+// lost. Immediate retry typically succeeds as the tag is still in the field.
+//
+// Configuration:
+//   - 3 attempts total (1 initial + 2 retries)
+//   - No delay between retries (immediate retry)
+//   - Only retries on timeout errors (0x01)
+func (d *Device) SendDataExchangeWithRetry(ctx context.Context, data []byte) ([]byte, error) {
+	const maxAttempts = 3
+
+	var lastErr error
+	for attempt := range maxAttempts {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, ctxErr
+		}
+
+		result, err := d.SendDataExchange(ctx, data)
+		if err == nil {
+			if attempt > 0 {
+				Debugf("SendDataExchangeWithRetry: succeeded on attempt %d", attempt+1)
+			}
+			return result, nil
+		}
+
+		if !isRetryableTimeoutError(err) {
+			return nil, err
+		}
+
+		// Timeout error - save it and retry immediately
+		lastErr = err
+		if attempt < maxAttempts-1 {
+			Debugf("SendDataExchangeWithRetry: timeout on attempt %d, retrying immediately", attempt+1)
+		}
+	}
+
+	return nil, lastErr
+}
+
 // SendRawCommand sends a raw command with context support
 func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error) {
 	const targetNum byte = 1

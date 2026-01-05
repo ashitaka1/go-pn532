@@ -307,8 +307,8 @@ func (t *MIFARETag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) 
 		return nil, fmt.Errorf("not authenticated to sector %d (block %d)", sector, block)
 	}
 
-	// Send read command
-	data, err := t.device.SendDataExchange(ctx, []byte{mifareCmdRead, block})
+	// Send read command with retry on timeout
+	data, err := t.device.SendDataExchangeWithRetry(ctx, []byte{mifareCmdRead, block})
 	if err != nil {
 		return nil, fmt.Errorf("%w (block %d): %w", ErrTagReadFailed, block, err)
 	}
@@ -329,10 +329,10 @@ func (t *MIFARETag) ReadBlockDirect(ctx context.Context, block uint8) ([]byte, e
 		return nil, err
 	}
 
-	// Send read command directly
-	data, err := t.device.SendDataExchange(ctx, []byte{mifareCmdRead, block})
+	// Send read command with retry on timeout
+	data, err := t.device.SendDataExchangeWithRetry(ctx, []byte{mifareCmdRead, block})
 	if err != nil {
-		// If we get a timeout error, try InCommunicateThru as fallback
+		// If we still get a timeout error after retries, try InCommunicateThru as fallback
 		if IsPN532TimeoutError(err) {
 			return t.readBlockCommunicateThru(ctx, block)
 		}
