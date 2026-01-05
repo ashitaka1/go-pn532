@@ -1102,12 +1102,6 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// target selection issues on marginal RF connections
 	t.tagType = t.detectTypeFromCapabilityContainer(ccData)
 
-	if t.tagType == NTAGTypeUnknown {
-		// Final fallback to conservative choice
-		Debugf("NTAG DetectType: CC-based detection returned unknown, defaulting to NTAG213")
-		t.tagType = NTAGType213 // Use smallest variant for safety
-	}
-
 	return nil
 }
 
