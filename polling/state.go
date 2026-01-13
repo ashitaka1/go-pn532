@@ -32,14 +32,15 @@ const (
 
 // CardState tracks the state of a card on a reader
 type CardState struct {
-	LastSeenTime   time.Time
-	ReadStartTime  time.Time
-	RemovalTimer   *time.Timer
-	LastUID        string
-	LastType       string
-	TestedUID      string
-	DetectionState CardDetectionState
-	Present        bool
+	LastSeenTime              time.Time
+	ReadStartTime             time.Time
+	RemovalTimer              *time.Timer
+	LastUID                   string
+	LastType                  string
+	TestedUID                 string
+	DetectionState            CardDetectionState
+	ConsecutiveStableFailures int
+	Present                   bool
 }
 
 // ErrNoTagInPoll indicates no tag was detected during polling (not an error condition)
@@ -94,6 +95,7 @@ func (cs *CardState) TransitionToIdle() {
 	cs.LastUID = ""
 	cs.LastType = ""
 	cs.TestedUID = ""
+	cs.ConsecutiveStableFailures = 0
 	cs.LastSeenTime = time.Time{}
 	cs.ReadStartTime = time.Time{}
 	safeTimerStop(cs.RemovalTimer)

@@ -1235,7 +1235,7 @@ func TestSession_HandleCardRemoval(t *testing.T) {
 
 		// Card not present, should not call callback
 		session.handleCardRemoval()
-		assert.False(t, session.state.Present)
+		assert.False(t, session.GetState().Present)
 	})
 
 	t.Run("CallsCallback_WhenCardWasPresent", func(t *testing.T) {
@@ -1257,7 +1257,7 @@ func TestSession_HandleCardRemoval(t *testing.T) {
 		session.handleCardRemoval()
 
 		assert.True(t, callbackCalled, "OnCardRemoved callback should be called")
-		assert.False(t, session.state.Present, "Card should no longer be present")
+		assert.False(t, session.GetState().Present, "Card should no longer be present")
 	})
 }
 
@@ -1625,4 +1625,223 @@ func TestSession_GetState(t *testing.T) {
 	state := session.GetState()
 	assert.False(t, state.Present)
 	assert.Empty(t, state.LastUID)
+}
+
+// TestSession_RFStabilityCheck tests the three-layer RF stability check
+func TestSession_RFStabilityCheck(t *testing.T) {
+	t.Parallel()
+
+	t.Run("InSelectFails_SkipsSilently", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Make InSelect fail (simulates unstable RF)
+		mockTransport.SetError(0x54, errors.New("RF unstable"))
+
+		detectedTag := createTestDetectedTag()
+		var callbackCalled bool
+		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+			callbackCalled = true
+			return nil
+		}
+
+		// Process should return nil (silent skip), not call callback
+		err := session.processPollingResults(detectedTag)
+
+		require.NoError(t, err)
+		assert.False(t, callbackCalled, "callback should not be called when RF is unstable")
+		state := session.GetState()
+		assert.Equal(t, 0, state.ConsecutiveStableFailures)
+		assert.False(t, state.Present, "state should not be updated when RF is unstable")
+	})
+
+	t.Run("InSelectSucceeds_CallsCallback", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Make InSelect succeed
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+
+		detectedTag := createTestDetectedTag()
+		var callbackCalled bool
+		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+			callbackCalled = true
+			return nil
+		}
+
+		err := session.processPollingResults(detectedTag)
+
+		require.NoError(t, err)
+		assert.True(t, callbackCalled, "callback should be called when RF is stable")
+		assert.True(t, session.GetState().Present)
+	})
+
+	t.Run("CallbackFailsOnce_SilentRetry", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Make InSelect succeed
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+
+		detectedTag := createTestDetectedTag()
+		callbackErr := errors.New("NDEF read failed")
+		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+			return callbackErr
+		}
+
+		// First call - should fail silently (not return error)
+		err := session.processPollingResults(detectedTag)
+
+		require.NoError(t, err, "first failure should be silent")
+		state := session.GetState()
+		assert.Equal(t, 1, state.ConsecutiveStableFailures)
+		assert.False(t, state.Present, "state should not be updated on failure")
+	})
+}
+
+// TestSession_RFStabilityCheck_RepeatedFailures tests callback failure and retry behavior
+func TestSession_RFStabilityCheck_RepeatedFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("CallbackFailsThreeTimes_ReturnsError", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Make InSelect succeed
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+
+		detectedTag := createTestDetectedTag()
+		callbackErr := errors.New("NDEF read failed")
+		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+			return callbackErr
+		}
+
+		// First two calls should be silent
+		err1 := session.processPollingResults(detectedTag)
+		require.NoError(t, err1)
+		assert.Equal(t, 1, session.GetState().ConsecutiveStableFailures)
+
+		err2 := session.processPollingResults(detectedTag)
+		require.NoError(t, err2)
+		assert.Equal(t, 2, session.GetState().ConsecutiveStableFailures)
+
+		// Third call should return error
+		err3 := session.processPollingResults(detectedTag)
+		require.Error(t, err3, "third failure should return error")
+		assert.Contains(t, err3.Error(), "callback failed 3 times")
+		assert.Equal(t, 3, session.GetState().ConsecutiveStableFailures)
+	})
+
+	t.Run("CallbackSucceeds_ResetsFailureCounter", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+
+		detectedTag := createTestDetectedTag()
+		failCount := 0
+		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+			failCount++
+			if failCount <= 2 {
+				return errors.New("transient error")
+			}
+			return nil // Succeed on third attempt
+		}
+
+		// First two calls fail silently
+		_ = session.processPollingResults(detectedTag)
+		assert.Equal(t, 1, session.GetState().ConsecutiveStableFailures)
+
+		_ = session.processPollingResults(detectedTag)
+		assert.Equal(t, 2, session.GetState().ConsecutiveStableFailures)
+
+		// Third call succeeds - should reset counter
+		err := session.processPollingResults(detectedTag)
+		require.NoError(t, err)
+		state := session.GetState()
+		assert.Equal(t, 0, state.ConsecutiveStableFailures)
+		assert.True(t, state.Present)
+	})
+}
+
+// TestSession_RFStabilityCheck_CounterReset tests failure counter reset scenarios
+func TestSession_RFStabilityCheck_CounterReset(t *testing.T) {
+	t.Parallel()
+
+	t.Run("InSelectFails_ResetsFailureCounter", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Start with InSelect succeeding
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+
+		detectedTag := createTestDetectedTag()
+		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+			return errors.New("callback error")
+		}
+
+		// First call increments failure counter
+		_ = session.processPollingResults(detectedTag)
+		assert.Equal(t, 1, session.GetState().ConsecutiveStableFailures)
+
+		// Now make InSelect fail (RF becomes unstable)
+		mockTransport.SetError(0x54, errors.New("RF unstable"))
+
+		// This should reset the failure counter
+		err := session.processPollingResults(detectedTag)
+		require.NoError(t, err)
+		assert.Equal(t, 0, session.GetState().ConsecutiveStableFailures)
+	})
+
+	t.Run("CardRemoval_ResetsFailureCounter", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Simulate some failures (must hold lock when modifying state)
+		session.stateMutex.Lock()
+		session.state.ConsecutiveStableFailures = 2
+		session.state.Present = true
+		session.stateMutex.Unlock()
+
+		// Trigger card removal
+		session.handleCardRemoval()
+
+		state := session.GetState()
+		assert.Equal(t, 0, state.ConsecutiveStableFailures)
+		assert.False(t, state.Present)
+	})
+}
+
+// TestSession_VerifyTagStable tests the verifyTagStable helper
+func TestSession_VerifyTagStable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ReturnsTrue_WhenInSelectSucceeds", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
+
+		stable := session.verifyTagStable()
+		assert.True(t, stable)
+	})
+
+	t.Run("ReturnsFalse_WhenInSelectFails", func(t *testing.T) {
+		t.Parallel()
+		device, mockTransport := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		mockTransport.SetError(0x54, errors.New("timeout"))
+
+		stable := session.verifyTagStable()
+		assert.False(t, stable)
+	})
 }

@@ -52,7 +52,8 @@ func BuildNoTagResponse() []byte {
 
 // BuildDataExchangeResponse creates an InDataExchange response
 func BuildDataExchangeResponse(data []byte) []byte {
-	response := []byte{0xD5, 0x41, 0x00} // Success status
+	response := make([]byte, 0, 3+len(data))
+	response = append(response, 0xD5, 0x41, 0x00) // Success status
 	response = append(response, data...)
 	return response
 }
@@ -64,10 +65,9 @@ func BuildErrorResponse(cmd, errorCode byte) []byte {
 
 // buildNTAGDetectionResponse creates a response for NTAG tags
 func buildNTAGDetectionResponse(uid []byte) []byte {
-	response := []byte{0xD5, 0x4B, 0x01, 0x01} // Command + 1 target found
-
-	// ATQA (Answer To Request Type A), SAK (Select Acknowledge), UID length and UID
-	response = append(response, 0x00, 0x44, 0x00, byte(len(uid)))
+	response := make([]byte, 0, 8+len(uid))
+	// Command + 1 target found + ATQA (Answer To Request Type A), SAK (Select Acknowledge), UID length
+	response = append(response, 0xD5, 0x4B, 0x01, 0x01, 0x00, 0x44, 0x00, byte(len(uid)))
 	response = append(response, uid...)
 
 	return response
@@ -75,10 +75,9 @@ func buildNTAGDetectionResponse(uid []byte) []byte {
 
 // buildMIFAREDetectionResponse creates a response for MIFARE Classic tags
 func buildMIFAREDetectionResponse(uid []byte, sak byte) []byte {
-	response := []byte{0xD5, 0x4B, 0x01, 0x01} // Command + 1 target found
-
-	// ATQA (Answer To Request Type A), SAK (Select Acknowledge), UID length and UID
-	response = append(response, 0x00, 0x04, sak, byte(len(uid)))
+	response := make([]byte, 0, 8+len(uid))
+	// Command + 1 target found + ATQA (Answer To Request Type A), SAK (Select Acknowledge), UID length
+	response = append(response, 0xD5, 0x4B, 0x01, 0x01, 0x00, 0x04, sak, byte(len(uid)))
 	response = append(response, uid...)
 
 	return response
@@ -86,10 +85,9 @@ func buildMIFAREDetectionResponse(uid []byte, sak byte) []byte {
 
 // buildGenericDetectionResponse creates a generic ISO14443A response
 func buildGenericDetectionResponse(uid []byte) []byte {
-	response := []byte{0xD5, 0x4B, 0x01, 0x01} // Command + 1 target found
-
-	// ATQA (Answer To Request Type A), SAK (Select Acknowledge), UID length and UID
-	response = append(response, 0x00, 0x04, 0x00, byte(len(uid)))
+	response := make([]byte, 0, 8+len(uid))
+	// Command + 1 target found + ATQA (Answer To Request Type A), SAK (Select Acknowledge), UID length
+	response = append(response, 0xD5, 0x4B, 0x01, 0x01, 0x00, 0x04, 0x00, byte(len(uid)))
 	response = append(response, uid...)
 
 	return response

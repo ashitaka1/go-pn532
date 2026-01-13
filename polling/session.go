@@ -596,13 +596,31 @@ func (s *Session) handleCardRemoval() {
 	}
 }
 
-// processPollingResults processes the detected tag and returns any callback errors
+// maxStableFailuresBeforeError is how many times a callback can fail with stable RF
+// before we consider it a "real" error worth reporting. This prevents error spam
+// during card slide-in when RF is marginal.
+const maxStableFailuresBeforeError = 3
+
+// processPollingResults processes the detected tag and returns any callback errors.
 func (s *Session) processPollingResults(detectedTag *pn532.DetectedTag) error {
 	if detectedTag == nil {
 		// No tag detected - removal handled by timer, nothing to do here
 		return nil
 	}
 
+	// LAYER 1: Verify RF stability before processing
+	// This catches marginal RF connections (e.g., card sliding in from the side)
+	// before we run callbacks that might fail and leave the card in a stuck state.
+	if !s.verifyTagStable() {
+		// RF unstable - skip this cycle silently, reset failure counter
+		// The card will be re-detected on the next poll if still present
+		s.stateMutex.Lock()
+		s.state.ConsecutiveStableFailures = 0
+		s.stateMutex.Unlock()
+		return nil // Silent skip - not a real failure
+	}
+
+	// RF is stable - proceed with callback processing
 	// Stop any existing removal timer and transition to reading state BEFORE
 	// calling callbacks. This prevents the old timer from firing during callback
 	// execution (e.g., during NDEF reading which can take significant time).
@@ -612,9 +630,31 @@ func (s *Session) processPollingResults(detectedTag *pn532.DetectedTag) error {
 
 	// Card present - handle state transitions (calls OnCardDetected/OnCardChanged)
 	cardChanged, err := s.updateCardState(detectedTag)
+	// LAYER 2: Handle callback failure without killing polling loop
+	// If callback fails, don't mark as tested and allow retry on next poll
 	if err != nil {
-		return err
+		s.stateMutex.Lock()
+		s.state.ConsecutiveStableFailures++
+		failures := s.state.ConsecutiveStableFailures
+		s.stateMutex.Unlock()
+
+		// LAYER 3: Only report error after multiple stable failures
+		// This prevents error spam when RF just stabilized but reads still fail
+		if failures >= maxStableFailuresBeforeError {
+			// This is a "real" error - RF is stable but callback keeps failing
+			return fmt.Errorf("callback failed %d times with stable RF: %w", failures, err)
+		}
+
+		// Not enough failures yet - skip silently, will retry next poll
+		pn532.Debugf("Callback failed (attempt %d/%d, will retry): %v",
+			failures, maxStableFailuresBeforeError, err)
+		return nil // Don't exit polling, don't set TestedUID
 	}
+
+	// Callback succeeded - reset failure counter
+	s.stateMutex.Lock()
+	s.state.ConsecutiveStableFailures = 0
+	s.stateMutex.Unlock()
 
 	// After callback completes, set up the appropriate timer for this card
 	if cardChanged || s.shouldTestCard(detectedTag.UID) {
@@ -629,6 +669,25 @@ func (s *Session) processPollingResults(detectedTag *pn532.DetectedTag) error {
 	}
 
 	return nil
+}
+
+// verifyTagStable confirms the detected tag has stable RF contact by attempting
+// an InSelect command. This catches marginal RF connections before we run
+// callbacks that might fail and leave the card in a "stuck" state.
+//
+// Returns true if tag responds to InSelect, false if RF appears unstable.
+func (s *Session) verifyTagStable() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// InSelect verifies the target is still valid and responsive
+	// If RF is marginal (e.g., card sliding in), this will fail
+	err := s.device.InSelect(ctx)
+	if err != nil {
+		pn532.Debugf("RF unstable (InSelect failed): %v", err)
+		return false
+	}
+	return true
 }
 
 // safeCallCallback executes a callback with panic recovery

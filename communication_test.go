@@ -75,17 +75,19 @@ func getDataExchangeTestCases() []struct {
 	expectedData   []byte
 	expectError    bool
 } {
-	cases := []struct {
+	successCases := getDataExchangeSuccessCases()
+	errorCases := getDataExchangeErrorCases()
+	cases := make([]struct {
 		setupMock      func(*MockTransport)
 		name           string
 		errorSubstring string
 		inputData      []byte
 		expectedData   []byte
 		expectError    bool
-	}{}
+	}, 0, len(successCases)+len(errorCases))
 
-	cases = append(cases, getDataExchangeSuccessCases()...)
-	cases = append(cases, getDataExchangeErrorCases()...)
+	cases = append(cases, successCases...)
+	cases = append(cases, errorCases...)
 
 	return cases
 }
@@ -131,7 +133,8 @@ func getDataExchangeSuccessCases() []struct {
 				for i := range largeResponse {
 					largeResponse[i] = byte(i % 256)
 				}
-				response := []byte{0x41, 0x00}
+				response := make([]byte, 0, 2+len(largeResponse))
+				response = append(response, 0x41, 0x00)
 				response = append(response, largeResponse...)
 				mock.SetResponse(testutil.CmdInDataExchange, response)
 			},
@@ -220,17 +223,19 @@ func getRawCommandTestCases() []struct {
 	expectedData   []byte
 	expectError    bool
 } {
-	cases := []struct {
+	successCases := getRawCommandSuccessCases()
+	errorCases := getRawCommandErrorCases()
+	cases := make([]struct {
 		setupMock      func(*MockTransport)
 		name           string
 		errorSubstring string
 		inputData      []byte
 		expectedData   []byte
 		expectError    bool
-	}{}
+	}, 0, len(successCases)+len(errorCases))
 
-	cases = append(cases, getRawCommandSuccessCases()...)
-	cases = append(cases, getRawCommandErrorCases()...)
+	cases = append(cases, successCases...)
+	cases = append(cases, errorCases...)
 
 	return cases
 }
@@ -274,8 +279,9 @@ func getRawCommandSuccessCases() []struct {
 		{
 			name: "Complex_Raw_Command",
 			setupMock: func(mock *MockTransport) {
-				complexResponse := []byte{0x43, 0x00}
 				versionData := []byte{0x00, 0x04, 0x04, 0x02, 0x01, 0x00, 0x11, 0x03}
+				complexResponse := make([]byte, 0, 2+len(versionData))
+				complexResponse = append(complexResponse, 0x43, 0x00)
 				complexResponse = append(complexResponse, versionData...)
 				mock.SetResponse(cmdInCommunicateThru, complexResponse)
 			},
@@ -361,7 +367,9 @@ func getPowerDownTestCases() []struct {
 	irqEnable      byte
 	expectError    bool
 } {
-	cases := []struct {
+	successCases := getPowerDownSuccessCases()
+	errorCases := getPowerDownErrorCases()
+	cases := make([]struct {
 		setupMock      func(*MockTransport)
 		name           string
 		errorSubstring string
@@ -369,10 +377,10 @@ func getPowerDownTestCases() []struct {
 		wakeupEnable   byte
 		irqEnable      byte
 		expectError    bool
-	}{}
+	}, 0, len(successCases)+len(errorCases))
 
-	cases = append(cases, getPowerDownSuccessCases()...)
-	cases = append(cases, getPowerDownErrorCases()...)
+	cases = append(cases, successCases...)
+	cases = append(cases, errorCases...)
 
 	return cases
 }

@@ -370,7 +370,8 @@ func (t *MIFARETag) WriteBlock(ctx context.Context, block uint8, data []byte) er
 	}
 
 	// Send write command
-	cmd := []byte{mifareCmdWrite, block}
+	cmd := make([]byte, 0, 2+len(data))
+	cmd = append(cmd, mifareCmdWrite, block)
 	cmd = append(cmd, data...)
 
 	_, err := t.device.SendDataExchange(ctx, cmd)
@@ -405,7 +406,8 @@ func (t *MIFARETag) WriteBlockDirect(ctx context.Context, block uint8, data []by
 	}
 
 	// Send write command directly
-	cmd := []byte{mifareCmdWrite, block}
+	cmd := make([]byte, 0, 2+len(data))
+	cmd = append(cmd, mifareCmdWrite, block)
 	cmd = append(cmd, data...)
 
 	_, err = t.device.SendDataExchange(ctx, cmd)
@@ -456,7 +458,8 @@ func (t *MIFARETag) writeBlockCommunicateThru(ctx context.Context, block uint8, 
 	}
 
 	// Build MIFARE write command
-	cmd := []byte{mifareCmdWrite, block}
+	cmd := make([]byte, 0, 2+len(data))
+	cmd = append(cmd, mifareCmdWrite, block)
 	cmd = append(cmd, data...)
 
 	// Use SendRawCommand instead of SendDataExchange
@@ -944,7 +947,8 @@ func (t *MIFARETag) Authenticate(ctx context.Context, sector uint8, keyType byte
 
 	// Build authentication command
 	// CRITICAL: Protocol requires key first, then UID (per PN532 manual and working implementations)
-	cmd := []byte{mifareCmdAuth + keyType, block}
+	cmd := make([]byte, 0, 2+len(secureKeyCopy)+4)
+	cmd = append(cmd, mifareCmdAuth+keyType, block)
 	cmd = append(cmd, secureKeyCopy...) // Key must come first
 	cmd = append(cmd, t.uid[:4]...)     // UID comes second
 
@@ -977,7 +981,8 @@ func (t *MIFARETag) AuthenticateContext(ctx context.Context, sector uint8, keyTy
 	block := sector * mifareSectorSize
 
 	// Build authentication command
-	cmd := []byte{mifareCmdAuth + keyType, block}
+	cmd := make([]byte, 0, 2+len(key)+4)
+	cmd = append(cmd, mifareCmdAuth+keyType, block)
 	cmd = append(cmd, key...)
 	cmd = append(cmd, t.uid[:4]...)
 

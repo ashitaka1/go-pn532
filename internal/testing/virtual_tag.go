@@ -252,22 +252,24 @@ func (v *VirtualTag) SetNDEFText(text string) error {
 
 	// NDEF Text Record format (simplified):
 	// [Header][Type Length][Payload Length][Type][Language][Text]
-	ndefRecord := []byte{
-		0xD1,                     // Header: MB=1, ME=1, CF=0, SR=1, IL=0, TNF=1 (Well Known)
-		0x01,                     // Type Length: 1 byte
-		byte(len(textBytes) + 3), // Payload Length: language code (2) + encoding (1) + text
-		0x54,                     // Type: "T" for Text
-		0x02,                     // Language code length
-		0x65, 0x6E,               // Language code: "en"
+	ndefRecord := make([]byte, 0, 7+len(textBytes))
+	ndefRecord = append(ndefRecord,
+		0xD1,                   // Header: MB=1, ME=1, CF=0, SR=1, IL=0, TNF=1 (Well Known)
+		0x01,                   // Type Length: 1 byte
+		byte(len(textBytes)+3), // Payload Length: language code (2) + encoding (1) + text
+		0x54,                   // Type: "T" for Text
+		0x02,                   // Language code length
+		0x65, 0x6E,             // Language code: "en"
 		// Text follows
-	}
+	)
 	ndefRecord = append(ndefRecord, textBytes...)
 
 	// NDEF message wrapper
-	ndefMessage := []byte{
+	ndefMessage := make([]byte, 0, 2+len(ndefRecord)+1)
+	ndefMessage = append(ndefMessage,
 		0x03,                  // NDEF Message TLV
 		byte(len(ndefRecord)), // Length
-	}
+	)
 	ndefMessage = append(ndefMessage, ndefRecord...)
 	ndefMessage = append(ndefMessage, 0xFE) // Terminator TLV
 
