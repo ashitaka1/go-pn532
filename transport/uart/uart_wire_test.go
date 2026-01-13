@@ -203,8 +203,9 @@ var _ serial.Port = (*JitteryMockSerialPort)(nil)
 func newTestTransport(sim *virt.VirtualPN532) *Transport {
 	mockPort := NewMockSerialPort(sim)
 	return &Transport{
-		port:     mockPort,
-		portName: "mock://test",
+		port:           mockPort,
+		portName:       "mock://test",
+		currentTimeout: getReadTimeout(), // Initialize with default timeout
 	}
 }
 
@@ -212,8 +213,9 @@ func newTestTransport(sim *virt.VirtualPN532) *Transport {
 func newJitteryTestTransport(sim *virt.VirtualPN532, config virt.JitterConfig) *Transport {
 	mockPort := NewJitteryMockSerialPort(sim, config)
 	return &Transport{
-		port:     mockPort,
-		portName: "mock://jittery-test",
+		port:           mockPort,
+		portName:       "mock://jittery-test",
+		currentTimeout: getReadTimeout(), // Initialize with default timeout
 	}
 }
 
@@ -1814,4 +1816,143 @@ func TestUART_ACKRetry_RecoveryAfterFailure(t *testing.T) {
 		require.NoError(t, err, "Command %d should succeed normally", i+1)
 		assert.Len(t, resp, 5)
 	}
+}
+
+// =============================================================================
+// Device Path Detection Tests
+// =============================================================================
+
+// TestUART_IsRealDevicePath tests detection of real device paths vs mock paths
+func TestUART_IsRealDevicePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		portName string
+		expected bool
+	}{
+		// Unix device paths
+		{"Linux ttyUSB", "/dev/ttyUSB0", true},
+		{"Linux ttyACM", "/dev/ttyACM0", true},
+		{"Linux ttyS", "/dev/ttyS0", true},
+		{"macOS cu", "/dev/cu.usbserial", true},
+		{"macOS tty", "/dev/tty.usbserial", true},
+
+		// Windows COM ports
+		{"Windows COM1", "COM1", true},
+		{"Windows COM10", "COM10", true},
+		{"Windows lowercase", "com3", true},
+		{"Windows UNC style", "\\\\.\\COM1", true},
+		{"Windows UNC COM10", "\\\\.\\COM10", true},
+
+		// Mock/test paths (should return false)
+		{"Mock path", "mock://test", false},
+		{"Test path", "test://device", false},
+		{"Empty path", "", false},
+		{"Random string", "not-a-device", false},
+		{"HTTP URL", "http://localhost", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &Transport{portName: tt.portName}
+			result := transport.isRealDevicePath()
+			assert.Equal(t, tt.expected, result, "isRealDevicePath(%q)", tt.portName)
+		})
+	}
+}
+
+// TestUART_CheckDeviceExists_MockPath tests that mock paths skip device check
+func TestUART_CheckDeviceExists_MockPath(t *testing.T) {
+	transport := &Transport{portName: "mock://test"}
+
+	// Should return nil (no error) for mock paths, even though the path doesn't exist
+	err := transport.checkDeviceExists()
+	assert.NoError(t, err, "Mock paths should skip device existence check")
+}
+
+// TestUART_CheckDeviceExists_NonexistentDevice tests detection of missing device
+func TestUART_CheckDeviceExists_NonexistentDevice(t *testing.T) {
+	// Use a path that looks real but doesn't exist
+	transport := &Transport{portName: "/dev/ttyUSB_nonexistent_test_device"}
+
+	err := transport.checkDeviceExists()
+	require.Error(t, err, "Should return error for nonexistent device")
+
+	// Verify it's the right error type
+	var transportErr *pn532.TransportError
+	require.ErrorAs(t, err, &transportErr)
+	assert.Equal(t, pn532.ErrorTypePermanent, transportErr.Type)
+	assert.ErrorIs(t, transportErr.Err, pn532.ErrDeviceNotFound)
+}
+
+// TestUART_GetDeadline tests deadline calculation from timeout
+func TestUART_GetDeadline(t *testing.T) {
+	transport := &Transport{
+		portName:       "mock://test",
+		currentTimeout: 1 * time.Second,
+	}
+
+	before := time.Now()
+	deadline := transport.getDeadline()
+	after := time.Now()
+
+	// Deadline should be ~1.2 seconds from now (1s + 20% buffer)
+	expectedMin := before.Add(1*time.Second + 200*time.Millisecond - 10*time.Millisecond)
+	expectedMax := after.Add(1*time.Second + 200*time.Millisecond + 10*time.Millisecond)
+
+	assert.True(t, deadline.After(expectedMin), "Deadline should be at least 1.2s from start")
+	assert.True(t, deadline.Before(expectedMax), "Deadline should be at most 1.2s from end")
+}
+
+// TestUART_GetDeadline_ZeroTimeout tests fallback when timeout is zero
+func TestUART_GetDeadline_ZeroTimeout(t *testing.T) {
+	transport := &Transport{
+		portName:       "mock://test",
+		currentTimeout: 0, // Zero timeout
+	}
+
+	before := time.Now()
+	deadline := transport.getDeadline()
+
+	// Should use default read timeout (100ms) + 20% = 120ms
+	minExpected := before.Add(100 * time.Millisecond)
+
+	assert.True(t, deadline.After(minExpected), "Should use default timeout when currentTimeout is zero")
+}
+
+// TestUART_SetTimeout_StoresValue tests that SetTimeout stores the timeout value
+func TestUART_SetTimeout_StoresCurrentTimeout(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	transport := newTestTransport(sim)
+
+	// Initial timeout should be the default
+	assert.Equal(t, getReadTimeout(), transport.currentTimeout)
+
+	// Set a new timeout
+	newTimeout := 5 * time.Second
+	err := transport.SetTimeout(newTimeout)
+	require.NoError(t, err)
+
+	// Verify it was stored
+	assert.Equal(t, newTimeout, transport.currentTimeout)
+}
+
+// TestUART_DisconnectDetection_DeadlineExceeded tests that deadline prevents infinite loop
+func TestUART_DisconnectDetection_DeadlineExceeded(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	sim.SetZombieMode(true) // No responses at all
+
+	transport := newTestTransport(sim)
+	// Set a short timeout to make the test fast
+	_ = transport.SetTimeout(100 * time.Millisecond)
+
+	start := time.Now()
+	_, err := transport.SendCommand(0x02, nil) // GetFirmwareVersion
+	elapsed := time.Since(start)
+
+	// Should return an error (timeout), not hang forever
+	require.Error(t, err, "Should return error, not hang")
+
+	// Should complete within reasonable time (timeout + buffer + some slack)
+	maxExpected := 500 * time.Millisecond
+	assert.Less(t, elapsed, maxExpected, "Should complete within %v, took %v", maxExpected, elapsed)
 }

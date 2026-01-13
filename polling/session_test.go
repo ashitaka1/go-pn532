@@ -1215,6 +1215,72 @@ func TestSession_HandlePollingError(t *testing.T) {
 	})
 }
 
+// TestSession_OnDeviceDisconnected tests the OnDeviceDisconnected callback behavior
+func TestSession_OnDeviceDisconnected(t *testing.T) {
+	t.Parallel()
+
+	t.Run("FatalError_TriggersCallback", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		var callbackCalled bool
+		var receivedErr error
+		session.SetOnDeviceDisconnected(func(err error) {
+			callbackCalled = true
+			receivedErr = err
+		})
+
+		// Create a fatal error (device not found)
+		fatalErr := &pn532.TransportError{
+			Op:   "test",
+			Port: "test",
+			Err:  pn532.ErrDeviceNotFound,
+			Type: pn532.ErrorTypePermanent,
+		}
+
+		session.handlePollingError(fatalErr)
+
+		assert.True(t, callbackCalled, "OnDeviceDisconnected callback should be called for fatal errors")
+		assert.Equal(t, fatalErr, receivedErr, "Callback should receive the original error")
+	})
+
+	t.Run("NonFatalError_DoesNotTriggerCallback", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		var callbackCalled bool
+		session.SetOnDeviceDisconnected(func(_ error) {
+			callbackCalled = true
+		})
+
+		// Non-fatal transport error
+		nonFatalErr := errors.New("temporary communication error")
+
+		session.handlePollingError(nonFatalErr)
+
+		assert.False(t, callbackCalled, "OnDeviceDisconnected should NOT be called for non-fatal errors")
+	})
+
+	t.Run("FatalError_NoCallback_NoPanic", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+		// Don't set OnDeviceDisconnected callback
+
+		fatalErr := &pn532.TransportError{
+			Op:   "test",
+			Port: "test",
+			Err:  pn532.ErrDeviceNotFound,
+			Type: pn532.ErrorTypePermanent,
+		}
+
+		// Should not panic when callback is nil
+		session.handlePollingError(fatalErr)
+	})
+}
+
 func TestSession_HandleCardRemoval(t *testing.T) {
 	t.Parallel()
 
