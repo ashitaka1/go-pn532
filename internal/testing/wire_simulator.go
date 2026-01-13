@@ -865,7 +865,8 @@ func (*VirtualPN532) buildTargetData(tg, brTy byte, tag *VirtualTag) []byte {
 			selRes = 0x18
 		}
 
-		data := []byte{tg}
+		data := make([]byte, 0, 1+len(sensRes)+2+len(tag.UID))
+		data = append(data, tg)
 		data = append(data, sensRes...)
 		data = append(data, selRes, byte(len(tag.UID)))
 		data = append(data, tag.UID...)
@@ -876,7 +877,8 @@ func (*VirtualPN532) buildTargetData(tg, brTy byte, tag *VirtualTag) []byte {
 		if len(tag.UID) < 8 {
 			return nil
 		}
-		data := []byte{tg, 18, 0x01}                                        // Tg + POL_RES length + response code
+		data := make([]byte, 0, 3+8+8)
+		data = append(data, tg, 18, 0x01)                                   // Tg + POL_RES length + response code
 		data = append(data, tag.UID[:8]...)                                 // IDm (NFCID2t)
 		data = append(data, 0x00, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00) // PMm (Pad)
 		return data

@@ -37,7 +37,8 @@ func buildCommandFrame(cmd byte, params []byte) []byte {
 	}
 	dcs = byte(0 - int(dcs))
 
-	frame := []byte{pn532Preamble, pn532StartCode1, pn532StartCode2}
+	frame := make([]byte, 0, 5+len(frameData)+2)
+	frame = append(frame, pn532Preamble, pn532StartCode1, pn532StartCode2)
 	frame = append(frame, byte(dataLen), lcs)
 	frame = append(frame, frameData...)
 	frame = append(frame, dcs, pn532Postamble)
@@ -772,7 +773,8 @@ func buildExtendedCommandFrame(cmd byte, params []byte) []byte {
 	}
 	dcs = byte(0 - int(dcs))
 
-	frame := []byte{pn532Preamble, pn532StartCode1, pn532StartCode2}
+	frame := make([]byte, 0, 8+len(frameData)+2)
+	frame = append(frame, pn532Preamble, pn532StartCode1, pn532StartCode2)
 	frame = append(frame, extendedFrameMarker, extendedFrameMarker)
 	frame = append(frame, lenM, lenL, lcs)
 	frame = append(frame, frameData...)

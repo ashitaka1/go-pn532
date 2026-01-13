@@ -259,16 +259,18 @@ func getRetryWithConfigTestCases() []struct {
 	expectedError string
 	expectedCalls int
 } {
-	cases := []struct {
+	successCases := getRetrySuccessCases()
+	errorCases := getRetryErrorCases()
+	cases := make([]struct {
 		name          string
 		config        *RetryConfig
 		setupFunc     func() (RetryableFunc, *callTracker)
 		expectedError string
 		expectedCalls int
-	}{}
+	}, 0, len(successCases)+len(errorCases))
 
-	cases = append(cases, getRetrySuccessCases()...)
-	cases = append(cases, getRetryErrorCases()...)
+	cases = append(cases, successCases...)
+	cases = append(cases, errorCases...)
 
 	return cases
 }

@@ -203,7 +203,8 @@ func (t *NTAGTag) WriteBlock(ctx context.Context, block uint8, data []byte) erro
 		return err
 	}
 
-	cmd := []byte{ntagCmdWrite, block}
+	cmd := make([]byte, 0, 2+len(data))
+	cmd = append(cmd, ntagCmdWrite, block)
 	cmd = append(cmd, data...)
 
 	_, err := t.device.SendDataExchange(ctx, cmd)

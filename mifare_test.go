@@ -227,7 +227,9 @@ func getMIFAREWriteBlockTestCases() []struct {
 	block         uint8
 	expectError   bool
 } {
-	var cases []struct {
+	successCases := getMIFAREWriteBlockSuccessCases()
+	errorCases := getMIFAREWriteBlockErrorCases()
+	cases := make([]struct {
 		setupMock     func(*MockTransport)
 		setupAuth     func(*MIFARETag)
 		name          string
@@ -235,10 +237,10 @@ func getMIFAREWriteBlockTestCases() []struct {
 		data          []byte
 		block         uint8
 		expectError   bool
-	}
+	}, 0, len(successCases)+len(errorCases))
 
-	cases = append(cases, getMIFAREWriteBlockSuccessCases()...)
-	cases = append(cases, getMIFAREWriteBlockErrorCases()...)
+	cases = append(cases, successCases...)
+	cases = append(cases, errorCases...)
 
 	return cases
 }

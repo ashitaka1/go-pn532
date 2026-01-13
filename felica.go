@@ -157,7 +157,8 @@ func (f *FeliCaTag) ReadBlockExtended(ctx context.Context, block uint16) ([]byte
 	// Block Count: 1 byte (number of blocks to read)
 	// Block List: 2 or 3 bytes per block depending on format
 
-	cmd := []byte{feliCaCmdReadWithoutEncryption}
+	cmd := make([]byte, 0, 1+len(f.idm)+7)
+	cmd = append(cmd, feliCaCmdReadWithoutEncryption)
 
 	// Add IDm (8 bytes)
 	cmd = append(cmd, f.idm...)
@@ -233,7 +234,8 @@ func (f *FeliCaTag) WriteBlockExtended(ctx context.Context, block uint16, data [
 	// Block List: 2 or 3 bytes per block depending on format
 	// Block Data: 16 bytes per block
 
-	cmd := []byte{feliCaCmdWriteWithoutEncryption}
+	cmd := make([]byte, 0, 1+len(f.idm)+7+len(data))
+	cmd = append(cmd, feliCaCmdWriteWithoutEncryption)
 
 	// Add IDm (8 bytes)
 	cmd = append(cmd, f.idm...)
@@ -478,10 +480,10 @@ func (f *FeliCaTag) Polling(ctx context.Context, systemCode uint16) error {
 	// Request Code: 1 byte (0x01 for system code and time slot)
 	// Time Slot: 1 byte (0x03 for maximum time slots)
 
-	cmd := []byte{feliCaCmdPolling}
-
-	// Add system code (2 bytes, big endian), request code, and time slot
+	cmd := make([]byte, 0, 5)
+	// Add command, system code (2 bytes, big endian), request code, and time slot
 	cmd = append(cmd,
+		feliCaCmdPolling,
 		byte((systemCode>>8)&0xFF), byte(systemCode&0xFF), // System code (2 bytes, big endian)
 		0x01, // Request code (0x01)
 		0x03, // Time slot (0x03 for maximum slots)
