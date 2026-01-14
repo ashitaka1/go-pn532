@@ -1956,3 +1956,52 @@ func TestUART_DisconnectDetection_DeadlineExceeded(t *testing.T) {
 	maxExpected := 500 * time.Millisecond
 	assert.Less(t, elapsed, maxExpected, "Should complete within %v, took %v", maxExpected, elapsed)
 }
+
+// TestUART_HandleWriteError tests that write errors are wrapped as TransportError
+func TestUART_HandleWriteError(t *testing.T) {
+	transport := &Transport{
+		portName:       "mock://test",
+		currentTimeout: 100 * time.Millisecond,
+	}
+
+	// Simulate a write error
+	testErr := errors.New("simulated write error")
+	err := transport.handleWriteError("testOp", testErr)
+
+	require.Error(t, err)
+
+	// Should be wrapped as TransportError
+	var transportErr *pn532.TransportError
+	require.ErrorAs(t, err, &transportErr)
+
+	// Should be marked as permanent (fatal)
+	assert.Equal(t, pn532.ErrorTypePermanent, transportErr.Type)
+	assert.Equal(t, "testOp", transportErr.Op)
+	assert.Equal(t, "mock://test", transportErr.Port)
+
+	// IsFatal should return true
+	assert.True(t, pn532.IsFatal(err), "Write errors should be classified as fatal")
+}
+
+// TestUART_HandleWriteError_DeviceGone tests that device removal is detected
+func TestUART_HandleWriteError_DeviceGone(t *testing.T) {
+	// Use a real-looking path that doesn't exist
+	transport := &Transport{
+		portName:       "/dev/ttyUSB_nonexistent_device_test",
+		currentTimeout: 100 * time.Millisecond,
+	}
+
+	testErr := errors.New("simulated write error")
+	err := transport.handleWriteError("testOp", testErr)
+
+	require.Error(t, err)
+
+	// Should detect device is gone and return ErrDeviceNotFound
+	var transportErr *pn532.TransportError
+	require.ErrorAs(t, err, &transportErr)
+	require.ErrorIs(t, transportErr.Err, pn532.ErrDeviceNotFound)
+	require.Equal(t, pn532.ErrorTypePermanent, transportErr.Type)
+
+	// IsFatal should return true
+	require.True(t, pn532.IsFatal(err), "Device gone errors should be fatal")
+}

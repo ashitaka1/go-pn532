@@ -420,7 +420,7 @@ func (t *Transport) singleWakeUpAttempt() error {
 	t.traceTX(wakeSequence, "Wakeup")
 	bytesWritten, err := t.port.Write(wakeSequence)
 	if err != nil {
-		return fmt.Errorf("UART wake up write failed: %w", err)
+		return t.handleWriteError("wakeUp", err)
 	} else if bytesWritten != len(wakeSequence) {
 		return pn532.NewTransportWriteError("wakeUp", t.portName)
 	}
@@ -428,12 +428,27 @@ func (t *Transport) singleWakeUpAttempt() error {
 	return t.drainWithRetry("wake up")
 }
 
+// handleWriteError wraps write errors, checking if device is gone
+func (t *Transport) handleWriteError(op string, err error) error {
+	// Check if device is gone first - this gives a clearer error
+	if devErr := t.checkDeviceExists(); devErr != nil {
+		return devErr
+	}
+	// Device exists but write failed - still likely a fatal condition
+	return &pn532.TransportError{
+		Op:   op,
+		Port: t.portName,
+		Err:  err,
+		Type: pn532.ErrorTypePermanent,
+	}
+}
+
 // sendAck sends an ACK frame
 func (t *Transport) sendAck() error {
 	t.traceTX(ackFrame, "ACK")
 	n, err := t.port.Write(ackFrame)
 	if err != nil {
-		return fmt.Errorf("UART ACK write failed: %w", err)
+		return t.handleWriteError("sendAck", err)
 	} else if n != len(ackFrame) {
 		return pn532.NewTransportWriteError("sendAck", t.portName)
 	}
@@ -446,7 +461,7 @@ func (t *Transport) sendNack() error {
 	t.traceTX(nackFrame, "NACK")
 	n, err := t.port.Write(nackFrame)
 	if err != nil {
-		return fmt.Errorf("UART NACK write failed: %w", err)
+		return t.handleWriteError("sendNack", err)
 	} else if n != len(nackFrame) {
 		return pn532.NewTransportWriteError("sendNack", t.portName)
 	}
@@ -569,7 +584,7 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 		t.traceTX(finalFrame, fmt.Sprintf("Cmd 0x%02X (attempt %d)", cmd, attempt+1))
 		n, err := t.port.Write(finalFrame)
 		if err != nil {
-			return nil, fmt.Errorf("UART send frame write failed: %w", err)
+			return nil, t.handleWriteError("sendFrame", err)
 		} else if n != len(finalFrame) {
 			return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
 		}
