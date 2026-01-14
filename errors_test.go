@@ -17,7 +17,9 @@ package pn532
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -233,6 +235,69 @@ func TestIsFatal_TransportError(t *testing.T) {
 			got := IsFatal(tt.transport)
 			if got != tt.want {
 				t.Errorf("IsFatal() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsFatal_SyscallErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err  error
+		name string
+		want bool
+	}{
+		// Unix errors that indicate device disconnection
+		{
+			name: "EIO (input/output error) is fatal",
+			err:  syscall.EIO,
+			want: true,
+		},
+		{
+			name: "ENXIO (no such device or address) is fatal",
+			err:  syscall.ENXIO,
+			want: true,
+		},
+		{
+			name: "ENODEV (no such device) is fatal",
+			err:  syscall.ENODEV,
+			want: true,
+		},
+		// Wrapped syscall errors should also be detected
+		{
+			name: "wrapped EIO is fatal",
+			err:  fmt.Errorf("write failed: %w", syscall.EIO),
+			want: true,
+		},
+		{
+			name: "double-wrapped ENXIO is fatal",
+			err:  fmt.Errorf("operation failed: %w", fmt.Errorf("write: %w", syscall.ENXIO)),
+			want: true,
+		},
+		// Non-fatal syscall errors
+		{
+			name: "EAGAIN is not fatal",
+			err:  syscall.EAGAIN,
+			want: false,
+		},
+		{
+			name: "EINTR is not fatal",
+			err:  syscall.EINTR,
+			want: false,
+		},
+		{
+			name: "ETIMEDOUT is not fatal",
+			err:  syscall.ETIMEDOUT,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsFatal(tt.err)
+			if got != tt.want {
+				t.Errorf("IsFatal(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

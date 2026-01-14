@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -222,6 +224,11 @@ func IsFatal(err error) bool {
 		return te.Type == ErrorTypePermanent
 	}
 
+	// Check for OS-level errors that indicate device is gone
+	if isDeviceGoneError(err) {
+		return true
+	}
+
 	// Check for known fatal error conditions
 	switch {
 	case errors.Is(err, ErrTransportClosed),
@@ -233,6 +240,43 @@ func IsFatal(err error) bool {
 	default:
 		return false
 	}
+}
+
+// Windows error codes for device disconnection detection.
+// These are defined here because they're not available on non-Windows platforms.
+const (
+	errAccessDenied syscall.Errno = 5   // ERROR_ACCESS_DENIED
+	errGenFailure   syscall.Errno = 31  // ERROR_GEN_FAILURE
+	errNoSuchDevice syscall.Errno = 433 // ERROR_NO_SUCH_DEVICE
+)
+
+// isDeviceGoneError checks for OS-level errors indicating device disconnection.
+// These errors occur when a USB device is unplugged during I/O operations.
+func isDeviceGoneError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		// Check for Unix device-gone errors (Linux, macOS, BSD)
+		//nolint:exhaustive // Only checking specific device-gone errors, not all errno values
+		switch errno {
+		case syscall.EIO, syscall.ENXIO, syscall.ENODEV:
+			return true
+		}
+
+		// Check for Windows device-gone errors
+		if runtime.GOOS == "windows" {
+			//nolint:exhaustive // Only checking specific device-gone errors, not all errno values
+			switch errno {
+			case errAccessDenied, errGenFailure, errNoSuchDevice:
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // IsCommandNotSupported checks if an error indicates a command is not supported

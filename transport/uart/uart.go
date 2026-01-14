@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -56,6 +57,7 @@ type Transport struct {
 	portName              string
 	mu                    syncutil.Mutex
 	closeMu               syncutil.Mutex // Protects port close operations
+	currentTimeout        time.Duration  // Current timeout for deadline calculations
 	lastCommand           byte
 	connectionEstablished bool
 }
@@ -121,8 +123,9 @@ func New(portName string) (*Transport, error) {
 	}
 
 	return &Transport{
-		port:     port,
-		portName: portName,
+		port:           port,
+		portName:       portName,
+		currentTimeout: timeout, // Initialize with default read timeout
 	}, nil
 }
 
@@ -215,6 +218,7 @@ func (t *Transport) setTimeoutUnlocked(timeout time.Duration) error {
 	if t.port == nil {
 		return nil // Allow operation when port is closed
 	}
+	t.currentTimeout = timeout // Store for deadline calculations
 	err := t.port.SetReadTimeout(timeout)
 	if err != nil {
 		return fmt.Errorf("UART set timeout failed: %w", err)
@@ -227,6 +231,50 @@ func (t *Transport) SetTimeout(timeout time.Duration) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.setTimeoutUnlocked(timeout)
+}
+
+// checkDeviceExists verifies the device file still exists (detects USB unplug).
+// Only performs the check for paths that look like real device files.
+func (t *Transport) checkDeviceExists() error {
+	// Only check paths that look like real device files
+	if !t.isRealDevicePath() {
+		return nil
+	}
+
+	if _, err := os.Stat(t.portName); os.IsNotExist(err) {
+		return &pn532.TransportError{
+			Op:   "checkDevice",
+			Port: t.portName,
+			Err:  pn532.ErrDeviceNotFound,
+			Type: pn532.ErrorTypePermanent,
+		}
+	}
+	return nil
+}
+
+// isRealDevicePath returns true if portName looks like a real device file path
+func (t *Transport) isRealDevicePath() bool {
+	// Unix device paths
+	if strings.HasPrefix(t.portName, "/dev/") {
+		return true
+	}
+	// Windows COM ports (COM1, \\.\COM1, etc.)
+	upper := strings.ToUpper(t.portName)
+	if strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "\\\\.\\COM") {
+		return true
+	}
+	return false
+}
+
+// getDeadline returns the deadline for the current operation based on currentTimeout
+// Adds 20% buffer to account for OS/driver overhead
+func (t *Transport) getDeadline() time.Time {
+	timeout := t.currentTimeout
+	if timeout <= 0 {
+		timeout = getReadTimeout() // Fallback to default
+	}
+	// Add 20% buffer for OS/driver overhead
+	return time.Now().Add(timeout + timeout/5)
 }
 
 // Close closes the transport connection
@@ -372,7 +420,7 @@ func (t *Transport) singleWakeUpAttempt() error {
 	t.traceTX(wakeSequence, "Wakeup")
 	bytesWritten, err := t.port.Write(wakeSequence)
 	if err != nil {
-		return fmt.Errorf("UART wake up write failed: %w", err)
+		return t.handleWriteError("wakeUp", err)
 	} else if bytesWritten != len(wakeSequence) {
 		return pn532.NewTransportWriteError("wakeUp", t.portName)
 	}
@@ -380,12 +428,27 @@ func (t *Transport) singleWakeUpAttempt() error {
 	return t.drainWithRetry("wake up")
 }
 
+// handleWriteError wraps write errors, checking if device is gone
+func (t *Transport) handleWriteError(op string, err error) error {
+	// Check if device is gone first - this gives a clearer error
+	if devErr := t.checkDeviceExists(); devErr != nil {
+		return devErr
+	}
+	// Device exists but write failed - still likely a fatal condition
+	return &pn532.TransportError{
+		Op:   op,
+		Port: t.portName,
+		Err:  err,
+		Type: pn532.ErrorTypePermanent,
+	}
+}
+
 // sendAck sends an ACK frame
 func (t *Transport) sendAck() error {
 	t.traceTX(ackFrame, "ACK")
 	n, err := t.port.Write(ackFrame)
 	if err != nil {
-		return fmt.Errorf("UART ACK write failed: %w", err)
+		return t.handleWriteError("sendAck", err)
 	} else if n != len(ackFrame) {
 		return pn532.NewTransportWriteError("sendAck", t.portName)
 	}
@@ -398,7 +461,7 @@ func (t *Transport) sendNack() error {
 	t.traceTX(nackFrame, "NACK")
 	n, err := t.port.Write(nackFrame)
 	if err != nil {
-		return fmt.Errorf("UART NACK write failed: %w", err)
+		return t.handleWriteError("sendNack", err)
 	} else if n != len(nackFrame) {
 		return pn532.NewTransportWriteError("sendNack", t.portName)
 	}
@@ -521,7 +584,7 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 		t.traceTX(finalFrame, fmt.Sprintf("Cmd 0x%02X (attempt %d)", cmd, attempt+1))
 		n, err := t.port.Write(finalFrame)
 		if err != nil {
-			return nil, fmt.Errorf("UART send frame write failed: %w", err)
+			return nil, t.handleWriteError("sendFrame", err)
 		} else if n != len(finalFrame) {
 			return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
 		}
@@ -690,7 +753,8 @@ func (t *Transport) processFrameData(buf []byte, totalLen int) (data []byte, ret
 const minFrameHeaderBytes = 5
 
 // readInitialData reads the initial frame data from the port.
-// It accumulates data until we have at least minFrameHeaderBytes or timeout.
+// It accumulates data until we have at least minFrameHeaderBytes or deadline exceeded.
+// Uses deadline-based timeout derived from currentTimeout to properly detect USB disconnection.
 //
 //nolint:gocognit,revive // Accumulation loop with timeout requires multiple conditions
 func (t *Transport) readInitialData(buf []byte) (int, error) {
@@ -703,35 +767,40 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 	time.Sleep(initialDelay)
 
 	totalRead := 0
-	timeout := time.After(500 * time.Millisecond)
+	deadline := t.getDeadline()
 
 	// Accumulate data until we have enough for frame header validation
 	for totalRead < minFrameHeaderBytes {
-		select {
-		case <-timeout:
+		// Check hard deadline to prevent infinite loop on USB disconnect
+		if time.Now().After(deadline) {
+			// Deadline exceeded - check if device still exists
+			if err := t.checkDeviceExists(); err != nil {
+				return 0, err
+			}
+			// Device exists but no response
 			if totalRead == 0 {
 				// No data at all - try one more time with longer delay
-				return t.retryInitialRead(buf)
+				return t.retryInitialRead(buf, deadline)
 			}
 			// Got some data but not enough - return what we have
 			// This will likely cause a retry at a higher level
 			return totalRead, nil
-		default:
-			bytesRead, err := t.port.Read(buf[totalRead:])
-			if err != nil {
-				return 0, fmt.Errorf("UART initial data read failed: %w", err)
-			}
-			totalRead += bytesRead
+		}
 
-			// If we have enough bytes, we can stop
-			if totalRead >= minFrameHeaderBytes {
-				break
-			}
+		bytesRead, err := t.port.Read(buf[totalRead:])
+		if err != nil {
+			return 0, fmt.Errorf("UART initial data read failed: %w", err)
+		}
+		totalRead += bytesRead
 
-			// Small delay between reads to avoid tight loop
-			if bytesRead == 0 {
-				time.Sleep(time.Millisecond)
-			}
+		// If we have enough bytes, we can stop
+		if totalRead >= minFrameHeaderBytes {
+			break
+		}
+
+		// Small delay between reads to avoid tight loop
+		if bytesRead == 0 {
+			time.Sleep(time.Millisecond)
 		}
 	}
 
@@ -739,7 +808,16 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 }
 
 // retryInitialRead performs a retry read with platform-specific timing
-func (t *Transport) retryInitialRead(buf []byte) (int, error) {
+func (t *Transport) retryInitialRead(buf []byte, deadline time.Time) (int, error) {
+	// Check if we still have time for a retry
+	if time.Now().After(deadline) {
+		if err := t.checkDeviceExists(); err != nil {
+			return 0, err
+		}
+		// Device exists but timed out - return 0 to allow higher-level retry
+		return 0, nil
+	}
+
 	// Some PN532 modules need more time for certain commands
 	retryDelay := 80 * time.Millisecond
 	if isWindows() {
@@ -750,6 +828,13 @@ func (t *Transport) retryInitialRead(buf []byte) (int, error) {
 	bytesRead, err := t.port.Read(buf)
 	if err != nil {
 		return 0, fmt.Errorf("UART initial data retry read failed: %w", err)
+	}
+
+	// If still no data after retry, check device existence
+	if bytesRead == 0 {
+		if err := t.checkDeviceExists(); err != nil {
+			return 0, err
+		}
 	}
 
 	return bytesRead, nil
@@ -803,40 +888,37 @@ func (t *Transport) ensureCompleteFrame(buf []byte, off, frameLen, totalLen int)
 	return t.readRemainingData(buf, totalLen, expectedLen)
 }
 
-// readRemainingData reads the remaining frame data with timeout
+// readRemainingData reads the remaining frame data with deadline-based timeout.
+// Uses the transport's currentTimeout to calculate a proper deadline that can
+// detect USB disconnection (which manifests as endless 0-byte reads on Linux).
 func (t *Transport) readRemainingData(buf []byte, totalLen, expectedLen int) (int, error) {
-	// Use shorter timeout to prevent 30-second accumulation with retries
-	// Windows needs longer timeout for reliable data exchange responses
-	timeoutDuration := 1000 * time.Millisecond
-	if isWindows() {
-		timeoutDuration = 1500 * time.Millisecond
-	}
-	// Special-case: InListPassiveTarget tends to run longer; allow more time on non-Windows
-	if !isWindows() && t.lastCommand == 0x4A {
-		timeoutDuration = 1500 * time.Millisecond
-	}
-	timeout := time.After(timeoutDuration)
+	deadline := t.getDeadline()
 
 	for totalLen < expectedLen {
-		select {
-		case <-timeout:
+		// Check hard deadline to prevent infinite loop on USB disconnect
+		if time.Now().After(deadline) {
+			// Deadline exceeded - check if device still exists
+			if err := t.checkDeviceExists(); err != nil {
+				return 0, err
+			}
+			// Device exists but timed out
 			return 0, &pn532.TransportError{
-				Op: "receiveFrame", Port: t.portName,
-				Err:       pn532.ErrTransportTimeout,
-				Type:      pn532.ErrorTypeTransient,
-				Retryable: true,
+				Op:   "receiveFrame",
+				Port: t.portName,
+				Err:  pn532.ErrTransportTimeout,
+				Type: pn532.ErrorTypeTransient,
 			}
-		default:
-			n2, err := t.port.Read(buf[totalLen:expectedLen])
-			if err != nil {
-				return 0, fmt.Errorf("UART remaining data read failed: %w", err)
-			}
-			if n2 > 0 {
-				totalLen += n2
-			} else {
-				// No data available, wait a bit
-				time.Sleep(10 * time.Millisecond)
-			}
+		}
+
+		n2, err := t.port.Read(buf[totalLen:expectedLen])
+		if err != nil {
+			return 0, fmt.Errorf("UART remaining data read failed: %w", err)
+		}
+		if n2 > 0 {
+			totalLen += n2
+		} else {
+			// No data available, wait a bit
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 

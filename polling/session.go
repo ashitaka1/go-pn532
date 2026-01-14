@@ -28,22 +28,23 @@ import (
 
 // Session handles continuous card monitoring with state machine
 type Session struct {
-	lastPollTime    time.Time
-	recoverer       DeviceRecoverer
-	device          *pn532.Device
-	OnSleepDetected func()
-	pauseChan       chan struct{}
-	resumeChan      chan struct{}
-	ackChan         chan struct{}
-	config          *Config
-	OnCardChanged   func(tag *pn532.DetectedTag) error
-	OnCardDetected  func(tag *pn532.DetectedTag) error
-	OnCardRemoved   func()
-	state           CardState
-	stateMutex      syncutil.RWMutex
-	writeMutex      syncutil.Mutex
-	closed          atomic.Bool
-	isPaused        atomic.Bool
+	lastPollTime         time.Time
+	recoverer            DeviceRecoverer
+	device               *pn532.Device
+	OnSleepDetected      func()
+	OnDeviceDisconnected func(err error)
+	pauseChan            chan struct{}
+	resumeChan           chan struct{}
+	ackChan              chan struct{}
+	config               *Config
+	OnCardChanged        func(tag *pn532.DetectedTag) error
+	OnCardDetected       func(tag *pn532.DetectedTag) error
+	OnCardRemoved        func()
+	state                CardState
+	stateMutex           syncutil.RWMutex
+	writeMutex           syncutil.Mutex
+	closed               atomic.Bool
+	isPaused             atomic.Bool
 }
 
 // NewSession creates a new card monitoring session.
@@ -123,6 +124,15 @@ func (s *Session) SetOnSleepDetected(callback func()) {
 	s.stateMutex.Lock()
 	defer s.stateMutex.Unlock()
 	s.OnSleepDetected = callback
+}
+
+// SetOnDeviceDisconnected sets the callback for when the device is disconnected.
+// This is called when a fatal error indicates the device is no longer available
+// (e.g., USB unplugged). The error parameter contains the underlying cause.
+func (s *Session) SetOnDeviceDisconnected(callback func(err error)) {
+	s.stateMutex.Lock()
+	defer s.stateMutex.Unlock()
+	s.OnDeviceDisconnected = callback
 }
 
 // SetRecoverer configures a custom device recoverer for sleep/wake handling.
@@ -566,6 +576,17 @@ func (s *Session) handlePollingError(err error) {
 	// For serious device errors, trigger immediate card removal
 	// This handles cases like device disconnection
 	s.handleCardRemoval()
+
+	// If this is a fatal error (device disconnected), notify via callback
+	if pn532.IsFatal(err) {
+		s.stateMutex.RLock()
+		onDisconnected := s.OnDeviceDisconnected
+		s.stateMutex.RUnlock()
+
+		if onDisconnected != nil {
+			onDisconnected(err)
+		}
+	}
 }
 
 // handleCardRemoval handles card removal state changes
