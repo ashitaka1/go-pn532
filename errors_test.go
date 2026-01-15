@@ -39,6 +39,7 @@ func TestIsRetryable(t *testing.T) {
 	}
 }
 
+//nolint:funlen // Test data table - length is acceptable for test cases
 func getIsRetryableTestCases() []struct {
 	err  error
 	name string
@@ -113,6 +114,27 @@ func getIsRetryableTestCases() []struct {
 			name: "wrapped retryable error",
 			err:  errors.New("outer: " + ErrTransportTimeout.Error()),
 			want: false,
+		},
+		// New retryable error types added for sliding card use case
+		{
+			name: "tag read failed is retryable",
+			err:  ErrTagReadFailed,
+			want: true,
+		},
+		{
+			name: "tag data corrupt is retryable",
+			err:  ErrTagDataCorrupt,
+			want: true,
+		},
+		{
+			name: "wrapped tag read failed is retryable",
+			err:  fmt.Errorf("block 4: %w", ErrTagReadFailed),
+			want: true,
+		},
+		{
+			name: "wrapped tag data corrupt is retryable",
+			err:  fmt.Errorf("invalid CC: %w", ErrTagDataCorrupt),
+			want: true,
 		},
 	}
 }
@@ -649,6 +671,7 @@ func TestNewPN532ErrorWithDetails(t *testing.T) {
 	}
 }
 
+//nolint:funlen // Test data table - length is acceptable for comprehensive error type coverage
 func TestPN532Error_ErrorTypeChecks(t *testing.T) {
 	t.Parallel()
 
@@ -658,6 +681,7 @@ func TestPN532Error_ErrorTypeChecks(t *testing.T) {
 		wantIsCommandNotSupported bool
 		wantIsAuthenticationError bool
 		wantIsTimeoutError        bool
+		wantIsRFError             bool
 	}{
 		{
 			name:                      "command not supported",
@@ -665,6 +689,7 @@ func TestPN532Error_ErrorTypeChecks(t *testing.T) {
 			wantIsCommandNotSupported: true,
 			wantIsAuthenticationError: false,
 			wantIsTimeoutError:        false,
+			wantIsRFError:             false,
 		},
 		{
 			name:                      "authentication error",
@@ -672,6 +697,7 @@ func TestPN532Error_ErrorTypeChecks(t *testing.T) {
 			wantIsCommandNotSupported: false,
 			wantIsAuthenticationError: true,
 			wantIsTimeoutError:        false,
+			wantIsRFError:             false,
 		},
 		{
 			name:                      "timeout error",
@@ -679,6 +705,7 @@ func TestPN532Error_ErrorTypeChecks(t *testing.T) {
 			wantIsCommandNotSupported: false,
 			wantIsAuthenticationError: false,
 			wantIsTimeoutError:        true,
+			wantIsRFError:             false,
 		},
 		{
 			name:                      "other error",
@@ -686,6 +713,64 @@ func TestPN532Error_ErrorTypeChecks(t *testing.T) {
 			wantIsCommandNotSupported: false,
 			wantIsAuthenticationError: false,
 			wantIsTimeoutError:        false,
+			wantIsRFError:             false,
+		},
+		// RF error codes
+		{
+			name:                      "CRC error",
+			errorCode:                 0x02,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+			wantIsRFError:             true,
+		},
+		{
+			name:                      "parity error",
+			errorCode:                 0x03,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+			wantIsRFError:             true,
+		},
+		{
+			name:                      "framing error",
+			errorCode:                 0x05,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+			wantIsRFError:             true,
+		},
+		{
+			name:                      "RF field not activated",
+			errorCode:                 0x0A,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+			wantIsRFError:             true,
+		},
+		{
+			name:                      "RF protocol error",
+			errorCode:                 0x0B,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+			wantIsRFError:             true,
+		},
+		{
+			name:                      "target released by initiator",
+			errorCode:                 0x29,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+			wantIsRFError:             true,
+		},
+		{
+			name:                      "card disappeared",
+			errorCode:                 0x2B,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+			wantIsRFError:             true,
 		},
 	}
 
@@ -703,6 +788,9 @@ func TestPN532Error_ErrorTypeChecks(t *testing.T) {
 			if got := err.IsTimeoutError(); got != tt.wantIsTimeoutError {
 				t.Errorf("IsTimeoutError() = %v, want %v", got, tt.wantIsTimeoutError)
 			}
+			if got := err.IsRFError(); got != tt.wantIsRFError {
+				t.Errorf("IsRFError() = %v, want %v", got, tt.wantIsRFError)
+			}
 		})
 	}
 }
@@ -718,6 +806,18 @@ func TestIsRetryable_PN532Error(t *testing.T) {
 		{name: "authentication error is retryable", errorCode: 0x14, want: true},
 		{name: "command not supported is not retryable", errorCode: 0x81, want: false},
 		{name: "unknown error is not retryable", errorCode: 0xFF, want: false},
+		// RF errors are retryable (common during card sliding)
+		{name: "CRC error is retryable", errorCode: 0x02, want: true},
+		{name: "parity error is retryable", errorCode: 0x03, want: true},
+		{name: "framing error is retryable", errorCode: 0x05, want: true},
+		{name: "RF field not activated is retryable", errorCode: 0x0A, want: true},
+		{name: "RF protocol error is retryable", errorCode: 0x0B, want: true},
+		{name: "target released is retryable", errorCode: 0x29, want: true},
+		{name: "card disappeared is retryable", errorCode: 0x2B, want: true},
+		// Non-RF errors remain not retryable
+		{name: "erroneous bit count is not retryable", errorCode: 0x04, want: false},
+		{name: "buffer overflow is not retryable", errorCode: 0x09, want: false},
+		{name: "invalid parameter is not retryable", errorCode: 0x10, want: false},
 	}
 
 	for _, tt := range tests {

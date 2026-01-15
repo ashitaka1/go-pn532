@@ -19,15 +19,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ZaparooProject/go-pn532"
 )
 
-// Retry constants for tag initialization
+// Retry constants for tag initialization.
+// These values are tuned for the "sliding card into slot" use case where
+// RF communication may be unstable during the slide (~1 second duration).
 const (
-	initMaxRetries = 3
-	initRetryDelay = 10 * time.Millisecond
+	// stabilizationDelay is the time to wait after initial detection before
+	// attempting initialization. This allows the card to settle in position.
+	stabilizationDelay = 75 * time.Millisecond
+
+	// initMaxRetries is the number of initialization attempts per detection cycle.
+	initMaxRetries = 2
+
+	// initRetryDelay is the time to wait between initialization retries.
+	initRetryDelay = 50 * time.Millisecond
+
+	// maxRedetectAttempts is the number of times to re-poll for the tag if
+	// initialization keeps failing. This handles cases where the initial
+	// detection caught the card mid-slide with corrupt data.
+	maxRedetectAttempts = 3
 )
 
 var (
@@ -77,15 +92,78 @@ func (t *TagOperations) DetectTag(ctx context.Context) error {
 // InitFromDetectedTag initializes operations from an already-detected tag.
 // Use this when the tag was detected via polling and you want to avoid
 // re-detection which can put the tag in a different state.
+//
+// This function implements a robust initialization strategy for the "sliding
+// card into slot" use case:
+//  1. Stabilization delay - wait for card to settle after detection
+//  2. Multiple init retries - handle transient RF communication failures
+//  3. Re-detection loop - if init keeps failing, re-poll for the tag
+//     (the initial detection may have caught the card mid-slide)
 func (t *TagOperations) InitFromDetectedTag(ctx context.Context, tag *pn532.DetectedTag) error {
 	if tag == nil {
 		return ErrNoTag
 	}
 
 	t.tag = tag
+	originalUID := tag.UID
 
-	// Determine tag type and initialize appropriate handler
-	return t.detectAndInitializeTag(ctx)
+	// Stabilization delay - let the card settle in position before reading
+	if err := t.waitForStabilization(ctx); err != nil {
+		return err
+	}
+
+	// Try initialization with re-detection fallback
+	for redetect := range maxRedetectAttempts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		// Attempt to initialize the tag
+		if err := t.detectAndInitializeTag(ctx); err == nil {
+			return nil
+		}
+
+		// If this isn't the last redetect attempt, try re-polling for the tag
+		if redetect < maxRedetectAttempts-1 {
+			t.attemptRedetection(ctx, originalUID, redetect)
+		}
+	}
+
+	return ErrUnsupportedTag
+}
+
+// waitForStabilization waits for the stabilization delay to let the card settle.
+func (*TagOperations) waitForStabilization(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(stabilizationDelay):
+		return nil
+	}
+}
+
+// attemptRedetection tries to re-detect the same tag after init failure.
+func (t *TagOperations) attemptRedetection(ctx context.Context, originalUID string, attempt int) {
+	pn532.Debugf("Tag init failed, attempting re-detection (attempt %d/%d)", attempt+1, maxRedetectAttempts)
+
+	newTag, err := t.device.DetectTag(ctx)
+	if err != nil {
+		pn532.Debugf("Re-detection failed: %v", err)
+		return
+	}
+	if newTag == nil {
+		pn532.Debugln("Re-detection returned no tag")
+		return
+	}
+
+	// Verify it's the same tag (same UID)
+	if newTag.UID != originalUID {
+		pn532.Debugf("Re-detected different tag (got %s, expected %s)", newTag.UID, originalUID)
+		return
+	}
+
+	t.tag = newTag
+	pn532.Debugf("Re-detection successful, retrying initialization")
 }
 
 // GetTagType returns the detected tag type
@@ -116,19 +194,17 @@ func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 	// Each case tries the expected type, then the alternative - no redundant attempts.
 	switch t.tag.Type {
 	case pn532.TagTypeMIFARE:
+		// Tag was identified as MIFARE based on SAK pattern.
+		// NTAG uses SAK=0x00, so no fallback needed.
 		if t.tryInitMIFARE(ctx) {
-			return nil
-		}
-		if t.tryInitNTAG(ctx) {
 			return nil
 		}
 		return ErrUnsupportedTag
 
 	case pn532.TagTypeNTAG:
+		// Tag was identified as NTAG based on SAK pattern (SAK=0x00).
+		// MIFARE Classic uses different SAK values, so no fallback needed.
 		if t.tryInitNTAG(ctx) {
-			return nil
-		}
-		if t.tryInitMIFARE(ctx) {
 			return nil
 		}
 		return ErrUnsupportedTag
@@ -150,34 +226,73 @@ func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 
 // tryInitNTAG attempts to initialize as an NTAG tag. Returns true on success.
 // Uses retry logic to handle transient RF communication failures.
+//
+// This retries on ANY error from DetectType(), not just IsRetryable() errors.
+// During card sliding, we may get garbage data that causes validation failures
+// (e.g., "invalid capability container") which are worth retrying as the card
+// may have settled by the next attempt.
 func (t *TagOperations) tryInitNTAG(ctx context.Context) bool {
 	ntag := pn532.NewNTAGTag(t.device, t.tag.UIDBytes, t.tag.SAK)
 
+	var lastErr error
 	for i := range initMaxRetries {
 		if err := ctx.Err(); err != nil {
 			return false
 		}
 
-		if err := ntag.DetectType(ctx); err == nil {
+		err := ntag.DetectType(ctx)
+		if err == nil {
 			t.tagType = pn532.TagTypeNTAG
 			t.ntagInstance = ntag
 			t.totalPages = int(ntag.GetTotalPages())
 			return true
-		} else if i < initMaxRetries-1 && pn532.IsRetryable(err) {
-			pn532.Debugf("NTAG init attempt %d failed (retrying): %v", i+1, err)
-			time.Sleep(initRetryDelay)
-			continue
 		}
-		break
+
+		lastErr = err
+
+		// Check if this is a definitive "not an NTAG" error (real 4-byte UID = MIFARE)
+		// vs a transient error worth retrying
+		if isDefinitivelyNotNTAG(err) {
+			pn532.Debugf("NTAG init: definitively not an NTAG tag: %v", err)
+			break
+		}
+
+		if i < initMaxRetries-1 {
+			pn532.Debugf("NTAG init attempt %d/%d failed (retrying): %v", i+1, initMaxRetries, err)
+			time.Sleep(initRetryDelay)
+		}
+	}
+
+	if lastErr != nil {
+		pn532.Debugf("NTAG init failed after %d attempts: %v", initMaxRetries, lastErr)
 	}
 	return false
 }
 
+// isDefinitivelyNotNTAG returns true if the error indicates this is definitely
+// not an NTAG tag (e.g., a MIFARE Classic with a real 4-byte UID), as opposed
+// to a transient error that might succeed on retry.
+func isDefinitivelyNotNTAG(err error) bool {
+	if err == nil {
+		return false
+	}
+	// A real 4-byte UID (not the zero fallback) means MIFARE Classic
+	// This is detected by the error message not containing "parse failed"
+	// which indicates the zero-UID fallback from corrupt detection data
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "UID must be 7 bytes") &&
+		!strings.Contains(errMsg, "parse failed")
+}
+
 // tryInitMIFARE attempts to initialize as a MIFARE tag. Returns true on success.
 // Uses retry logic to handle transient RF communication failures.
+//
+// Like tryInitNTAG, this retries on any error to handle transient RF issues
+// during card sliding.
 func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
 	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
 
+	var lastErr error
 	for i := range initMaxRetries {
 		if err := ctx.Err(); err != nil {
 			return false
@@ -190,12 +305,18 @@ func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
 			t.tagType = pn532.TagTypeMIFARE
 			t.mifareInstance = mifare
 			return true
-		} else if i < initMaxRetries-1 && pn532.IsRetryable(err) {
-			pn532.Debugf("MIFARE init attempt %d failed (retrying): %v", i+1, err)
-			time.Sleep(initRetryDelay)
-			continue
 		}
-		break
+
+		lastErr = err
+
+		if i < initMaxRetries-1 {
+			pn532.Debugf("MIFARE init attempt %d/%d failed (retrying): %v", i+1, initMaxRetries, err)
+			time.Sleep(initRetryDelay)
+		}
+	}
+
+	if lastErr != nil {
+		pn532.Debugf("MIFARE init failed after %d attempts: %v", initMaxRetries, lastErr)
 	}
 	return false
 }

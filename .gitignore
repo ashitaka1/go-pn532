@@ -42,6 +42,7 @@ cmd/*/*
 .env.local
 
 tmp/
+*.log
 
 .claude/
 .serena/

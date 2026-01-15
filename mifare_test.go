@@ -158,7 +158,7 @@ func getMIFAREReadBlockTestCases() []struct {
 			},
 			block:         4,
 			expectError:   true,
-			errorContains: "invalid read response length",
+			errorContains: "invalid response length",
 		},
 	}
 }
@@ -553,7 +553,7 @@ func TestMIFARETag_ReadBlockDirect(t *testing.T) {
 			},
 			block:         4,
 			expectError:   true,
-			errorContains: "invalid read response length",
+			errorContains: "invalid response length",
 		},
 	}
 

@@ -136,7 +136,7 @@ func TestNTAGTag_ReadBlock(t *testing.T) {
 			},
 			block:         4,
 			expectError:   true,
-			errorContains: "invalid read response length",
+			errorContains: "invalid response length",
 		},
 	}
 
@@ -1768,4 +1768,87 @@ func TestNTAGTag_ReadNDEF_GenuineNXP(t *testing.T) {
 	require.NotNil(t, msg)
 	require.Len(t, msg.Records, 1)
 	assert.Equal(t, NDEFTypeText, msg.Records[0].Type)
+}
+
+// --- Zero UID Detection Tests ---
+// These tests verify the new behavior that distinguishes between:
+// - Zero 4-byte UID (from corrupt AutoPoll data) - retryable
+// - Real 4-byte UID (MIFARE Classic) - not retryable
+
+func TestNTAGDetectType_ZeroUIDIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	device, _ := createMockDeviceWithTransport(t)
+
+	// Zero UID - this happens when AutoPoll gets corrupt data during card slide
+	zeroUID := []byte{0x00, 0x00, 0x00, 0x00}
+	tag := NewNTAGTag(device, zeroUID, 0x00)
+
+	err := tag.DetectType(context.Background())
+
+	// Should wrap with ErrTagDataCorrupt which is retryable
+	require.ErrorIs(t, err, ErrTagDataCorrupt,
+		"Zero UID error should be ErrTagDataCorrupt (retryable)")
+	assert.Contains(t, err.Error(), "parse failed",
+		"Error should indicate parse failure")
+}
+
+func TestNTAGDetectType_Real4ByteUIDIsNotRetryable(t *testing.T) {
+	t.Parallel()
+
+	device, _ := createMockDeviceWithTransport(t)
+
+	// Real 4-byte UID - this is a MIFARE Classic tag
+	realUID := []byte{0x01, 0x02, 0x03, 0x04}
+	tag := NewNTAGTag(device, realUID, 0x00)
+
+	err := tag.DetectType(context.Background())
+
+	// Should NOT wrap with ErrTagDataCorrupt - this is a definitive "not NTAG"
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrTagDataCorrupt,
+		"Real 4-byte UID error should NOT be ErrTagDataCorrupt")
+	assert.Contains(t, err.Error(), "UID must be 7 bytes",
+		"Error should indicate wrong UID length")
+}
+
+func TestNTAGDetectType_InvalidCCIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	// Valid 7-byte UID
+	validUID := []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	tag := NewNTAGTag(device, validUID, 0x00)
+
+	// Mock a response with invalid CC (garbage data from RF glitch)
+	garbageCC := []byte{0xFF, 0xFF, 0xFF, 0xFF} // No 0xE1 magic byte
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, garbageCC...))
+
+	err := tag.DetectType(context.Background())
+
+	// Should wrap with ErrTagDataCorrupt which is retryable
+	require.ErrorIs(t, err, ErrTagDataCorrupt,
+		"Invalid CC error should be ErrTagDataCorrupt (retryable)")
+	assert.Contains(t, err.Error(), "invalid capability container",
+		"Error should mention capability container")
+}
+
+func TestNTAGReadBlock_ShortResponseIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	tag := NewNTAGTag(device, []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, 0x00)
+
+	// Mock short response (only 2 bytes instead of 4+)
+	mockTransport.SetResponse(0x40, []byte{0x41, 0x00, 0x01, 0x02})
+
+	_, err := tag.ReadBlock(context.Background(), 4)
+
+	// Should wrap with ErrTagReadFailed which is retryable
+	require.ErrorIs(t, err, ErrTagReadFailed,
+		"Short response error should wrap ErrTagReadFailed")
+	assert.Contains(t, err.Error(), "invalid response length",
+		"Error should mention invalid response length")
 }

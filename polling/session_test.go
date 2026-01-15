@@ -1772,7 +1772,7 @@ func TestSession_RFStabilityCheck(t *testing.T) {
 func TestSession_RFStabilityCheck_RepeatedFailures(t *testing.T) {
 	t.Parallel()
 
-	t.Run("CallbackFailsThreeTimes_ReturnsError", func(t *testing.T) {
+	t.Run("CallbackFailsRepeatedly_NeverReturnsError", func(t *testing.T) {
 		t.Parallel()
 		device, mockTransport := createMockDeviceWithTransport(t)
 		session := NewSession(device, nil)
@@ -1786,20 +1786,13 @@ func TestSession_RFStabilityCheck_RepeatedFailures(t *testing.T) {
 			return callbackErr
 		}
 
-		// First two calls should be silent
-		err1 := session.processPollingResults(detectedTag)
-		require.NoError(t, err1)
-		assert.Equal(t, 1, session.GetState().ConsecutiveStableFailures)
-
-		err2 := session.processPollingResults(detectedTag)
-		require.NoError(t, err2)
-		assert.Equal(t, 2, session.GetState().ConsecutiveStableFailures)
-
-		// Third call should return error
-		err3 := session.processPollingResults(detectedTag)
-		require.Error(t, err3, "third failure should return error")
-		assert.Contains(t, err3.Error(), "callback failed 3 times")
-		assert.Equal(t, 3, session.GetState().ConsecutiveStableFailures)
+		// All calls should return nil - we never give up, just keep retrying
+		// until success or physical card removal (inferred from absence)
+		for i := 1; i <= 5; i++ {
+			err := session.processPollingResults(detectedTag)
+			require.NoError(t, err, "failure %d should still return nil (never give up)", i)
+			assert.Equal(t, i, session.GetState().ConsecutiveStableFailures)
+		}
 	})
 
 	t.Run("CallbackSucceeds_ResetsFailureCounter", func(t *testing.T) {

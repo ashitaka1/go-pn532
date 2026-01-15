@@ -30,11 +30,20 @@ type WriteNDEFFunc func(ctx context.Context) error
 // IsRetryableFunc defines a function that determines if an error is retryable
 type IsRetryableFunc func(error) bool
 
-// readNDEFWithRetry implements the common retry logic for both NTAG and MIFARE tags
-// This addresses the "empty valid tag" problem where tags are detected but return no data
+// readNDEFWithRetry implements the common retry logic for both NTAG and MIFARE tags.
+// This addresses the "empty valid tag" problem where tags are detected but return no data,
+// and handles RF instability during card sliding into a reader slot.
+// Uses exponential backoff delays to allow RF field stabilization.
 func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagType string) (*NDEFMessage, error) {
 	const maxRetries = 3
-	const retryDelay = 10 * time.Millisecond
+
+	// Use exponential backoff matching WriteNDEFWithRetry - gives time for RF to stabilize
+	// during card sliding scenarios where communication is initially unreliable
+	retryDelays := []time.Duration{
+		100 * time.Millisecond,
+		150 * time.Millisecond,
+		250 * time.Millisecond,
+	}
 
 	for i := range maxRetries {
 		// Try to read NDEF data
@@ -42,8 +51,9 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 		if err != nil {
 			// Hard error during read - check if we should retry
 			if i < maxRetries-1 && isRetryable(err) {
-				Debugf("%s NDEF read attempt %d failed (retrying): %v", tagType, i+1, err)
-				time.Sleep(retryDelay)
+				delay := retryDelays[i]
+				Debugf("%s NDEF read attempt %d failed (retrying after %v): %v", tagType, i+1, delay, err)
+				time.Sleep(delay)
 				continue
 			}
 			return nil, err
@@ -58,8 +68,9 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 
 		// We got a valid response but it's empty - this is the "empty valid tag" issue
 		if i < maxRetries-1 {
-			Debugf("%s NDEF read attempt %d returned empty data (retrying)", tagType, i+1)
-			time.Sleep(retryDelay)
+			delay := retryDelays[i]
+			Debugf("%s NDEF read attempt %d returned empty data (retrying after %v)", tagType, i+1, delay)
+			time.Sleep(delay)
 			continue
 		}
 

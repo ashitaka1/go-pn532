@@ -315,7 +315,8 @@ func (t *MIFARETag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) 
 
 	// MIFARE Classic returns 16 bytes on read
 	if len(data) < mifareBlockSize {
-		return nil, fmt.Errorf("invalid read response length: %d", len(data))
+		return nil, fmt.Errorf("%w: invalid response length %d (expected at least %d)",
+			ErrTagReadFailed, len(data), mifareBlockSize)
 	}
 
 	return data[:mifareBlockSize], nil
@@ -341,7 +342,8 @@ func (t *MIFARETag) ReadBlockDirect(ctx context.Context, block uint8) ([]byte, e
 
 	// MIFARE Classic returns 16 bytes on read
 	if len(data) < mifareBlockSize {
-		return nil, fmt.Errorf("invalid read response length: %d", len(data))
+		return nil, fmt.Errorf("%w: invalid response length %d (expected at least %d)",
+			ErrTagReadFailed, len(data), mifareBlockSize)
 	}
 
 	return data[:mifareBlockSize], nil
@@ -500,7 +502,8 @@ func (t *MIFARETag) readBlockCommunicateThru(ctx context.Context, block uint8) (
 
 	// MIFARE Classic returns 16 bytes on read
 	if len(data) < mifareBlockSize {
-		return nil, fmt.Errorf("invalid read response length: %d", len(data))
+		return nil, fmt.Errorf("%w: invalid response length %d (expected at least %d)",
+			ErrTagReadFailed, len(data), mifareBlockSize)
 	}
 
 	return data[:mifareBlockSize], nil

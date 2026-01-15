@@ -181,7 +181,8 @@ func (t *NTAGTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
 
 	// NTAG returns 16 bytes (4 blocks) on read
 	if len(data) < ntagBlockSize {
-		return nil, fmt.Errorf("invalid read response length: %d", len(data))
+		return nil, fmt.Errorf("%w: invalid response length %d (expected at least %d)",
+			ErrTagReadFailed, len(data), ntagBlockSize)
 	}
 
 	// Return only the requested block
@@ -643,7 +644,13 @@ func (t *NTAGTag) processBlock(ctx context.Context, blockNum int, state *blockBy
 	blockData, err := t.readBlockWithRetry(ctx, uint8(blockNum)) // #nosec G115
 	if err != nil {
 		Debugf("NTAG block-by-block read failed at block %d: %v", blockNum, err)
-		return true, nil // Stop reading but don't propagate error
+		// If we haven't read any data yet, propagate the error so retry logic can kick in.
+		// This handles the case where the first block fails (e.g., during card sliding).
+		// If we have some data, stop reading and try to parse what we have.
+		if len(state.data) == 0 {
+			return true, err
+		}
+		return true, nil
 	}
 
 	// Check if block is empty (all zeros)
@@ -1082,6 +1089,12 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// NTAG21x tags have 7-byte UIDs (distinguishes from MIFARE Classic which has 4-byte UIDs)
 	// Note: Genuine NXP NTAGs start with 0x04, but clones/compatibles may use other prefixes
 	if len(t.uid) != 7 {
+		// Check if this looks like a failed UID parse (all zeros = default fallback from
+		// corrupt AutoPoll data during card slide). This is retryable.
+		if len(t.uid) == 4 && t.uid[0] == 0 && t.uid[1] == 0 && t.uid[2] == 0 && t.uid[3] == 0 {
+			return fmt.Errorf("%w: UID parse failed (got default 4-byte zero UID)", ErrTagDataCorrupt)
+		}
+		// Real 4-byte UID = MIFARE Classic, not an NTAG - not retryable
 		return fmt.Errorf("not an NTAG tag: UID must be 7 bytes, got %d bytes", len(t.uid))
 	}
 
@@ -1095,7 +1108,13 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// Verify this looks like an NTAG capability container
 	// NTAG CC format: [E1] [Version] [Size] [Access]
 	if len(ccData) < 4 || ccData[0] != 0xE1 {
-		return errors.New("not an NTAG tag: invalid capability container")
+		// This could be garbage data from RF glitch during card slide - retryable
+		if len(ccData) >= 1 {
+			return fmt.Errorf("%w: invalid capability container (magic byte 0x%02X, expected 0xE1)",
+				ErrTagDataCorrupt, ccData[0])
+		}
+		return fmt.Errorf("%w: capability container too short (%d bytes)",
+			ErrTagDataCorrupt, len(ccData))
 	}
 
 	// Use CC-based detection for all tags (genuine NXP and clones alike)
@@ -1595,7 +1614,8 @@ func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]
 
 	// NTAG returns 16 bytes (4 blocks) on read
 	if len(data) < ntagBlockSize {
-		return nil, fmt.Errorf("invalid read response length: %d", len(data))
+		return nil, fmt.Errorf("%w: invalid response length %d (expected at least %d)",
+			ErrTagReadFailed, len(data), ntagBlockSize)
 	}
 
 	if successAttempt > 0 {
@@ -1626,7 +1646,8 @@ func (t *NTAGTag) readBlockDirectFallback(ctx context.Context, block uint8) ([]b
 
 	// NTAG returns 16 bytes (4 blocks) on read
 	if len(data) < ntagBlockSize {
-		return nil, fmt.Errorf("invalid read response length: %d", len(data))
+		return nil, fmt.Errorf("%w: invalid response length %d (expected at least %d)",
+			ErrTagReadFailed, len(data), ntagBlockSize)
 	}
 
 	Debugf("NTAG direct InDataExchange fallback succeeded for block %d", block)

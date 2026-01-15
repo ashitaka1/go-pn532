@@ -242,6 +242,10 @@ func handleTagDetected(ctx context.Context, ops *tagops.TagOperations, detectedT
 	ndefMsg, ndefErr := ops.ReadNDEF(ctx)
 	printNDEFMessage(ndefMsg, ndefErr)
 
+	// Return the error so the polling session can retry if needed
+	if ndefErr != nil {
+		return fmt.Errorf("NDEF read failed: %w", ndefErr)
+	}
 	return nil
 }
 

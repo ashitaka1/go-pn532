@@ -549,28 +549,34 @@ func (d *Device) SendDataExchange(ctx context.Context, data []byte) ([]byte, err
 		return nil, errors.New("unexpected data exchange response")
 	}
 	if res[1] != 0x00 {
-		// Use enhanced error type for protocol errors with context
 		return nil, NewPN532ErrorWithDetails(res[1], "InDataExchange", len(data), targetNum)
 	}
 	return res[2:], nil
 }
 
-// isRetryableTimeoutError checks if an error is a PN532 timeout (0x01) that should be retried.
-func isRetryableTimeoutError(err error) bool {
+// isRetryableRFError checks if an error is an RF-related PN532 error that should be retried.
+// This includes timeout (0x01) and RF communication errors (CRC, parity, framing, etc.)
+// that commonly occur during card sliding into a reader slot.
+func isRetryableRFError(err error) bool {
 	var pn532Err *PN532Error
-	return errors.As(err, &pn532Err) && pn532Err.IsTimeoutError()
+	if errors.As(err, &pn532Err) {
+		return pn532Err.IsTimeoutError() || pn532Err.IsRFError()
+	}
+	return false
 }
 
-// SendDataExchangeWithRetry sends a data exchange command with automatic retry on timeout.
-// Error 0x01 (timeout) indicates a transient RF communication failure where the packet was
-// lost. Immediate retry typically succeeds as the tag is still in the field.
+// SendDataExchangeWithRetry sends a data exchange command with automatic retry on RF errors.
+// RF errors (timeout, CRC, parity, framing) indicate transient communication failures that
+// commonly occur during card sliding into a reader slot. A small delay between retries
+// allows the RF field to stabilize.
 //
 // Configuration:
 //   - 3 attempts total (1 initial + 2 retries)
-//   - No delay between retries (immediate retry)
-//   - Only retries on timeout errors (0x01)
+//   - 15ms delay between retries (allows RF stabilization)
+//   - Retries on timeout (0x01) and RF errors (CRC, parity, framing, etc.)
 func (d *Device) SendDataExchangeWithRetry(ctx context.Context, data []byte) ([]byte, error) {
 	const maxAttempts = 3
+	const retryDelay = 15 * time.Millisecond
 
 	var lastErr error
 	for attempt := range maxAttempts {
@@ -589,14 +595,15 @@ func (d *Device) SendDataExchangeWithRetry(ctx context.Context, data []byte) ([]
 			return result, nil
 		}
 
-		if !isRetryableTimeoutError(err) {
+		if !isRetryableRFError(err) {
 			return nil, err
 		}
 
-		// Timeout error - save it and retry immediately
+		// RF error - save it and retry after delay
 		lastErr = err
 		if attempt < maxAttempts-1 {
-			Debugf("SendDataExchangeWithRetry: timeout on attempt %d, retrying immediately", attempt+1)
+			Debugf("SendDataExchangeWithRetry: RF error on attempt %d, retrying after %v", attempt+1, retryDelay)
+			time.Sleep(retryDelay)
 		}
 	}
 
@@ -621,7 +628,6 @@ func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error
 		return nil, errors.New("unexpected InCommunicateThru response")
 	}
 	if res[1] != 0x00 {
-		// Use enhanced error type for protocol errors with context
 		return nil, NewPN532ErrorWithDetails(res[1], "InCommunicateThru", len(data), targetNum)
 	}
 	return res[2:], nil

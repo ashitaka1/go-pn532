@@ -18,6 +18,8 @@ package polling
 import (
 	"errors"
 	"time"
+
+	"github.com/ZaparooProject/go-pn532"
 )
 
 // CardDetectionState represents the finite state machine for card detection
@@ -77,6 +79,7 @@ func (cs *CardState) TransitionToPostReadGrace(timeout time.Duration, callback f
 	cs.DetectionState = StatePostReadGrace
 	safeTimerStop(cs.RemovalTimer)
 	// Short grace period after read completion
+	pn532.Debugf("TransitionToPostReadGrace: starting timer for %v", timeout/2)
 	cs.RemovalTimer = time.AfterFunc(timeout/2, callback)
 }
 
@@ -85,6 +88,7 @@ func (cs *CardState) TransitionToDetected(timeout time.Duration, callback func()
 	cs.DetectionState = StateTagDetected
 	cs.LastSeenTime = time.Now()
 	safeTimerStop(cs.RemovalTimer)
+	pn532.Debugf("TransitionToDetected: starting timer for %v", timeout)
 	cs.RemovalTimer = time.AfterFunc(timeout, callback)
 }
 
