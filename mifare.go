@@ -974,25 +974,6 @@ func (t *MIFARETag) Authenticate(ctx context.Context, sector uint8, keyType byte
 	return nil
 }
 
-// AuthenticateContext performs authentication with context support
-func (t *MIFARETag) AuthenticateContext(ctx context.Context, sector uint8, keyType byte, key []byte) error {
-	if len(key) != 6 {
-		return errors.New("MIFARE key must be 6 bytes")
-	}
-
-	// Calculate block number for the sector
-	block := sector * mifareSectorSize
-
-	// Build authentication command
-	cmd := make([]byte, 0, 2+len(key)+4)
-	cmd = append(cmd, mifareCmdAuth+keyType, block)
-	cmd = append(cmd, key...)
-	cmd = append(cmd, t.uid[:4]...)
-
-	_, err := t.device.SendDataExchange(ctx, cmd)
-	return err
-}
-
 // AuthenticateRobust performs robust authentication with retry logic and Chinese clone support
 // This is the recommended method for authenticating with unreliable tags
 func (t *MIFARETag) AuthenticateRobust(ctx context.Context, sector uint8, keyType byte, key []byte) error {
@@ -1011,42 +992,6 @@ func (t *MIFARETag) AuthenticateRobust(ctx context.Context, sector uint8, keyTyp
 		return nil
 	}
 
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-
-	// If standard auth failed, try Chinese clone unlock sequences
-	if t.tryChineseCloneUnlock(ctx, sector) {
-		// Clone unlock successful, tag is accessible without auth
-		t.authMutex.Lock()
-		t.lastAuthSector = int(sector)
-		t.lastAuthKeyType = keyType
-		t.authMutex.Unlock()
-		return nil
-	}
-
-	return fmt.Errorf("%w after all attempts: %w", ErrTagAuthFailed, err)
-}
-
-// AuthenticateRobustContext performs robust authentication with context support
-func (t *MIFARETag) AuthenticateRobustContext(ctx context.Context, sector uint8, keyType byte, key []byte) error {
-	start := time.Now()
-	defer func() {
-		t.timing.add(time.Since(start))
-	}()
-
-	// Check context before starting
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-
-	// Try standard authentication first with context-aware retry
-	err := t.authenticateWithRetryContext(ctx, sector, keyType, key)
-	if err == nil {
-		return nil
-	}
-
-	// Check context before trying Chinese clone unlock
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
@@ -1095,56 +1040,6 @@ func (t *MIFARETag) authenticateWithRetry(ctx context.Context, sector uint8, key
 
 		// Apply exponential backoff with jitter, but respect context deadline
 		delay := t.calculateRetryDelay(attempt)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-			// Continue to next attempt
-		}
-	}
-
-	return fmt.Errorf("%w after %d attempts: %w", ErrTagAuthFailed, t.config.RetryConfig.MaxAttempts, lastErr)
-}
-
-// authenticateWithRetryContext implements progressive retry strategy with context support
-func (t *MIFARETag) authenticateWithRetryContext(ctx context.Context, sector uint8, keyType byte, key []byte) error {
-	var lastErr error
-
-	for attempt := range t.config.RetryConfig.MaxAttempts {
-		// Check for context cancellation before each attempt
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-
-		level := t.getRetryLevel(attempt)
-
-		// Apply recovery strategy based on level
-		if err := t.applyRetryStrategy(ctx, level, lastErr); err != nil {
-			return fmt.Errorf("recovery strategy failed: %w", err)
-		}
-
-		// Check context after recovery strategy
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-
-		// Attempt authentication with context
-		err := t.Authenticate(ctx, sector, keyType, key)
-		if err == nil {
-			return nil
-		}
-
-		lastErr = err
-
-		// Check for specific error patterns that indicate permanent failure
-		if t.isPermanentFailure(err) {
-			return fmt.Errorf("permanent authentication failure: %w", err)
-		}
-
-		// Apply exponential backoff with jitter, but respect context deadline
-		delay := t.calculateRetryDelay(attempt)
-
-		// Create a timer for the delay, but also watch for context cancellation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

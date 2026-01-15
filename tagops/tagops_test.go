@@ -246,7 +246,6 @@ func TestTagOperations_GetTagType(t *testing.T) {
 	}
 
 	assert.Equal(t, pn532.TagTypeNTAG, ops.GetTagType())
-	assert.Equal(t, pn532.TagTypeNTAG, ops.TagType()) // Alias method
 }
 
 func TestNew(t *testing.T) {

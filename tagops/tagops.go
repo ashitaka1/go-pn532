@@ -171,11 +171,6 @@ func (t *TagOperations) GetTagType() pn532.TagType {
 	return t.tagType
 }
 
-// TagType returns the detected tag type (alias for GetTagType)
-func (t *TagOperations) TagType() pn532.TagType {
-	return t.tagType
-}
-
 // GetUID returns the tag's UID
 func (t *TagOperations) GetUID() []byte {
 	if t.tag == nil {
