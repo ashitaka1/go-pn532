@@ -18,6 +18,7 @@ package pn532
 import (
 	"fmt"
 	"os"
+	"time"
 )
 
 // debugEnabled controls whether debug logging is active
@@ -31,17 +32,37 @@ func init() {
 	}
 }
 
-// Debugf prints debug information only when debug mode is enabled
-// This eliminates the performance overhead of fmt.Printf in production
+// Debugf prints debug information.
+// Always writes to session log file (if initialized) with timestamp.
+// Only prints to console when debug mode is enabled.
 func Debugf(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+
+	// Always write to session log with timestamp
+	if sessionLogWriter != nil {
+		timestamp := time.Now().Format("15:04:05.000")
+		_, _ = fmt.Fprintf(sessionLogWriter, "%s DEBUG: %s\n", timestamp, message)
+	}
+
+	// Only print to console if debug enabled
 	if debugEnabled {
-		_, _ = fmt.Printf("DEBUG: "+format+"\n", args...)
+		_, _ = fmt.Printf("DEBUG: %s\n", message)
 	}
 }
 
-// Debugln prints debug information only when debug mode is enabled
-// This eliminates the performance overhead of fmt.Printf in production
+// Debugln prints debug information.
+// Always writes to session log file (if initialized) with timestamp.
+// Only prints to console when debug mode is enabled.
 func Debugln(args ...any) {
+	message := fmt.Sprint(args...)
+
+	// Always write to session log with timestamp
+	if sessionLogWriter != nil {
+		timestamp := time.Now().Format("15:04:05.000")
+		_, _ = fmt.Fprintf(sessionLogWriter, "%s DEBUG: %s\n", timestamp, message)
+	}
+
+	// Only print to console if debug enabled
 	if debugEnabled {
 		_, _ = fmt.Print("DEBUG: ")
 		_, _ = fmt.Println(args...)

@@ -490,6 +490,17 @@ func mainWithExitCode() int {
 	// Parse command-line flags
 	cfg := parseConfig()
 
+	// Initialize session log file (always, regardless of debug flag)
+	logPath, logErr := pn532.InitSessionLog()
+	if logErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Warning: could not create session log: %v\n", logErr)
+	}
+	defer func() {
+		if err := pn532.CloseSessionLog(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "Warning: could not close session log: %v\n", err)
+		}
+	}()
+
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -509,6 +520,10 @@ func mainWithExitCode() int {
 			return 0
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		// Show log path on error for debugging
+		if logPath != "" {
+			_, _ = fmt.Fprintf(os.Stderr, "Debug log: %s\n", logPath)
+		}
 		return 1
 	}
 	return 0
