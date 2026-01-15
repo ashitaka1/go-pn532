@@ -1812,7 +1812,7 @@ func TestNTAGDetectType_Real4ByteUIDIsNotRetryable(t *testing.T) {
 		"Error should indicate wrong UID length")
 }
 
-func TestNTAGDetectType_InvalidCCIsRetryable(t *testing.T) {
+func TestNTAGDetectType_NonNDEFTag_UsesProbing(t *testing.T) {
 	t.Parallel()
 
 	device, mockTransport := createMockDeviceWithTransport(t)
@@ -1821,17 +1821,70 @@ func TestNTAGDetectType_InvalidCCIsRetryable(t *testing.T) {
 	validUID := []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
 	tag := NewNTAGTag(device, validUID, 0x00)
 
-	// Mock a response with invalid CC (garbage data from RF glitch)
-	garbageCC := []byte{0xFF, 0xFF, 0xFF, 0xFF} // No 0xE1 magic byte
-	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, garbageCC...))
+	// Mock CC read - returns non-NDEF data (like Amiibo uses page 3 for proprietary data)
+	amiiboPage3 := []byte{0xA5, 0x00, 0x00, 0x00} // No 0xE1 magic byte
+	// Mock probe for page 45 - accessible (not NTAG213)
+	page45Data := []byte{0x00, 0x00, 0x00, 0x00}
+	// Mock probe for page 135 - inaccessible (short response = NAK)
+
+	mockTransport.QueueResponses(0x40,
+		append([]byte{0x41, 0x00}, amiiboPage3...), // CC read - non-NDEF
+		append([]byte{0x41, 0x00}, page45Data...),  // page 45 accessible
+		[]byte{0x41, 0x00},                         // page 135 inaccessible (short response)
+	)
 
 	err := tag.DetectType(context.Background())
 
-	// Should wrap with ErrTagDataCorrupt which is retryable
-	require.ErrorIs(t, err, ErrTagDataCorrupt,
-		"Invalid CC error should be ErrTagDataCorrupt (retryable)")
-	assert.Contains(t, err.Error(), "invalid capability container",
-		"Error should mention capability container")
+	// Should succeed using probe-based detection
+	require.NoError(t, err, "Non-NDEF tag should be detected via probing")
+	assert.Equal(t, NTAGType215, tag.tagType,
+		"Tag should be detected as NTAG215 (page 45 accessible, page 135 not)")
+}
+
+func TestNTAGDetectType_NonNDEFTag_NTAG213(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	validUID := []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	tag := NewNTAGTag(device, validUID, 0x00)
+
+	// Non-NDEF CC data
+	nonNDEFPage3 := []byte{0x00, 0x00, 0x00, 0x00}
+	mockTransport.QueueResponses(0x40,
+		append([]byte{0x41, 0x00}, nonNDEFPage3...), // CC read - non-NDEF
+		[]byte{0x41, 0x00},                          // page 45 inaccessible (short response)
+	)
+
+	err := tag.DetectType(context.Background())
+
+	require.NoError(t, err, "Non-NDEF NTAG213 should be detected via probing")
+	assert.Equal(t, NTAGType213, tag.tagType, "Tag should be detected as NTAG213")
+}
+
+func TestNTAGDetectType_NonNDEFTag_NTAG216(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+
+	validUID := []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	tag := NewNTAGTag(device, validUID, 0x00)
+
+	// Non-NDEF CC data
+	nonNDEFPage3 := []byte{0x00, 0x00, 0x00, 0x00}
+	page45Data := []byte{0x00, 0x00, 0x00, 0x00}
+	page135Data := []byte{0x00, 0x00, 0x00, 0x00}
+
+	mockTransport.QueueResponses(0x40,
+		append([]byte{0x41, 0x00}, nonNDEFPage3...), // CC read - non-NDEF
+		append([]byte{0x41, 0x00}, page45Data...),   // page 45 accessible
+		append([]byte{0x41, 0x00}, page135Data...),  // page 135 accessible
+	)
+
+	err := tag.DetectType(context.Background())
+
+	require.NoError(t, err, "Non-NDEF NTAG216 should be detected via probing")
+	assert.Equal(t, NTAGType216, tag.tagType, "Tag should be detected as NTAG216")
 }
 
 func TestNTAGReadBlock_ShortResponseIsRetryable(t *testing.T) {

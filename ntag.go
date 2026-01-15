@@ -1108,13 +1108,15 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// Verify this looks like an NTAG capability container
 	// NTAG CC format: [E1] [Version] [Size] [Access]
 	if len(ccData) < 4 || ccData[0] != 0xE1 {
-		// This could be garbage data from RF glitch during card slide - retryable
+		// Non-NDEF tag (Amiibo, Lego Dimensions, blank tags, etc.)
+		// Fall back to probe-based detection using page boundaries
 		if len(ccData) >= 1 {
-			return fmt.Errorf("%w: invalid capability container (magic byte 0x%02X, expected 0xE1)",
-				ErrTagDataCorrupt, ccData[0])
+			Debugf("NTAG CC magic byte 0x%02X != 0xE1, using probe-based detection", ccData[0])
+		} else {
+			Debugf("NTAG CC too short (%d bytes), using probe-based detection", len(ccData))
 		}
-		return fmt.Errorf("%w: capability container too short (%d bytes)",
-			ErrTagDataCorrupt, len(ccData))
+		t.tagType = t.detectTypeByProbing(ctx)
+		return nil
 	}
 
 	// Use CC-based detection for all tags (genuine NXP and clones alike)
@@ -1165,6 +1167,32 @@ func (*NTAGTag) detectTypeFromCapabilityContainer(ccData []byte) NTAGType {
 			return NTAGType216
 		}
 	}
+}
+
+// detectTypeByProbing determines NTAG type by probing page boundaries.
+// This is used for non-NDEF tags (Amiibo, Lego Dimensions, etc.) that don't have
+// the standard CC magic byte 0xE1 at page 3.
+func (t *NTAGTag) detectTypeByProbing(ctx context.Context) NTAGType {
+	// NTAG variants have fixed memory sizes:
+	// NTAG213: 45 pages (0-44), page 45+ inaccessible
+	// NTAG215: 135 pages (0-134), page 135+ inaccessible
+	// NTAG216: 231 pages (0-230), page 231+ inaccessible
+
+	// Test NTAG213 boundary - if page 45 is inaccessible, it's NTAG213
+	if !t.canAccessPageWithContext(ctx, ntag213TotalPages) {
+		Debugf("NTAG detected as NTAG213 by probing (page %d inaccessible)", ntag213TotalPages)
+		return NTAGType213
+	}
+
+	// Test NTAG215 boundary - if page 135 is inaccessible, it's NTAG215
+	if !t.canAccessPageWithContext(ctx, ntag215TotalPages) {
+		Debugf("NTAG detected as NTAG215 by probing (page %d inaccessible)", ntag215TotalPages)
+		return NTAGType215
+	}
+
+	// Can access page 135+, assume NTAG216
+	Debugf("NTAG detected as NTAG216 by probing (page %d accessible)", ntag215TotalPages)
+	return NTAGType216
 }
 
 // canAccessPageSafely tests if a specific page can be accessed (readable) with error handling
