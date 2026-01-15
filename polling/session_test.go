@@ -1904,3 +1904,79 @@ func TestSession_VerifyTagStable(t *testing.T) {
 		assert.False(t, stable)
 	})
 }
+
+// --- Callback Failure Handling Tests ---
+
+func TestHandleCallbackFailure_ResetsPresentFlag(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Simulate that a card was present
+	session.stateMutex.Lock()
+	session.state.Present = true
+	session.state.ConsecutiveStableFailures = 0
+	session.stateMutex.Unlock()
+
+	// Handle a callback failure
+	err := session.handleCallbackFailure(errors.New("NDEF read failed"))
+
+	// Verify behavior
+	state := session.GetState()
+
+	// Key assertion: handleCallbackFailure should ALWAYS reset Present to false
+	// This ensures the callback runs again on next poll
+	assert.False(t, state.Present,
+		"Present should be reset to false after callback failure")
+
+	// Should increment failure counter
+	assert.Equal(t, 1, state.ConsecutiveStableFailures,
+		"ConsecutiveStableFailures should be incremented")
+
+	// Should return nil (never give up)
+	assert.NoError(t, err,
+		"handleCallbackFailure should return nil to continue polling")
+}
+
+func TestHandleCallbackFailure_IncrementsFailureCounter(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Call handleCallbackFailure multiple times
+	for i := range 5 {
+		// Reset Present before each call (simulating successful detection)
+		session.stateMutex.Lock()
+		session.state.Present = true
+		session.stateMutex.Unlock()
+
+		err := session.handleCallbackFailure(errors.New("failure"))
+		require.NoError(t, err)
+
+		state := session.GetState()
+		assert.Equal(t, i+1, state.ConsecutiveStableFailures,
+			"Failure counter should increment on each call")
+		assert.False(t, state.Present,
+			"Present should be false after each failure")
+	}
+}
+
+func TestHandleCallbackFailure_AlwaysReturnsNil(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Test with various error types
+	testErrors := []error{
+		errors.New("generic error"),
+		pn532.ErrTransportTimeout,
+		pn532.ErrTransportRead,
+		pn532.NewPN532Error(0x02, "InDataExchange", "CRC error"),
+	}
+
+	for _, testErr := range testErrors {
+		err := session.handleCallbackFailure(testErr)
+		assert.NoError(t, err,
+			"handleCallbackFailure should always return nil for error: %v", testErr)
+	}
+}

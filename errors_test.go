@@ -1235,3 +1235,94 @@ func TestTraceableError_FormatTrace_Empty(t *testing.T) {
 		t.Error("FormatTrace with empty trace should indicate no data")
 	}
 }
+
+// =============================================================================
+// IsPN532RFError Helper Tests
+// =============================================================================
+
+func TestIsPN532RFError_WithPN532Error(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		errorCode byte
+		wantRF    bool
+	}{
+		// RF error codes - should return true
+		{name: "CRC error", errorCode: 0x02, wantRF: true},
+		{name: "parity error", errorCode: 0x03, wantRF: true},
+		{name: "framing error", errorCode: 0x05, wantRF: true},
+		{name: "RF field not activated", errorCode: 0x0A, wantRF: true},
+		{name: "RF protocol error", errorCode: 0x0B, wantRF: true},
+		{name: "target released by initiator", errorCode: 0x29, wantRF: true},
+		{name: "card disappeared", errorCode: 0x2B, wantRF: true},
+
+		// Non-RF error codes - should return false
+		{name: "timeout error", errorCode: 0x01, wantRF: false},
+		{name: "erroneous bit count", errorCode: 0x04, wantRF: false},
+		{name: "buffer overflow", errorCode: 0x09, wantRF: false},
+		{name: "invalid parameter", errorCode: 0x10, wantRF: false},
+		{name: "authentication error", errorCode: 0x14, wantRF: false},
+		{name: "command not supported", errorCode: 0x81, wantRF: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewPN532Error(tt.errorCode, "TestCommand", "")
+			got := IsPN532RFError(err)
+			if got != tt.wantRF {
+				t.Errorf("IsPN532RFError() = %v, want %v", got, tt.wantRF)
+			}
+		})
+	}
+}
+
+func TestIsPN532RFError_WithWrappedError(t *testing.T) {
+	t.Parallel()
+
+	// Create an RF error and wrap it
+	rfErr := NewPN532Error(0x02, "InDataExchange", "CRC check failed")
+	wrappedErr := fmt.Errorf("operation failed: %w", rfErr)
+	doubleWrapped := fmt.Errorf("tag read: %w", wrappedErr)
+
+	// Should work through error wrapping
+	if !IsPN532RFError(wrappedErr) {
+		t.Error("IsPN532RFError should detect wrapped RF error")
+	}
+	if !IsPN532RFError(doubleWrapped) {
+		t.Error("IsPN532RFError should detect double-wrapped RF error")
+	}
+}
+
+func TestIsPN532RFError_WithNonPN532Error(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		err  error
+		name string
+	}{
+		{name: "transport timeout", err: ErrTransportTimeout},
+		{name: "transport read", err: ErrTransportRead},
+		{name: "frame corrupted", err: ErrFrameCorrupted},
+		{name: "generic error", err: errors.New("some error")},
+		{name: "wrapped generic error", err: fmt.Errorf("context: %w", errors.New("inner"))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if IsPN532RFError(tt.err) {
+				t.Errorf("IsPN532RFError should return false for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestIsPN532RFError_NilError(t *testing.T) {
+	t.Parallel()
+
+	if IsPN532RFError(nil) {
+		t.Error("IsPN532RFError should return false for nil error")
+	}
+}

@@ -986,3 +986,122 @@ func TestWaitForStabilization_ContextCanceled(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, context.Canceled, err)
 }
+
+// --- Re-detection UID Verification Tests ---
+// These tests verify that attemptRedetection correctly handles UID matching.
+
+func TestAttemptRedetection_DifferentUID(t *testing.T) {
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// Original tag
+	originalTag := &pn532.DetectedTag{
+		UID:      "04010203040506",
+		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+	}
+
+	ops := New(device)
+	ops.tag = originalTag
+
+	// Mock detection returns a DIFFERENT UID
+	mockTransport.SetResponse(0x4A, []byte{
+		0x4B, 0x01, // 1 target found
+		0x01,       // Target number
+		0x00, 0x04, // ATQ
+		0x00,                                     // SAK
+		0x07,                                     // UID length = 7
+		0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // Different UID
+	})
+
+	// Attempt re-detection with original UID
+	ops.attemptRedetection(context.Background(), originalTag.UID, 0)
+
+	// Tag should remain unchanged (original UID, not the new one)
+	assert.Equal(t, originalTag.UID, ops.tag.UID,
+		"Tag should not be updated when re-detected UID differs")
+}
+
+func TestAttemptRedetection_SameUID(t *testing.T) {
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	originalUID := "04010203040506"
+	originalTag := &pn532.DetectedTag{
+		UID:      originalUID,
+		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+	}
+
+	ops := New(device)
+	ops.tag = originalTag
+
+	// Mock detection returns the SAME UID
+	mockTransport.SetResponse(0x4A, []byte{
+		0x4B, 0x01, // 1 target found
+		0x01,       // Target number
+		0x00, 0x04, // ATQ
+		0x00,                                     // SAK
+		0x07,                                     // UID length = 7
+		0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, // Same UID
+	})
+
+	// Attempt re-detection
+	ops.attemptRedetection(context.Background(), originalUID, 0)
+
+	// Tag should be updated to the new detection result (same UID, fresh detection)
+	assert.Equal(t, originalUID, ops.tag.UID,
+		"Tag should be updated when re-detected UID matches")
+}
+
+func TestAttemptRedetection_NoTagFound(t *testing.T) {
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	originalTag := &pn532.DetectedTag{
+		UID:      "04010203040506",
+		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+	}
+
+	ops := New(device)
+	ops.tag = originalTag
+
+	// Mock detection returns no tag
+	mockTransport.SetResponse(0x4A, []byte{0x4B, 0x00}) // 0 targets found
+
+	// Attempt re-detection
+	ops.attemptRedetection(context.Background(), originalTag.UID, 0)
+
+	// Tag should remain unchanged
+	assert.Equal(t, originalTag.UID, ops.tag.UID,
+		"Tag should not change when no tag detected")
+}
+
+func TestAttemptRedetection_DetectionError(t *testing.T) {
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	originalTag := &pn532.DetectedTag{
+		UID:      "04010203040506",
+		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+	}
+
+	ops := New(device)
+	ops.tag = originalTag
+
+	// Mock detection returns an error
+	mockTransport.SetError(0x4A, errors.New("detection failed"))
+
+	// Attempt re-detection
+	ops.attemptRedetection(context.Background(), originalTag.UID, 0)
+
+	// Tag should remain unchanged
+	assert.Equal(t, originalTag.UID, ops.tag.UID,
+		"Tag should not change when detection fails")
+}
