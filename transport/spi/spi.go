@@ -176,15 +176,14 @@ func (t *Transport) waitReady() error {
 //
 //nolint:wrapcheck // WrapError intentionally wraps errors with trace data
 func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
-	const maxACKRetries = 3
-	ackRetryDelays := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
+	ackRetryDelays := []time.Duration{pn532.TransportACKDelay1, pn532.TransportACKDelay2, pn532.TransportACKDelay3}
 
 	// Create trace buffer for this command (only used on error)
 	t.currentTrace = pn532.NewTraceBuffer("SPI", t.portName, 16)
 	defer func() { t.currentTrace = nil }() // Clear after command completes
 
 	var lastErr error
-	for attempt := range maxACKRetries {
+	for attempt := range pn532.TransportACKRetries {
 		if err := t.sendFrame(cmd, args); err != nil {
 			return nil, t.currentTrace.WrapError(err)
 		}
@@ -206,13 +205,13 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 		t.wakeup()
 
 		// Wait before retry
-		if attempt < maxACKRetries-1 {
+		if attempt < pn532.TransportACKRetries-1 {
 			time.Sleep(ackRetryDelays[attempt])
 			continue
 		}
 
 		// All retries exhausted
-		retryErr := fmt.Errorf("send command failed after %d ACK retries: %w", maxACKRetries, lastErr)
+		retryErr := fmt.Errorf("send command failed after %d ACK retries: %w", pn532.TransportACKRetries, lastErr)
 		return nil, t.currentTrace.WrapError(retryErr)
 	}
 

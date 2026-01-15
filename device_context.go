@@ -41,8 +41,8 @@ func (d *Device) InitContext(ctx context.Context) error {
 	}
 
 	// Configure finite passive activation retries to prevent infinite wait lockups
-	// Use 10 retries (~1 second) instead of default 0xFF (infinite)
-	if err := d.SetPassiveActivationRetries(0x0A); err != nil {
+	// Each retry is ~100ms per PN532 datasheet, so 10 retries = ~1 second
+	if err := d.SetPassiveActivationRetries(DefaultPassiveActivationRetries); err != nil {
 		// Log but don't fail initialization - this is an optimization, not critical
 		// Some older firmware versions might not support this configuration
 		_ = err

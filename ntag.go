@@ -1305,8 +1305,7 @@ func (t *NTAGTag) getTagTypeName() string {
 }
 
 func (t *NTAGTag) readBlockWithRetry(ctx context.Context, block uint8) ([]byte, error) {
-	const maxRetries = 3
-	for i := range maxRetries {
+	for i := range NTAGBlockReadRetries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -1328,12 +1327,12 @@ func (t *NTAGTag) readBlockWithRetry(ctx context.Context, block uint8) ([]byte, 
 		}
 
 		// Short response - retry
-		if i < maxRetries-1 {
+		if i < NTAGBlockReadRetries-1 {
 			continue
 		}
 	}
 
-	return nil, fmt.Errorf("%w (block %d after %d retries)", ErrTagReadFailed, block, maxRetries)
+	return nil, fmt.Errorf("%w (block %d after %d retries)", ErrTagReadFailed, block, NTAGBlockReadRetries)
 }
 
 // SetPasswordProtection enables password protection on the tag
@@ -1570,15 +1569,14 @@ func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]
 	// Try SendRawCommand with retry logic for clone device timeout issues
 	var data []byte
 	var err error
-	maxRetries := 3
 	successAttempt := 0
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for attempt := 1; attempt <= NTAGFallbackRetries; attempt++ {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
 
-		Debugf("NTAG InCommunicateThru attempt %d/%d for block %d", attempt, maxRetries, block)
+		Debugf("NTAG InCommunicateThru attempt %d/%d for block %d", attempt, NTAGFallbackRetries, block)
 		data, err = t.device.SendRawCommand(ctx, cmd)
 		if err == nil {
 			// Re-select target after SendRawCommand to restore PN532 internal state
@@ -1594,9 +1592,9 @@ func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]
 			strings.Contains(err.Error(), "timeout") ||
 			strings.Contains(err.Error(), "InCommunicateThru error") {
 			Debugf("NTAG InCommunicateThru timeout/error on attempt %d: %v", attempt, err)
-			if attempt < maxRetries {
+			if attempt < NTAGFallbackRetries {
 				// Brief pause before retry to let clone device stabilize
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(NTAGTimeoutRetryDelay)
 				continue
 			}
 			// On final attempt, try fallback to InDataExchange without target selection

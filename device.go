@@ -192,7 +192,7 @@ func applyConnectOptions(opts []ConnectOption) (*connectConfig, error) {
 		timeout:                30 * time.Second,
 		transportFactory:       nil,
 		transportDeviceFactory: nil,
-		connectionRetries:      3, // Default to 3 attempts for manual connections
+		connectionRetries:      DefaultConnectionRetries,
 	}
 
 	for _, opt := range opts {
@@ -240,11 +240,11 @@ func setupDeviceWithRetry(transport Transport, config *connectConfig) (*Device, 
 	// Manual connections use retry logic
 	retryConfig := &RetryConfig{
 		MaxAttempts:       config.connectionRetries,
-		InitialBackoff:    50 * time.Millisecond,
-		MaxBackoff:        500 * time.Millisecond,
-		BackoffMultiplier: 2.0,
-		Jitter:            0.1,
-		RetryTimeout:      10 * time.Second,
+		InitialBackoff:    ConnectionInitialBackoff,
+		MaxBackoff:        ConnectionMaxBackoff,
+		BackoffMultiplier: ConnectionBackoffMultiplier,
+		Jitter:            ConnectionJitter,
+		RetryTimeout:      ConnectionRetryTimeout,
 	}
 
 	var device *Device

@@ -113,15 +113,14 @@ func New(busName string) (*Transport, error) {
 //
 //nolint:wrapcheck // WrapError intentionally wraps errors with trace data
 func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
-	const maxACKRetries = 3
-	ackRetryDelays := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
+	ackRetryDelays := []time.Duration{pn532.TransportACKDelay1, pn532.TransportACKDelay2, pn532.TransportACKDelay3}
 
 	// Create trace buffer for this command (only used on error)
 	t.currentTrace = pn532.NewTraceBuffer("I2C", t.busName, 16)
 	defer func() { t.currentTrace = nil }() // Clear after command completes
 
 	var lastErr error
-	for attempt := range maxACKRetries {
+	for attempt := range pn532.TransportACKRetries {
 		if err := t.sendFrame(cmd, args); err != nil {
 			return nil, t.currentTrace.WrapError(err)
 		}
@@ -140,13 +139,13 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 		}
 
 		// Wait before retry
-		if attempt < maxACKRetries-1 {
+		if attempt < pn532.TransportACKRetries-1 {
 			time.Sleep(ackRetryDelays[attempt])
 			continue
 		}
 
 		// All retries exhausted
-		retryErr := fmt.Errorf("send command failed after %d ACK retries: %w", maxACKRetries, lastErr)
+		retryErr := fmt.Errorf("send command failed after %d ACK retries: %w", pn532.TransportACKRetries, lastErr)
 		return nil, t.currentTrace.WrapError(retryErr)
 	}
 
@@ -199,11 +198,10 @@ func (*Transport) Type() pn532.TransportType {
 // checkReady checks if the PN532 is ready by reading the ready status
 // Now includes retry logic with exponential backoff for better hardware compatibility
 func (t *Transport) checkReady() error {
-	const maxRetries = 5
 	baseDelay := time.Millisecond
 
 	var lastErr error
-	for attempt := range maxRetries {
+	for attempt := range pn532.TransportI2CFrameRetries {
 		// Use buffer pool for ready status check - small optimization
 		ready := frame.GetSmallBuffer(1)
 
@@ -212,7 +210,7 @@ func (t *Transport) checkReady() error {
 			frame.PutBuffer(ready)
 			lastErr = fmt.Errorf("I2C ready check failed: %w", err)
 			// Exponential backoff: 1ms, 2ms, 4ms, 8ms, 16ms
-			if attempt < maxRetries-1 {
+			if attempt < pn532.TransportI2CFrameRetries-1 {
 				time.Sleep(baseDelay * time.Duration(1<<attempt))
 				continue
 			}
@@ -226,7 +224,7 @@ func (t *Transport) checkReady() error {
 
 		frame.PutBuffer(ready)
 		// Device not ready yet, wait with backoff
-		if attempt < maxRetries-1 {
+		if attempt < pn532.TransportI2CFrameRetries-1 {
 			time.Sleep(baseDelay * time.Duration(1<<attempt))
 		}
 	}

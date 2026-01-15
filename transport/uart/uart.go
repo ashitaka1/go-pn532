@@ -352,17 +352,16 @@ func isInterruptedSystemCall(err error) bool {
 
 // drainWithRetry performs port drain with retry logic for interrupted system calls
 func (t *Transport) drainWithRetry(operation string) error {
-	const maxRetries = 3
 	baseDelay := 2 * time.Millisecond
 
-	for attempt := range maxRetries {
+	for attempt := range pn532.TransportDrainRetries {
 		err := t.port.Drain()
 		if err == nil {
 			return nil
 		}
 
 		if isInterruptedSystemCall(err) {
-			if attempt < maxRetries-1 {
+			if attempt < pn532.TransportDrainRetries-1 {
 				delay := baseDelay * time.Duration(1<<attempt) // 2ms, 4ms, 8ms
 				time.Sleep(delay)
 				continue
@@ -372,7 +371,7 @@ func (t *Transport) drainWithRetry(operation string) error {
 		return fmt.Errorf("UART %s drain failed: %w", operation, err)
 	}
 
-	return fmt.Errorf("UART %s drain failed after %d retries", operation, maxRetries)
+	return fmt.Errorf("UART %s drain failed after %d retries", operation, pn532.TransportDrainRetries)
 }
 
 // wakeUp wakes up the PN532 over UART with robust retry mechanism
@@ -382,16 +381,15 @@ func (t *Transport) wakeUp() error {
 
 // wakeUpWithRetry attempts to wake up the PN532 with retry logic and verification
 func (t *Transport) wakeUpWithRetry() error {
-	const maxAttempts = 3
 	delays := []time.Duration{
-		10 * time.Millisecond,  // First attempt: quick
-		50 * time.Millisecond,  // Second attempt: medium
-		100 * time.Millisecond, // Third attempt: longer
+		pn532.UARTWakeupDelay1, // First attempt: quick
+		pn532.UARTWakeupDelay2, // Second attempt: medium
+		pn532.UARTWakeupDelay3, // Third attempt: longer
 	}
 
 	var lastErr error
 
-	for attempt := range maxAttempts {
+	for attempt := range pn532.TransportWakeupRetries {
 		err := t.singleWakeUpAttempt()
 		if err == nil {
 			return nil // Wake-up successful
@@ -399,12 +397,12 @@ func (t *Transport) wakeUpWithRetry() error {
 
 		lastErr = err
 		// Wait with increasing delay before retry
-		if attempt < maxAttempts-1 {
+		if attempt < pn532.TransportWakeupRetries-1 {
 			time.Sleep(delays[attempt])
 		}
 	}
 
-	return fmt.Errorf("wake-up failed after %d attempts: %w", maxAttempts, lastErr)
+	return fmt.Errorf("wake-up failed after %d attempts: %w", pn532.TransportWakeupRetries, lastErr)
 }
 
 // singleWakeUpAttempt performs a single wake-up attempt
@@ -528,8 +526,7 @@ func (t *Transport) waitAck() ([]byte, error) {
 //
 //nolint:gocognit,revive // Retry logic with frame construction inherently requires multiple branches
 func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
-	const maxACKRetries = 3
-	ackRetryDelays := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
+	ackRetryDelays := []time.Duration{pn532.TransportACKDelay1, pn532.TransportACKDelay2, pn532.TransportACKDelay3}
 
 	// Calculate total frame size
 	dataLen := 2 + len(args) // hostToPn532 + cmd + args
@@ -570,7 +567,7 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 	copy(finalFrame, frm[:totalFrameSize])
 
 	var lastErr error
-	for attempt := range maxACKRetries {
+	for attempt := range pn532.TransportACKRetries {
 		// Flush any stale data from the input buffer before each attempt
 		if t.port != nil {
 			_ = t.port.ResetInputBuffer()
@@ -612,12 +609,12 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 		if t.port != nil {
 			_ = t.port.ResetInputBuffer()
 		}
-		if attempt < maxACKRetries-1 {
+		if attempt < pn532.TransportACKRetries-1 {
 			time.Sleep(ackRetryDelays[attempt])
 		}
 	}
 
-	return nil, fmt.Errorf("send frame failed after %d ACK retries: %w", maxACKRetries, lastErr)
+	return nil, fmt.Errorf("send frame failed after %d ACK retries: %w", pn532.TransportACKRetries, lastErr)
 }
 
 // receiveFrame reads a frame from the PN532
