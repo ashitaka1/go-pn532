@@ -1017,7 +1017,7 @@ func TestMIFARETag_WriteText(t *testing.T) {
 				writeSuccess := []byte{0x41, 0x00}
 
 				// Queue writeSuccess responses for:
-				// - 1 auth (authenticateForNDEF with NDEF key succeeds)
+				// - 1 auth (authenticateWithKeyFallback with NDEF key succeeds)
 				// - 2 writes (blocks 4, 5)
 				// - 57 clearRemainingBlocks ops: block 6 + sectors 2-15 (1 + 14*4)
 				// - 1 verification auth
@@ -1288,7 +1288,7 @@ func TestMIFARETag_WriteBlockAutoAlternative(t *testing.T) {
 	}
 }
 
-func TestMIFARETag_authenticateForNDEFAlternative(t *testing.T) {
+func TestMIFARETag_authenticateWithKeyFallbackAlt(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1318,14 +1318,14 @@ func TestMIFARETag_authenticateForNDEFAlternative(t *testing.T) {
 
 			tag, _ := setupMIFARETagTest(t, tt.setupMock)
 
-			result, err := tag.authenticateForNDEFAlternative(context.Background())
+			result, err := tag.authenticateWithKeyFallbackAlt(context.Background())
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectedNDEFFormatted, result.isNDEFFormatted)
 		})
 	}
 }
 
-func TestMIFARETag_authenticateNDEFAlternative(t *testing.T) {
+func TestMIFARETag_authenticateWithNDEFKeyAlt(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1382,7 +1382,7 @@ func TestMIFARETag_authenticateNDEFAlternative(t *testing.T) {
 			tag, _ := setupMIFARETagTest(t, tt.setupMock)
 			tag.SetConfig(testMIFAREConfig())
 
-			err := tag.authenticateNDEFAlternative(context.Background(), tt.sector, tt.keyType)
+			err := tag.authenticateWithNDEFKeyAlt(context.Background(), tt.sector, tt.keyType)
 			checkMIFARETagError(t, err, tt.expectError, tt.errorContains)
 		})
 	}

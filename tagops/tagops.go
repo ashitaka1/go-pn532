@@ -34,7 +34,8 @@ const (
 	stabilizationDelay = 75 * time.Millisecond
 
 	// initMaxRetries is the number of initialization attempts per detection cycle.
-	initMaxRetries = 2
+	// Higher value needed for Chinese clone tags that may need many auth attempts.
+	initMaxRetries = 5
 
 	// initRetryDelay is the time to wait between initialization retries.
 	initRetryDelay = 50 * time.Millisecond
@@ -185,20 +186,15 @@ func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 		return ErrNoTag
 	}
 
-	// If tag type is already known from detection, try that first then fallback.
-	// Each case tries the expected type, then the alternative - no redundant attempts.
+	// Tag type is determined by SAK during detection
 	switch t.tag.Type {
 	case pn532.TagTypeMIFARE:
-		// Tag was identified as MIFARE based on SAK pattern.
-		// NTAG uses SAK=0x00, so no fallback needed.
 		if t.tryInitMIFARE(ctx) {
 			return nil
 		}
 		return ErrUnsupportedTag
 
 	case pn532.TagTypeNTAG:
-		// Tag was identified as NTAG based on SAK pattern (SAK=0x00).
-		// MIFARE Classic uses different SAK values, so no fallback needed.
 		if t.tryInitNTAG(ctx) {
 			return nil
 		}
@@ -281,9 +277,6 @@ func isDefinitivelyNotNTAG(err error) bool {
 
 // tryInitMIFARE attempts to initialize as a MIFARE tag. Returns true on success.
 // Uses retry logic to handle transient RF communication failures.
-//
-// Like tryInitNTAG, this retries on any error to handle transient RF issues
-// during card sliding.
 func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
 	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
 
@@ -293,9 +286,9 @@ func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
 			return false
 		}
 
-		// Try to read block 4 (first block of sector 1) using automatic authentication
-		// This will use the built-in NDEF key authentication
-		_, err := mifare.ReadBlockAuto(ctx, 4)
+		// Try to authenticate using NDEF key first, then common keys (factory default, etc.)
+		// This handles both NDEF-formatted tags and blank/factory tags
+		err := mifare.TryAuthenticate(ctx)
 		if err == nil {
 			t.tagType = pn532.TagTypeMIFARE
 			t.mifareInstance = mifare
@@ -312,6 +305,9 @@ func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
 
 	if lastErr != nil {
 		pn532.Debugf("MIFARE init failed after %d attempts: %v", initMaxRetries, lastErr)
+		// Cycle RF field to clear accumulated bad state from auth failures
+		// This prevents PN532 hang on next InListPassiveTarget call
+		_ = t.device.CycleRFField()
 	}
 	return false
 }

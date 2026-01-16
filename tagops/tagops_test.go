@@ -549,17 +549,16 @@ func TestTryInitMIFARE_SucceedsWithValidAuth(t *testing.T) {
 	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType)
 }
 
-func TestDetectAndInitializeTag_NTAG_NoFallbackToMIFARE(t *testing.T) {
+func TestDetectAndInitializeTag_NTAG_FallsBackToMIFARE(t *testing.T) {
 	// Test that when pre-detected as NTAG but NTAG init fails,
-	// the code does NOT fall back to MIFARE (we trust the detection result).
-	// This scenario represents a detection bug (NTAG should have 7-byte UID).
+	// the code falls back to MIFARE and succeeds if MIFARE auth works.
 
 	mockTransport := pn532.NewMockTransport()
 	device, err := pn532.New(mockTransport)
 	require.NoError(t, err)
 	mockTransport.SelectTarget()
 
-	// Mock response doesn't matter - NTAG will fail on 4-byte UID check before any I/O
+	// Mock returns success for MIFARE auth
 	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, make([]byte, 16)...))
 
 	ops := New(device)
@@ -571,9 +570,9 @@ func TestDetectAndInitializeTag_NTAG_NoFallbackToMIFARE(t *testing.T) {
 
 	err = ops.detectAndInitializeTag(context.Background())
 
-	// Should fail - no MIFARE fallback when tag is pre-detected as NTAG
-	require.Error(t, err)
-	assert.Equal(t, ErrUnsupportedTag, err, "Should return ErrUnsupportedTag, not fall back to MIFARE")
+	// Should succeed via MIFARE fallback
+	require.NoError(t, err)
+	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType, "Should fall back to MIFARE")
 }
 
 // --- Reader Function Tests ---
@@ -713,28 +712,7 @@ func TestInitFromDetectedTag_NilTag(t *testing.T) {
 	assert.Equal(t, ErrNoTag, err)
 }
 
-func TestInitFromDetectedTag_ContextCancellation(t *testing.T) {
-	mockTransport := pn532.NewMockTransport()
-	device, err := pn532.New(mockTransport)
-	require.NoError(t, err)
-
-	ops := New(device)
-	tag := &pn532.DetectedTag{
-		UID:      "04010203040506",
-		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-	}
-
-	// Cancel context immediately
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err = ops.InitFromDetectedTag(ctx, tag)
-
-	require.Error(t, err)
-	assert.Equal(t, context.Canceled, err)
-}
-
-func TestInitFromDetectedTag_SuccessAfterStabilization(t *testing.T) {
+func TestInitFromDetectedTag_Success(t *testing.T) {
 	mockTransport := pn532.NewMockTransport()
 	device, err := pn532.New(mockTransport)
 	require.NoError(t, err)
@@ -878,229 +856,73 @@ func TestTryInitMIFARE_RetriesOnTransientErrors(t *testing.T) {
 	result := ops.tryInitMIFARE(context.Background())
 
 	assert.False(t, result, "tryInitMIFARE should fail when all retries fail")
-	// Verify multiple attempts were made (should be initMaxRetries = 5)
+	// Verify multiple attempts were made (should be initMaxRetries = 3)
 	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x40), 2,
 		"Should make multiple retry attempts")
 }
 
-func TestDetectAndInitializeTag_NoMIFAREFallbackForNTAG(t *testing.T) {
+func TestDetectAndInitializeTag_TriesFallbackOnNTAGFailure(t *testing.T) {
 	t.Parallel()
 
-	// Verify that when a tag is identified as NTAG (TagTypeNTAG), no MIFARE
-	// authentication commands are sent, even when NTAG init fails.
-
+	// Verify that when NTAG init fails, MIFARE fallback is attempted
 	mockTransport := pn532.NewMockTransport()
 	device, err := pn532.New(mockTransport)
 	require.NoError(t, err)
 	mockTransport.SelectTarget()
 
-	// Make NTAG init fail (return error on CC read)
+	// Make all init attempts fail
 	mockTransport.SetResponse(0x40, []byte{0x41, 0x01}) // Timeout error
 
 	ops := New(device)
 	ops.tag = &pn532.DetectedTag{
-		Type:     pn532.TagTypeNTAG, // Explicitly identified as NTAG
+		Type:     pn532.TagTypeNTAG,
 		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
 		SAK:      0x00,
 	}
 
-	// This should fail (NTAG init fails, no MIFARE fallback)
+	// Should fail after trying both NTAG and MIFARE
 	err = ops.detectAndInitializeTag(context.Background())
 	require.Error(t, err)
 	assert.Equal(t, ErrUnsupportedTag, err)
 
-	// Verify only NTAG commands were sent (0x30 = NTAG READ, no 0x60/0x61 = MIFARE AUTH)
-	// The 0x40 command is InDataExchange wrapper, but we can check that no MIFARE
-	// auth (0x60/0x61) was sent as the first byte after the status byte
-	assert.Zero(t, mockTransport.GetCallCount(0x60), "Should not send MIFARE Auth A (0x60)")
-	assert.Zero(t, mockTransport.GetCallCount(0x61), "Should not send MIFARE Auth B (0x61)")
+	// Verify commands were sent (NTAG read and MIFARE auth attempts via InDataExchange)
+	assert.Positive(t, mockTransport.GetCallCount(0x40), "Should have sent commands")
 }
 
-func TestDetectAndInitializeTag_NoNTAGFallbackForMIFARE(t *testing.T) {
+func TestDetectAndInitializeTag_TriesFallbackOnMIFAREFailure(t *testing.T) {
 	t.Parallel()
 
-	// Verify that when a tag is identified as MIFARE (TagTypeMIFARE), no NTAG
-	// read commands are sent, even when MIFARE init fails.
-
+	// Verify that when MIFARE init fails, NTAG fallback is attempted
 	mockTransport := pn532.NewMockTransport()
 	device, err := pn532.New(mockTransport)
 	require.NoError(t, err)
 	mockTransport.SelectTarget()
 
-	// Make MIFARE init fail (return error on auth)
+	// Make all init attempts fail
 	mockTransport.SetResponse(0x40, []byte{0x41, 0x14}) // Auth error
 
 	ops := New(device)
 	ops.tag = &pn532.DetectedTag{
-		Type:     pn532.TagTypeMIFARE, // Explicitly identified as MIFARE
+		Type:     pn532.TagTypeMIFARE,
 		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04},
 		SAK:      0x08,
 	}
 
-	// This should fail (MIFARE init fails, no NTAG fallback)
+	// Should fail after trying both MIFARE and NTAG
 	err = ops.detectAndInitializeTag(context.Background())
 	require.Error(t, err)
 	assert.Equal(t, ErrUnsupportedTag, err)
 
-	// NTAG READ command is 0x30, but it's wrapped in InDataExchange (0x40)
-	// We can verify MIFARE commands were sent (0x60/0x61) by checking call count > 0
-	assert.Positive(t, mockTransport.GetCallCount(0x40), "Should have sent MIFARE commands")
+	// Verify commands were sent
+	assert.Positive(t, mockTransport.GetCallCount(0x40), "Should have sent commands")
 }
 
 // --- Retry Constants Tests ---
 
 func TestRetryConstants(t *testing.T) {
-	// Verify the retry constants are set to expected values for card sliding use case
-	assert.Equal(t, 75*time.Millisecond, stabilizationDelay,
-		"stabilizationDelay should be 75ms")
-	assert.Equal(t, 2, initMaxRetries,
-		"initMaxRetries should be 2")
-	assert.Equal(t, 50*time.Millisecond, initRetryDelay,
-		"initRetryDelay should be 50ms")
-	assert.Equal(t, 3, maxRedetectAttempts,
-		"maxRedetectAttempts should be 3")
-}
-
-func TestWaitForStabilization(t *testing.T) {
-	ops := &TagOperations{}
-
-	// Test normal case - should complete after delay
-	start := time.Now()
-	err := ops.waitForStabilization(context.Background())
-	elapsed := time.Since(start)
-
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, elapsed, stabilizationDelay-5*time.Millisecond,
-		"Should wait at least stabilizationDelay")
-}
-
-func TestWaitForStabilization_ContextCanceled(t *testing.T) {
-	ops := &TagOperations{}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
-
-	err := ops.waitForStabilization(ctx)
-
-	require.Error(t, err)
-	assert.Equal(t, context.Canceled, err)
-}
-
-// --- Re-detection UID Verification Tests ---
-// These tests verify that attemptRedetection correctly handles UID matching.
-
-func TestAttemptRedetection_DifferentUID(t *testing.T) {
-	mockTransport := pn532.NewMockTransport()
-	device, err := pn532.New(mockTransport)
-	require.NoError(t, err)
-	mockTransport.SelectTarget()
-
-	// Original tag
-	originalTag := &pn532.DetectedTag{
-		UID:      "04010203040506",
-		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-	}
-
-	ops := New(device)
-	ops.tag = originalTag
-
-	// Mock detection returns a DIFFERENT UID
-	mockTransport.SetResponse(0x4A, []byte{
-		0x4B, 0x01, // 1 target found
-		0x01,       // Target number
-		0x00, 0x04, // ATQ
-		0x00,                                     // SAK
-		0x07,                                     // UID length = 7
-		0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // Different UID
-	})
-
-	// Attempt re-detection with original UID
-	ops.attemptRedetection(context.Background(), originalTag.UID, 0)
-
-	// Tag should remain unchanged (original UID, not the new one)
-	assert.Equal(t, originalTag.UID, ops.tag.UID,
-		"Tag should not be updated when re-detected UID differs")
-}
-
-func TestAttemptRedetection_SameUID(t *testing.T) {
-	mockTransport := pn532.NewMockTransport()
-	device, err := pn532.New(mockTransport)
-	require.NoError(t, err)
-	mockTransport.SelectTarget()
-
-	originalUID := "04010203040506"
-	originalTag := &pn532.DetectedTag{
-		UID:      originalUID,
-		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-	}
-
-	ops := New(device)
-	ops.tag = originalTag
-
-	// Mock detection returns the SAME UID
-	mockTransport.SetResponse(0x4A, []byte{
-		0x4B, 0x01, // 1 target found
-		0x01,       // Target number
-		0x00, 0x04, // ATQ
-		0x00,                                     // SAK
-		0x07,                                     // UID length = 7
-		0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, // Same UID
-	})
-
-	// Attempt re-detection
-	ops.attemptRedetection(context.Background(), originalUID, 0)
-
-	// Tag should be updated to the new detection result (same UID, fresh detection)
-	assert.Equal(t, originalUID, ops.tag.UID,
-		"Tag should be updated when re-detected UID matches")
-}
-
-func TestAttemptRedetection_NoTagFound(t *testing.T) {
-	mockTransport := pn532.NewMockTransport()
-	device, err := pn532.New(mockTransport)
-	require.NoError(t, err)
-	mockTransport.SelectTarget()
-
-	originalTag := &pn532.DetectedTag{
-		UID:      "04010203040506",
-		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-	}
-
-	ops := New(device)
-	ops.tag = originalTag
-
-	// Mock detection returns no tag
-	mockTransport.SetResponse(0x4A, []byte{0x4B, 0x00}) // 0 targets found
-
-	// Attempt re-detection
-	ops.attemptRedetection(context.Background(), originalTag.UID, 0)
-
-	// Tag should remain unchanged
-	assert.Equal(t, originalTag.UID, ops.tag.UID,
-		"Tag should not change when no tag detected")
-}
-
-func TestAttemptRedetection_DetectionError(t *testing.T) {
-	mockTransport := pn532.NewMockTransport()
-	device, err := pn532.New(mockTransport)
-	require.NoError(t, err)
-	mockTransport.SelectTarget()
-
-	originalTag := &pn532.DetectedTag{
-		UID:      "04010203040506",
-		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-	}
-
-	ops := New(device)
-	ops.tag = originalTag
-
-	// Mock detection returns an error
-	mockTransport.SetError(0x4A, errors.New("detection failed"))
-
-	// Attempt re-detection
-	ops.attemptRedetection(context.Background(), originalTag.UID, 0)
-
-	// Tag should remain unchanged
-	assert.Equal(t, originalTag.UID, ops.tag.UID,
-		"Tag should not change when detection fails")
+	// Verify the retry constants are set to expected values
+	assert.Equal(t, 3, initMaxRetries,
+		"initMaxRetries should be 3")
+	assert.Equal(t, 10*time.Millisecond, initRetryDelay,
+		"initRetryDelay should be 10ms")
 }

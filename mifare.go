@@ -215,8 +215,9 @@ func (t *MIFARETag) SetRetryConfig(config *RetryConfig) {
 	}
 }
 
-// authenticateNDEF authenticates to a sector using NDEF standard key with robust retry
-func (t *MIFARETag) authenticateNDEF(ctx context.Context, sector uint8, keyType byte) error {
+// authenticateWithNDEFKey authenticates to a sector using NDEF standard key with robust retry.
+// This only tries the NDEF key - use authenticateWithKeyFallback if you need to try common keys.
+func (t *MIFARETag) authenticateWithNDEFKey(ctx context.Context, sector uint8, keyType byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -251,11 +252,11 @@ func (t *MIFARETag) ReadBlockAuto(ctx context.Context, block uint8) ([]byte, err
 
 	if needAuth {
 		// Try Key A first, then Key B
-		err := t.authenticateNDEF(ctx, sector, MIFAREKeyA)
+		err := t.authenticateWithNDEFKey(ctx, sector, MIFAREKeyA)
 		if err != nil {
 			// Re-select tag before trying Key B - failed auth leaves tag in HALT state
 			_, _ = t.device.InListPassiveTarget(ctx, 0x00)
-			err = t.authenticateNDEF(ctx, sector, MIFAREKeyB)
+			err = t.authenticateWithNDEFKey(ctx, sector, MIFAREKeyB)
 			if err != nil {
 				return nil, fmt.Errorf("failed to authenticate to sector %d: %w", sector, err)
 			}
@@ -277,11 +278,11 @@ func (t *MIFARETag) WriteBlockAuto(ctx context.Context, block uint8, data []byte
 	if t.lastAuthSector != int(sector) {
 		// For write operations, typically Key B is required (but this depends on access bits)
 		// Try Key B first, then Key A
-		err := t.authenticateNDEF(ctx, sector, MIFAREKeyB)
+		err := t.authenticateWithNDEFKey(ctx, sector, MIFAREKeyB)
 		if err != nil {
 			// Re-select tag before trying Key A - failed auth leaves tag in HALT state
 			_, _ = t.device.InListPassiveTarget(ctx, 0x00)
-			err = t.authenticateNDEF(ctx, sector, MIFAREKeyA)
+			err = t.authenticateWithNDEFKey(ctx, sector, MIFAREKeyA)
 			if err != nil {
 				return fmt.Errorf("failed to authenticate to sector %d: %w", sector, err)
 			}
@@ -577,9 +578,9 @@ func (t *MIFARETag) getTagCapacityParams() (maxSectors uint8, initialCapacity in
 
 func (t *MIFARETag) authenticateSector(ctx context.Context, sector uint8) error {
 	// Try to authenticate to the sector with Key A
-	if err := t.authenticateNDEF(ctx, sector, MIFAREKeyA); err != nil {
+	if err := t.authenticateWithNDEFKey(ctx, sector, MIFAREKeyA); err != nil {
 		// Try Key B if Key A failed
-		return t.authenticateNDEF(ctx, sector, MIFAREKeyB)
+		return t.authenticateWithNDEFKey(ctx, sector, MIFAREKeyB)
 	}
 	return nil
 }
@@ -656,7 +657,7 @@ func (t *MIFARETag) WriteNDEF(ctx context.Context, message *NDEFMessage) error {
 		return fmt.Errorf("failed to build NDEF message: %w", err)
 	}
 
-	authResult, err := t.authenticateForNDEF(ctx)
+	authResult, err := t.authenticateWithKeyFallback(ctx)
 	if err != nil {
 		return err
 	}
@@ -703,10 +704,24 @@ func (t *MIFARETag) tryAuthWithBothKeys(ctx context.Context, sector uint8, key [
 	if t.AuthenticateRobust(ctx, sector, MIFAREKeyA, key) == nil {
 		return true
 	}
+	// Re-select tag before trying Key B - failed auth leaves tag in HALT state
+	_, _ = t.device.InListPassiveTarget(ctx, 0x00)
 	return t.AuthenticateRobust(ctx, sector, MIFAREKeyB, key) == nil
 }
 
-func (t *MIFARETag) authenticateForNDEF(ctx context.Context) (*authenticationResult, error) {
+// TryAuthenticate attempts to authenticate to sector 1 using NDEF key first,
+// then falling back to common keys (factory default, etc.).
+// Returns nil if any key works, error otherwise.
+// Use this when initializing or checking if a tag can be read.
+func (t *MIFARETag) TryAuthenticate(ctx context.Context) error {
+	_, err := t.authenticateWithKeyFallback(ctx)
+	return err
+}
+
+// authenticateWithKeyFallback tries to authenticate to sector 1, first with the NDEF key,
+// then falling back to common keys (factory default, etc.). Returns info about which key worked.
+// Use this when initializing or when the tag's key is unknown.
+func (t *MIFARETag) authenticateWithKeyFallback(ctx context.Context) (*authenticationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1051,15 +1066,17 @@ func (t *MIFARETag) authenticateWithRetry(ctx context.Context, sector uint8, key
 	return fmt.Errorf("%w after %d attempts: %w", ErrTagAuthFailed, t.config.RetryConfig.MaxAttempts, lastErr)
 }
 
-// getRetryLevel determines the retry level based on attempt number
+// getRetryLevel determines the retry level based on attempt number.
+// With MaxAttempts=3, attempts are 0,1,2 so thresholds must allow
+// retryHeavy to be reached on attempt 2 for RF field cycling.
 func (*MIFARETag) getRetryLevel(attempt int) retryLevel {
 	switch {
-	case attempt < 2:
+	case attempt < 1:
 		return retryLight
-	case attempt < 3:
+	case attempt < 2:
 		return retryModerate
-	case attempt < 4:
-		return retryHeavy
+	case attempt < 3:
+		return retryHeavy // RF field cycle on attempt 2
 	default:
 		return retryNuclear
 	}
@@ -1094,21 +1111,13 @@ func (t *MIFARETag) applyRetryStrategy(ctx context.Context, level retryLevel, _ 
 		return nil
 
 	case retryHeavy:
-		// Heavy: RF field reset sequence (if device supports it)
-		// Note: This would require device-level support for field control
-		// For now, we do a longer reinitialization sequence
-		for range 3 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			// InRelease clears HALT/auth states before re-detection
-			_ = t.device.InRelease(ctx)
-			_, err := t.device.InListPassiveTarget(ctx, 0x00)
-			if err == nil {
-				break
-			}
-			time.Sleep(t.config.HardwareDelay)
+		// Heavy: RF field reset sequence clears stuck PN532 state
+		if err := t.device.CycleRFField(); err != nil {
+			Debugf("RF field cycle failed: %v", err)
 		}
+
+		// Re-detect tag after RF reset
+		_, _ = t.device.InListPassiveTarget(ctx, 0x00)
 
 		t.authMutex.Lock()
 		t.lastAuthSector = -1

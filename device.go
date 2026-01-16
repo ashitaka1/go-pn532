@@ -410,6 +410,30 @@ func (d *Device) SetPollingRetries(mxRtyATR byte) error {
 	return nil
 }
 
+// CycleRFField turns the RF field off and back on to reset PN532 state.
+// This clears stuck conditions after authentication failures.
+// Timing: 50ms off, 50ms on, 50ms settle (per docs/hardware-mifare-clone-research.md)
+func (d *Device) CycleRFField() error {
+	// Turn RF field OFF
+	_, err := d.transport.SendCommand(cmdRFConfiguration, []byte{0x01, 0x00})
+	if err != nil {
+		return fmt.Errorf("failed to turn RF field off: %w", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Turn RF field ON
+	_, err = d.transport.SendCommand(cmdRFConfiguration, []byte{0x01, 0x01})
+	if err != nil {
+		return fmt.Errorf("failed to turn RF field on: %w", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Settle time
+	time.Sleep(50 * time.Millisecond)
+
+	return nil
+}
+
 // Close closes the device connection
 func (d *Device) Close() error {
 	if d.transport != nil {

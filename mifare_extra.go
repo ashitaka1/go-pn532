@@ -134,10 +134,10 @@ func (t *MIFARETag) FormatForNDEF(ctx context.Context) error {
 	return nil
 }
 
-// authenticateForNDEFAlternative checks if the tag is NDEF formatted using the
+// authenticateWithKeyFallbackAlt checks if the tag is NDEF formatted using the
 // specific formatting scheme created by FormatForNDEF. This is used internally
 // by the alternative NDEF writing methods.
-func (t *MIFARETag) authenticateForNDEFAlternative(ctx context.Context) (*authenticationResult, error) {
+func (t *MIFARETag) authenticateWithKeyFallbackAlt(ctx context.Context) (*authenticationResult, error) {
 	result := &authenticationResult{}
 
 	// Try to authenticate with NDEF key on sector 1
@@ -171,7 +171,7 @@ func (t *MIFARETag) WriteNDEFAlternative(ctx context.Context, message *NDEFMessa
 	}
 
 	// Verify tag is formatted correctly
-	_, err = t.authenticateForNDEFAlternative(ctx)
+	_, err = t.authenticateWithKeyFallbackAlt(ctx)
 	if err != nil {
 		return err
 	}
@@ -233,10 +233,10 @@ func (t *MIFARETag) WriteBlockAutoAlternative(ctx context.Context, block uint8, 
 	// Check if we need to authenticate to this sector
 	if t.lastAuthSector != int(sector) {
 		// For write operations, try Key B first (typically required for writes)
-		err := t.authenticateNDEFAlternative(ctx, sector, MIFAREKeyB)
+		err := t.authenticateWithNDEFKeyAlt(ctx, sector, MIFAREKeyB)
 		if err != nil {
 			// Fallback to Key A
-			err = t.authenticateNDEFAlternative(ctx, sector, MIFAREKeyA)
+			err = t.authenticateWithNDEFKeyAlt(ctx, sector, MIFAREKeyA)
 			if err != nil {
 				return fmt.Errorf("failed to authenticate to sector %d: %w", sector, err)
 			}
@@ -246,9 +246,9 @@ func (t *MIFARETag) WriteBlockAutoAlternative(ctx context.Context, block uint8, 
 	return t.WriteBlock(ctx, block, data)
 }
 
-// authenticateNDEFAlternative handles authentication for the alternative NDEF methods.
+// authenticateWithNDEFKeyAlt handles authentication for the alternative NDEF methods.
 // It uses the known key layout from FormatForNDEF to optimize authentication.
-func (t *MIFARETag) authenticateNDEFAlternative(ctx context.Context, sector uint8, keyType byte) error {
+func (t *MIFARETag) authenticateWithNDEFKeyAlt(ctx context.Context, sector uint8, keyType byte) error {
 	switch keyType {
 	case MIFAREKeyA:
 		return t.AuthenticateRobust(ctx, sector, keyType, ndefKey)

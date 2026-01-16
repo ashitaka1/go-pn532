@@ -26,6 +26,10 @@ import (
 	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 )
 
+// pollCycleTimeout limits how long a single poll cycle can take.
+// Prevents PN532 from hanging indefinitely after bad auth attempts.
+const pollCycleTimeout = 10 * time.Second
+
 // Session handles continuous card monitoring with state machine
 type Session struct {
 	lastPollTime         time.Time
@@ -397,6 +401,13 @@ func (s *Session) runPollingLoop(ctx context.Context, cycleFunc func(context.Con
 		return fmt.Errorf("failed to configure hardware polling retries: %w", err)
 	}
 
+	// Set device timeout to match hardware retries plus buffer
+	// Each retry is ~150ms, plus 1s buffer for host/driver overhead
+	hwTimeout := time.Duration(s.config.HardwareTimeoutRetries)*150*time.Millisecond + time.Second
+	if err := s.device.SetTimeout(hwTimeout); err != nil {
+		return fmt.Errorf("failed to set device timeout: %w", err)
+	}
+
 	ticker := time.NewTicker(s.config.PollInterval)
 	defer ticker.Stop()
 
@@ -422,7 +433,11 @@ func (s *Session) executeSinglePollingCycle(ctx context.Context) error {
 		return err // Recovery failed - exit polling loop
 	}
 
-	detectedTag, err := s.performSinglePoll(ctx)
+	// Add timeout to prevent PN532 from hanging indefinitely after bad auth attempts
+	pollCtx, cancel := context.WithTimeout(ctx, pollCycleTimeout)
+	defer cancel()
+
+	detectedTag, err := s.performSinglePoll(pollCtx)
 	if err != nil {
 		if !errors.Is(err, ErrNoTagInPoll) {
 			s.handlePollingError(err)
@@ -675,8 +690,7 @@ func (s *Session) processPollingResults(detectedTag *pn532.DetectedTag) error {
 }
 
 // handleCallbackFailure handles callback failures or RF errors during callback execution.
-// Always returns nil to continue polling - we never give up on a card that's physically present.
-// The card will be retried on each poll until either success or physical removal.
+// Returns nil to continue polling - the per-cycle timeout handles giving up on stuck cards.
 func (s *Session) handleCallbackFailure(failureErr error) error {
 	s.stateMutex.Lock()
 	s.state.ConsecutiveStableFailures++
@@ -685,7 +699,16 @@ func (s *Session) handleCallbackFailure(failureErr error) error {
 	s.stateMutex.Unlock()
 
 	pn532.Debugf("Callback failed (attempt %d, will retry): %v", failures, failureErr)
-	return nil // Never give up, always retry
+
+	// After first callback failure, cycle RF field to clear stuck state
+	// This prevents PN532 from hanging on subsequent InListPassiveTarget calls
+	// Note: Threshold is 1 (not 3) because hangs occur immediately after auth failures
+	if failures >= 1 {
+		pn532.Debugf("Cycling RF field to clear stuck state")
+		_ = s.device.CycleRFField()
+	}
+
+	return nil
 }
 
 // verifyTagStable confirms the detected tag has stable RF contact by attempting
