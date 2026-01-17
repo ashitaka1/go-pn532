@@ -25,15 +25,21 @@ import (
 
 // ParseNDEFMessage parses a complete NDEF message using go-ndef
 func ParseNDEFMessage(data []byte) (*NDEFMessage, error) {
-	// Validate NDEF message structure first
-	if err := ValidateNDEFMessage(data); err != nil {
-		return nil, fmt.Errorf("invalid NDEF message: %w", err)
-	}
-
-	// Strip TLV wrapper if present
+	// Extract payload first to check if we have any NDEF content
 	payload := extractNDEFPayload(data)
 	if payload == nil {
 		return nil, ErrNoNDEF
+	}
+
+	// Empty payload is valid - just means no NDEF records
+	// This handles cases like [03 00 FE] - valid TLV structure with zero-length NDEF
+	if len(payload) == 0 {
+		return &NDEFMessage{}, nil
+	}
+
+	// Validate NDEF message structure for non-empty payloads
+	if err := ValidateNDEFMessage(data); err != nil {
+		return nil, fmt.Errorf("invalid NDEF message: %w", err)
 	}
 
 	// Parse NDEF message

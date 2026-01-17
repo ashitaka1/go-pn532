@@ -259,45 +259,22 @@ func TestReadNDEFWithRetry_SuccessOnFirstAttempt(t *testing.T) {
 	assert.Equal(t, 1, callCount)
 }
 
-func TestReadNDEFWithRetry_RetryOnEmptyData(t *testing.T) {
+func TestReadNDEFWithRetry_EmptyDataIsValidSuccess(t *testing.T) {
 	t.Parallel()
 
 	callCount := 0
-	expectedMsg := &NDEFMessage{
-		Records: []NDEFRecord{{Type: NDEFTypeText, Text: "test"}},
-	}
+	emptyMsg := &NDEFMessage{}
 	readFunc := func() (*NDEFMessage, error) {
 		callCount++
-		if callCount < 3 {
-			return &NDEFMessage{}, nil // Empty data
-		}
-		return expectedMsg, nil
+		return emptyMsg, nil // Empty data is valid (e.g., tag with [03 00 FE] TLV)
 	}
 	isRetryable := func(_ error) bool { return true }
 
 	msg, err := readNDEFWithRetry(readFunc, isRetryable, "TEST")
 
-	require.NoError(t, err)
-	assert.Equal(t, expectedMsg, msg)
-	assert.Equal(t, 3, callCount)
-}
-
-func TestReadNDEFWithRetry_EmptyDataExhausted(t *testing.T) {
-	t.Parallel()
-
-	callCount := 0
-	readFunc := func() (*NDEFMessage, error) {
-		callCount++
-		return &NDEFMessage{}, nil // Always empty
-	}
-	isRetryable := func(_ error) bool { return true }
-
-	msg, err := readNDEFWithRetry(readFunc, isRetryable, "TEST")
-
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrTagEmptyData)
-	assert.Nil(t, msg)
-	assert.Equal(t, 3, callCount)
+	require.NoError(t, err, "empty NDEF should be valid, not an error")
+	assert.Equal(t, emptyMsg, msg)
+	assert.Equal(t, 1, callCount, "should succeed on first attempt, no retries needed")
 }
 
 func TestReadNDEFWithRetry_NonRetryableError(t *testing.T) {

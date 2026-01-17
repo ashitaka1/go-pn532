@@ -57,25 +57,10 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 			return nil, err
 		}
 
-		// Check if we got valid, non-empty data
-		if msg != nil && len(msg.Records) > 0 {
-			// Success! We got valid data
+		// Success - we got a valid response (even if empty, that's a valid state)
+		// Empty NDEF (e.g., [03 00 FE] TLV) is legitimate - tag just has no records
+		if i > 0 {
 			Debugf("%s NDEF read successful on attempt %d", tagType, i+1)
-			return msg, nil
-		}
-
-		// We got a valid response but it's empty - this is the "empty valid tag" issue
-		if i < NDEFMaxRetries-1 {
-			delay := retryDelays[i]
-			Debugf("%s NDEF read attempt %d returned empty data (retrying after %v)", tagType, i+1, delay)
-			time.Sleep(delay)
-			continue
-		}
-
-		// All retries exhausted with empty data - this is the "empty valid tag" issue
-		Debugf("%s NDEF read exhausted retries with empty data", tagType)
-		if msg == nil || len(msg.Records) == 0 {
-			return nil, ErrTagEmptyData
 		}
 		return msg, nil
 	}

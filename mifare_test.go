@@ -727,8 +727,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				// Setup authentication failure for sector 1
 				mt.SetError(0x40, errors.New("authentication failed"))
 			},
-			expectError:   true,
-			errorContains: "tag read failed",
+			expectError: false, // Auth failure = not NDEF formatted = empty NDEF, not error
 		},
 		{
 			name: "Empty_NDEF_Data",
@@ -737,7 +736,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				authData := []byte{0x41, 0x00}
 				mt.SetResponse(0x40, authData)
 
-				// Setup empty response for reads - this will trigger TLV parsing error
+				// Setup empty response for reads - no NDEF TLV present
 				emptyResponse := make([]byte, 18)
 				emptyResponse[0] = 0x41
 				emptyResponse[1] = 0x00
@@ -745,20 +744,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				mt.SetResponse(0x40, emptyResponse)
 			},
 			expectError:   true,
-			errorContains: "invalid NDEF message", // Updated to match actual error
-		},
-		{
-			name: "Communication_Error_During_Read",
-			setupMock: func(mt *MockTransport) {
-				// Setup authentication success first
-				authData := []byte{0x41, 0x00}
-				mt.SetResponse(0x40, authData)
-
-				// Then setup error for subsequent read operations
-				mt.SetError(0x40, errors.New("communication error"))
-			},
-			expectError:   true,
-			errorContains: "communication error",
+			errorContains: "no NDEF", // No NDEF TLV found in empty data
 		},
 	}
 

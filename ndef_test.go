@@ -215,23 +215,23 @@ func TestParseNDEFMessage(t *testing.T) {
 				return []byte{}
 			},
 			expectError:   true,
-			errorContains: "invalid NDEF message",
+			errorContains: "no NDEF", // No TLV data at all
 		},
 		{
 			name: "Invalid_Header",
 			setupData: func() []byte {
-				return []byte{0x01, 0x02, 0x03} // Invalid NDEF header
+				return []byte{0x01, 0x02, 0x03} // No NDEF TLV marker
 			},
 			expectError:   true,
-			errorContains: "invalid NDEF message",
+			errorContains: "no NDEF", // No NDEF TLV found
 		},
 		{
 			name: "Truncated_Data",
 			setupData: func() []byte {
-				return []byte{0x03, 0x05} // Valid header but truncated
+				return []byte{0x03, 0x05} // NDEF TLV but truncated
 			},
 			expectError:   true,
-			errorContains: "invalid NDEF message",
+			errorContains: "no NDEF", // TLV extraction fails
 		},
 	}
 

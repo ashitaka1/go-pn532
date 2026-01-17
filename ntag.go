@@ -138,6 +138,7 @@ type NTAGTag struct {
 	fastReadSupported *bool
 	BaseTag
 	tagType NTAGType
+	hasNDEF bool // true if tag has valid NDEF CC (magic byte 0xE1)
 }
 
 // AccessControlConfig holds the access control settings for NTAG tags
@@ -156,7 +157,15 @@ func NewNTAGTag(device *Device, uid []byte, sak byte) *NTAGTag {
 			device:  device,
 			sak:     sak,
 		},
+		hasNDEF: true, // Assume NDEF capability; Init will set false if no valid CC
 	}
+}
+
+// HasNDEF returns true if the tag has a valid NDEF capability container.
+// Non-NDEF tags (Amiibo, Lego Dimensions, etc.) return false but are still
+// valid for UID reading and raw data access via ReadBlock/ReadAll.
+func (t *NTAGTag) HasNDEF() bool {
+	return t.hasNDEF
 }
 
 // ReadBlock reads a block from the NTAG tag
@@ -242,9 +251,18 @@ func isRetryableError(err error) bool {
 }
 
 // ReadNDEF reads NDEF data from the NTAG tag using FastRead for optimal performance
+//
+//nolint:gocognit,revive // Complexity from necessary error handling and NDEF capability check
 func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+
+	// Non-NDEF tags (Amiibo, Lego Dimensions, etc.) don't have valid NDEF CC
+	// Return empty message immediately - the tag is still valid for UID/raw data
+	if !t.hasNDEF {
+		Debugf("NTAG ReadNDEF: tag has no NDEF CC, returning empty message")
+		return &NDEFMessage{}, nil
 	}
 
 	// Ensure target is selected before reading. This is defensive against any prior
@@ -1121,6 +1139,7 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 			Debugf("NTAG CC too short (%d bytes), using probe-based detection", len(ccData))
 		}
 		t.tagType = t.detectTypeByProbing(ctx)
+		t.hasNDEF = false // No valid NDEF CC - skip NDEF operations
 		return nil
 	}
 
@@ -1128,6 +1147,7 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// This avoids GET_VERSION which uses InCommunicateThru and can cause
 	// target selection issues on marginal RF connections
 	t.tagType = t.detectTypeFromCapabilityContainer(ccData)
+	// hasNDEF remains true (set in constructor)
 
 	return nil
 }

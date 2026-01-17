@@ -1839,6 +1839,14 @@ func TestNTAGDetectType_NonNDEFTag_UsesProbing(t *testing.T) {
 	require.NoError(t, err, "Non-NDEF tag should be detected via probing")
 	assert.Equal(t, NTAGType215, tag.tagType,
 		"Tag should be detected as NTAG215 (page 45 accessible, page 135 not)")
+
+	// Non-NDEF tag should have hasNDEF = false
+	assert.False(t, tag.HasNDEF(), "Non-NDEF tag should have HasNDEF() = false")
+
+	// ReadNDEF should return empty message without error for non-NDEF tags
+	msg, err := tag.ReadNDEF(context.Background())
+	require.NoError(t, err, "ReadNDEF should not error for non-NDEF tags")
+	assert.Empty(t, msg.Records, "ReadNDEF should return empty message for non-NDEF tags")
 }
 
 func TestNTAGDetectType_NonNDEFTag_NTAG213(t *testing.T) {

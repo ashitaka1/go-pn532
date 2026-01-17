@@ -572,7 +572,7 @@ func (t *MIFARETag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 
 		if err := t.authenticateSector(ctx, sector); err != nil {
 			if sector == 1 {
-				return nil, fmt.Errorf("%w: tag may not be NDEF formatted: %w", ErrTagReadFailed, err)
+				return t.handleSector1AuthError(err)
 			}
 			break
 		}
@@ -608,6 +608,17 @@ func (t *MIFARETag) authenticateSector(ctx context.Context, sector uint8) error 
 		return t.authenticateWithNDEFKey(ctx, sector, MIFAREKeyB)
 	}
 	return nil
+}
+
+// handleSector1AuthError determines how to handle an authentication error on sector 1.
+// Communication errors propagate; auth failures (wrong key) mean the tag isn't NDEF formatted.
+func (*MIFARETag) handleSector1AuthError(err error) (*NDEFMessage, error) {
+	if isCommunicationError(err) {
+		return nil, fmt.Errorf("%w: %w", ErrTagReadFailed, err)
+	}
+	// Auth failure means tag doesn't use NDEF key - return empty NDEF
+	// (consistent with NTAG behavior for non-NDEF formatted tags)
+	return &NDEFMessage{}, nil
 }
 
 type ndefReadState int
@@ -1220,6 +1231,16 @@ func isTransportLockup(err error) bool {
 		Debugf("isTransportLockup: err=%v, isNoACK=%v", err, result)
 	}
 	return result
+}
+
+// isCommunicationError returns true if the error is a transport/communication error
+// vs an authentication failure (wrong key). Communication errors should propagate;
+// auth failures may indicate a non-NDEF formatted tag.
+func isCommunicationError(err error) bool {
+	return errors.Is(err, ErrTransportTimeout) ||
+		errors.Is(err, ErrNoACK) ||
+		errors.Is(err, ErrTagReadFailed) ||
+		errors.Is(err, ErrFrameCorrupted)
 }
 
 // clearAuthState clears the cached authentication state
