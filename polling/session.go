@@ -636,11 +636,8 @@ func (s *Session) handlePollingError(err error) {
 		return
 	}
 
-	// For serious device errors, trigger immediate card removal
-	// This handles cases like device disconnection
-	s.handleCardRemoval()
-
 	// If this is a fatal error (device disconnected), notify via callback
+	// but do NOT trigger card removal - the card wasn't removed, the reader was
 	if pn532.IsFatal(err) {
 		s.stateMutex.RLock()
 		onDisconnected := s.OnDeviceDisconnected
@@ -649,7 +646,11 @@ func (s *Session) handlePollingError(err error) {
 		if onDisconnected != nil {
 			onDisconnected(err)
 		}
+		return
 	}
+
+	// For non-fatal errors, trigger card removal (transient comm issues)
+	s.handleCardRemoval()
 }
 
 // handleCardRemoval handles card removal state changes

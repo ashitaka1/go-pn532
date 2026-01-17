@@ -1281,6 +1281,42 @@ func TestSession_OnDeviceDisconnected(t *testing.T) {
 	})
 }
 
+// TestSession_FatalErrorDoesNotTriggerCardRemoved verifies that fatal errors
+// (device disconnection) don't incorrectly fire OnCardRemoved before OnDeviceDisconnected.
+func TestSession_FatalErrorDoesNotTriggerCardRemoved(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Simulate card was present
+	session.stateMutex.Lock()
+	session.state.Present = true
+	session.state.LastUID = "04123456789ABC"
+	session.stateMutex.Unlock()
+
+	var cardRemovedCalled bool
+	var disconnectedCalled bool
+	session.SetOnCardRemoved(func() {
+		cardRemovedCalled = true
+	})
+	session.SetOnDeviceDisconnected(func(_ error) {
+		disconnectedCalled = true
+	})
+
+	// Create a fatal error (device disconnected)
+	fatalErr := &pn532.TransportError{
+		Op:   "test",
+		Port: "test",
+		Err:  pn532.ErrDeviceNotFound,
+		Type: pn532.ErrorTypePermanent,
+	}
+
+	session.handlePollingError(fatalErr)
+
+	assert.True(t, disconnectedCalled, "OnDeviceDisconnected should be called")
+	assert.False(t, cardRemovedCalled, "OnCardRemoved should NOT be called for fatal errors")
+}
+
 func TestSession_HandleCardRemoval(t *testing.T) {
 	t.Parallel()
 
