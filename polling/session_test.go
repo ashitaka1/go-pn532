@@ -1889,7 +1889,7 @@ func TestSession_VerifyTagStable(t *testing.T) {
 
 		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
 
-		stable := session.verifyTagStable()
+		stable := session.verifyTagStable(context.Background())
 		assert.True(t, stable)
 	})
 
@@ -1900,7 +1900,7 @@ func TestSession_VerifyTagStable(t *testing.T) {
 
 		mockTransport.SetError(0x54, errors.New("timeout"))
 
-		stable := session.verifyTagStable()
+		stable := session.verifyTagStable(context.Background())
 		assert.False(t, stable)
 	})
 }

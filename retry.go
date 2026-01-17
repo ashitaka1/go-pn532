@@ -95,8 +95,8 @@ func executeWithRetry(ctx context.Context, config *RetryConfig, retryFunc Retrya
 		lastErr = err
 
 		if attempt < config.MaxAttempts-1 {
-			sleep := calculateJitteredSleep(backoff, config.Jitter)
-			if err := sleepWithContext(ctx, sleep, lastErr); err != nil {
+			delay := calculateJitteredSleep(backoff, config.Jitter)
+			if err := sleep(ctx, delay, lastErr); err != nil {
 				return err
 			}
 			backoff = calculateNextBackoff(backoff, config)
@@ -118,8 +118,8 @@ func checkContextCancellation(ctx context.Context, lastErr error) error {
 	}
 }
 
-func sleepWithContext(ctx context.Context, sleep time.Duration, lastErr error) error {
-	timer := time.NewTimer(sleep)
+func sleep(ctx context.Context, d time.Duration, lastErr error) error {
+	timer := time.NewTimer(d)
 	defer timer.Stop()
 
 	select {

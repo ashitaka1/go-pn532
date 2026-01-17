@@ -17,6 +17,7 @@
 package uart
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -226,7 +227,7 @@ func TestUART_GetFirmwareVersion(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Command 0x02 = GetFirmwareVersion
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -245,7 +246,7 @@ func TestUART_SAMConfiguration(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM: Normal mode (0x01), timeout 0x14, use IRQ
-	resp, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -260,11 +261,11 @@ func TestUART_InListPassiveTarget_NoTags(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM first (required for some commands)
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// InListPassiveTarget: MaxTg=1, BrTy=0x00 (ISO14443A 106 kbps)
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode, NbTg] - 0 tags found
@@ -284,11 +285,11 @@ func TestUART_InListPassiveTarget_WithTag(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM first
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// InListPassiveTarget: MaxTg=1, BrTy=0x00 (ISO14443A 106 kbps)
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode, NbTg, Tg, SENS_RES(2), SEL_RES, NFCIDLength, NFCID1...]
@@ -314,15 +315,15 @@ func TestUART_InDataExchange_ReadBlock(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tag
-	_, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InDataExchange: Tg=1, READ command (0x30), page 4
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode, Status, Data...]
@@ -346,15 +347,15 @@ func TestUART_InDataExchange_WriteBlock(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tag
-	_, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InDataExchange: Tg=1, WRITE command (0xA2), page 4, data
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0xA2, 0x04, 0xCA, 0xFE, 0xBA, 0xBE})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0xA2, 0x04, 0xCA, 0xFE, 0xBA, 0xBE})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode, Status]
@@ -363,7 +364,7 @@ func TestUART_InDataExchange_WriteBlock(t *testing.T) {
 	assert.Equal(t, byte(0x00), resp[1], "Status should be 0x00 (success)")
 
 	// Verify the write by reading back
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 6)
 	assert.Equal(t, byte(0xCA), resp[2])
@@ -383,11 +384,11 @@ func TestUART_MIFAREClassic_Authentication(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tag
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 3)
 	assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
@@ -400,7 +401,7 @@ func TestUART_MIFAREClassic_Authentication(t *testing.T) {
 		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Default Key A
 		0x01, 0x02, 0x03, 0x04,
 	} // UID
-	resp, err = transport.SendCommand(0x40, authCmd)
+	resp, err = transport.SendCommand(context.Background(), 0x40, authCmd)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 2)
 	assert.Equal(t, byte(0x41), resp[0], "Response code should be 0x41")
@@ -417,15 +418,15 @@ func TestUART_InRelease(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tag
-	_, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Release tag (Tg=1)
-	resp, err := transport.SendCommand(0x52, []byte{0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x52, []byte{0x01})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 2)
 	assert.Equal(t, byte(0x53), resp[0], "Response code should be 0x53")
@@ -442,7 +443,7 @@ func TestUART_RFConfiguration(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// RFConfiguration: CfgItem=0x01 (RF Field), data=0x01 (on)
-	resp, err := transport.SendCommand(0x32, []byte{0x01, 0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x32, []byte{0x01, 0x01})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -451,7 +452,7 @@ func TestUART_RFConfiguration(t *testing.T) {
 	assert.True(t, state.RFFieldOn, "RF field should be on")
 
 	// Turn RF field off
-	_, err = transport.SendCommand(0x32, []byte{0x01, 0x00})
+	_, err = transport.SendCommand(context.Background(), 0x32, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	state = sim.GetState()
@@ -464,11 +465,11 @@ func TestUART_PowerDown(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM first
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Send PowerDown with WakeUpEnable byte set to 0x00
-	resp, err := transport.SendCommand(0x16, []byte{0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x16, []byte{0x00})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -530,12 +531,12 @@ func TestUART_FeliCaDetection(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// InListPassiveTarget: MaxTg=1, BrTy=0x01 (FeliCa 212 kbps)
 	// Payload data for FeliCa polling: length, polling command, system code, request code, time slot
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x00})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode (0x4B), NbTg, ...]
@@ -555,11 +556,11 @@ func TestUART_MIFARE4K_Detection(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tag
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 6)
 	assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
@@ -579,11 +580,11 @@ func TestUART_MultipleTagsSequential(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tags (MaxTg=2 to detect both)
-	resp, err := transport.SendCommand(0x4A, []byte{0x02, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x02, 0x00})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 2)
 	assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
@@ -607,7 +608,7 @@ func TestUART_ErrorScenarios(t *testing.T) {
 		transport := newTestTransport(sim)
 
 		// Send an invalid/unknown command (0xFF is not a valid PN532 command)
-		resp, err := transport.SendCommand(0xFF, nil)
+		resp, err := transport.SendCommand(context.Background(), 0xFF, nil)
 		// The simulator should handle unknown commands gracefully
 		// It returns an error frame with error code errCommand (0x27)
 		require.NoError(t, err)
@@ -623,18 +624,18 @@ func TestUART_ErrorScenarios(t *testing.T) {
 		transport := newTestTransport(sim)
 
 		// Configure SAM
-		_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+		_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 		require.NoError(t, err)
 
 		// Detect tag
-		_, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		_, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		require.NoError(t, err)
 
 		// Remove the tag
 		tag.Remove()
 
 		// Try to read - should fail
-		resp, err := transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+		resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 		// Should get error or empty response
 		_ = resp
 		_ = err
@@ -661,7 +662,7 @@ func TestUART_Jittery_GetFirmwareVersion(t *testing.T) {
 	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
 	transport := newJitteryTestTransport(sim, defaultJitterConfig())
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -677,7 +678,7 @@ func TestUART_Jittery_SAMConfiguration(t *testing.T) {
 	sim := virt.NewVirtualPN532()
 	transport := newJitteryTestTransport(sim, defaultJitterConfig())
 
-	resp, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -693,11 +694,11 @@ func TestUART_Jittery_TagDetection(t *testing.T) {
 	transport := newJitteryTestTransport(sim, defaultJitterConfig())
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tag
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 7)
 	assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
@@ -712,21 +713,21 @@ func TestUART_Jittery_ReadWriteCycle(t *testing.T) {
 	transport := newJitteryTestTransport(sim, defaultJitterConfig())
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tag
-	_, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Write data
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0xA2, 0x04, 0xAA, 0xBB, 0xCC, 0xDD})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0xA2, 0x04, 0xAA, 0xBB, 0xCC, 0xDD})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 2)
 	assert.Equal(t, byte(0x00), resp[1], "Write should succeed")
 
 	// Read it back
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 6)
 	assert.Equal(t, byte(0xAA), resp[2])
@@ -743,11 +744,11 @@ func TestUART_Jittery_MIFAREAuth(t *testing.T) {
 	transport := newJitteryTestTransport(sim, defaultJitterConfig())
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tag
-	_, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Authenticate
@@ -756,7 +757,7 @@ func TestUART_Jittery_MIFAREAuth(t *testing.T) {
 		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 		0x01, 0x02, 0x03, 0x04,
 	}
-	resp, err := transport.SendCommand(0x40, authCmd)
+	resp, err := transport.SendCommand(context.Background(), 0x40, authCmd)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 2)
 	assert.Equal(t, byte(0x00), resp[1], "Auth should succeed")
@@ -772,21 +773,21 @@ func TestUART_Jittery_MultipleCommands(t *testing.T) {
 	// Run 20 command cycles
 	for i := range 20 {
 		// Configure SAM
-		_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+		_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 		require.NoError(t, err, "SAM config failed on iteration %d", i)
 
 		// Get firmware version
-		resp, err := transport.SendCommand(0x02, nil)
+		resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 		require.NoError(t, err, "GetFirmwareVersion failed on iteration %d", i)
 		assert.Len(t, resp, 5)
 
 		// Detect tag
-		resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		resp, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		require.NoError(t, err, "InListPassiveTarget failed on iteration %d", i)
 		assert.Equal(t, byte(0x01), resp[1], "Should detect tag on iteration %d", i)
 
 		// Release tag
-		_, err = transport.SendCommand(0x52, []byte{0x01})
+		_, err = transport.SendCommand(context.Background(), 0x52, []byte{0x01})
 		require.NoError(t, err, "InRelease failed on iteration %d", i)
 	}
 }
@@ -806,16 +807,16 @@ func TestUART_Jittery_USBBoundaryStress(t *testing.T) {
 	transport := newJitteryTestTransport(sim, config)
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Detect tag
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x01), resp[1], "Should detect tag")
 
 	// Read data
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[1], "Read should succeed")
 }
@@ -834,7 +835,7 @@ func TestUART_Jittery_StallAfterHeader(t *testing.T) {
 	}
 	transport := newJitteryTestTransport(sim, config)
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Len(t, resp, 5)
@@ -857,21 +858,21 @@ func TestUART_Jittery_AggressiveFragmentation(t *testing.T) {
 	transport := newJitteryTestTransport(sim, config)
 
 	// Configure SAM
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Get firmware
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	assert.Len(t, resp, 5)
 
 	// Detect tag
-	resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x01), resp[1])
 
 	// Read from tag
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[1])
 }
@@ -894,7 +895,7 @@ func TestUART_PreACKGarbage_SimpleBytes(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// Despite garbage, command should succeed
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed despite pre-ACK garbage")
 	require.NotNil(t, resp)
 
@@ -916,7 +917,7 @@ func TestUART_PreACKGarbage_FakeFrameStart(t *testing.T) {
 
 	transport := newTestTransport(sim)
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed despite fake frame start garbage")
 	require.NotNil(t, resp)
 
@@ -934,7 +935,7 @@ func TestUART_PreACKGarbage_SingleByte(t *testing.T) {
 
 	transport := newTestTransport(sim)
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed with single garbage byte")
 	require.NotNil(t, resp)
 	assert.Len(t, resp, 5)
@@ -954,7 +955,7 @@ func TestUART_PreACKGarbage_LongGarbage(t *testing.T) {
 
 	transport := newTestTransport(sim)
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed with long garbage")
 	require.NotNil(t, resp)
 	assert.Len(t, resp, 5)
@@ -969,14 +970,14 @@ func TestUART_PreACKGarbage_WithTagDetection(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// First configure SAM without garbage
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Now inject garbage for tag detection
 	sim.InjectPreACKGarbage([]byte{0xDE, 0xAD, 0xBE, 0xEF})
 
 	// Detect tag - should work despite garbage
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err, "Tag detection should succeed despite pre-ACK garbage")
 
 	// Verify tag was detected
@@ -996,17 +997,17 @@ func TestUART_PreACKGarbage_MultipleCommands(t *testing.T) {
 	transport := newTestTransport(sim)
 
 	// First command - should handle garbage
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	assert.Len(t, resp, 5)
 
 	// Second command - should work without garbage
-	resp, err = transport.SendCommand(0x02, nil)
+	resp, err = transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	assert.Len(t, resp, 5)
 
 	// Third command - also clean
-	resp, err = transport.SendCommand(0x02, nil)
+	resp, err = transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	assert.Len(t, resp, 5)
 }
@@ -1022,7 +1023,7 @@ func TestUART_PreACKGarbage_AllZeros(t *testing.T) {
 
 	transport := newTestTransport(sim)
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed with all-zero garbage")
 	require.NotNil(t, resp)
 	assert.Len(t, resp, 5)
@@ -1046,7 +1047,7 @@ func TestUART_PreACKGarbage_WithJitter(t *testing.T) {
 	transport := newJitteryTestTransport(sim, config)
 
 	// Command should succeed despite both garbage AND jitter
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed with garbage and jitter")
 	require.NotNil(t, resp)
 	assert.Len(t, resp, 5)
@@ -1069,7 +1070,7 @@ func TestUART_ZombieMode_Basic(t *testing.T) {
 	_ = transport.SetTimeout(50 * time.Millisecond)
 
 	// Command should time out - ACK is received but no response
-	_, err := transport.SendCommand(0x02, nil)
+	_, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.Error(t, err, "Command should fail in zombie mode")
 
 	// Error should be a transport error (timeout type)
@@ -1087,7 +1088,7 @@ func TestUART_ZombieMode_Recovery(t *testing.T) {
 
 	// First: Enable zombie mode and verify timeout
 	sim.SetZombieMode(true)
-	_, err := transport.SendCommand(0x02, nil)
+	_, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.Error(t, err, "Command should fail in zombie mode")
 
 	// Reset the simulator (clears buffers and zombie mode)
@@ -1095,7 +1096,7 @@ func TestUART_ZombieMode_Recovery(t *testing.T) {
 	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
 
 	// Now command should succeed
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed after disabling zombie mode")
 	require.NotNil(t, resp)
 	assert.Len(t, resp, 5)
@@ -1112,7 +1113,7 @@ func TestUART_ZombieMode_MultipleCommands(t *testing.T) {
 
 	// Multiple commands should all time out
 	for i := range 3 {
-		_, err := transport.SendCommand(0x02, nil)
+		_, err := transport.SendCommand(context.Background(), 0x02, nil)
 		require.Error(t, err, "Command %d should fail in zombie mode", i+1)
 	}
 }
@@ -1126,7 +1127,7 @@ func TestUART_ZombieMode_SAMConfiguration(t *testing.T) {
 	_ = transport.SetTimeout(50 * time.Millisecond)
 
 	// SAM Configuration should also time out in zombie mode
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.Error(t, err, "SAMConfiguration should fail in zombie mode")
 }
 
@@ -1158,7 +1159,7 @@ func TestUART_ZombieMode_InListPassiveTarget(t *testing.T) {
 	transport := newTestTransport(sim)
 	_ = transport.SetTimeout(50 * time.Millisecond)
 
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 
 	// Zombie mode + InListPassiveTarget = "no tags" response (not an error)
 	// This matches real PN532 behavior where no-tag and unresponsive are identical
@@ -1175,7 +1176,7 @@ func TestUART_ZombieMode_TraceIncluded(t *testing.T) {
 	transport := newTestTransport(sim)
 	_ = transport.SetTimeout(50 * time.Millisecond)
 
-	_, err := transport.SendCommand(0x02, nil)
+	_, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.Error(t, err)
 
 	// Error should include trace information
@@ -1220,7 +1221,7 @@ func TestUART_RapidPolling_Basic(t *testing.T) {
 	var successCount, errorCount int
 
 	for range numPolls {
-		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00}) // InListPassiveTarget
+		resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00}) // InListPassiveTarget
 		if err != nil {
 			errorCount++
 			continue
@@ -1255,7 +1256,7 @@ func TestUART_RapidPolling_WithJitter(t *testing.T) {
 	var successCount, errorCount int
 
 	for range numPolls {
-		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		if err != nil {
 			errorCount++
 			continue
@@ -1288,7 +1289,7 @@ func TestUART_RapidPolling_TagTransitions(t *testing.T) {
 			sim.RemoveAllTags()
 		}
 
-		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		require.NoError(t, err, "Poll should not error")
 		require.GreaterOrEqual(t, len(resp), 2)
 
@@ -1316,7 +1317,7 @@ func TestUART_RapidPolling_Recovery(t *testing.T) {
 
 	// Phase 1: Normal polling
 	for range 10 {
-		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		require.NoError(t, err)
 		assert.Equal(t, byte(0x4B), resp[0])
 	}
@@ -1324,7 +1325,7 @@ func TestUART_RapidPolling_Recovery(t *testing.T) {
 	// Phase 2: Enable zombie mode (simulates device hang)
 	sim.SetZombieMode(true)
 	for range 5 {
-		_, _ = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		_, _ = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		// Errors expected (synthetic response for InListPassiveTarget)
 	}
 
@@ -1332,7 +1333,7 @@ func TestUART_RapidPolling_Recovery(t *testing.T) {
 	sim.SetZombieMode(false)
 	var recoverySuccess int
 	for range 10 {
-		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		if err == nil && len(resp) >= 2 && resp[0] == 0x4B {
 			recoverySuccess++
 		}
@@ -1357,19 +1358,19 @@ func TestUART_RapidPolling_MixedCommands(t *testing.T) {
 
 	for range iterations {
 		// InListPassiveTarget
-		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		if err == nil && len(resp) >= 2 && resp[0] == 0x4B {
 			pollSuccess++
 		}
 
 		// GetFirmwareVersion (response: [0x03, IC, Ver, Rev, Support] = 5 bytes)
-		resp, err = transport.SendCommand(0x02, nil)
+		resp, err = transport.SendCommand(context.Background(), 0x02, nil)
 		if err == nil && len(resp) == 5 {
 			fwSuccess++
 		}
 
 		// SAMConfiguration
-		_, err = transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+		_, err = transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 		if err == nil {
 			samSuccess++
 		}
@@ -1400,7 +1401,7 @@ func TestUART_RapidPolling_AggressiveJitter(t *testing.T) {
 	var successCount int
 
 	for range numPolls {
-		resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		if err == nil && len(resp) >= 2 && resp[0] == 0x4B {
 			successCount++
 		}
@@ -1428,7 +1429,7 @@ func TestUART_PowerGlitch_Basic(t *testing.T) {
 	sim.SetPowerGlitch(5)
 
 	// Command should fail (truncated response can't be parsed)
-	_, err := transport.SendCommand(0x02, nil) // GetFirmwareVersion
+	_, err := transport.SendCommand(context.Background(), 0x02, nil) // GetFirmwareVersion
 	require.Error(t, err, "Truncated frame should cause error")
 
 	// Error should be a transport error
@@ -1446,7 +1447,7 @@ func TestUART_PowerGlitch_Recovery(t *testing.T) {
 
 	// First: Cause a power glitch
 	sim.SetPowerGlitch(3)
-	_, err := transport.SendCommand(0x02, nil)
+	_, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.Error(t, err, "First command should fail due to glitch")
 
 	// Power glitch is one-shot, so next command should work
@@ -1459,7 +1460,7 @@ func TestUART_PowerGlitch_Recovery(t *testing.T) {
 	_ = transport.SetTimeout(100 * time.Millisecond)
 
 	// Now command should succeed
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed after recovery")
 	require.NotNil(t, resp)
 	assert.Len(t, resp, 5, "GetFirmwareVersion should return 5 bytes")
@@ -1489,7 +1490,7 @@ func TestUART_PowerGlitch_AtVariousPoints(t *testing.T) {
 			sim.SetPowerGlitch(tc.offset)
 
 			// Command should fail gracefully (no panic)
-			_, err := transport.SendCommand(0x02, nil)
+			_, err := transport.SendCommand(context.Background(), 0x02, nil)
 			require.Error(t, err, "Truncated frame at offset %d should cause error", tc.offset)
 		})
 	}
@@ -1511,7 +1512,7 @@ func TestUART_PowerGlitch_NoPanic(t *testing.T) {
 		sim.SetPowerGlitch(i)
 
 		// This should not panic
-		_, _ = transport.SendCommand(0x4A, []byte{0x01, 0x00}) // InListPassiveTarget
+		_, _ = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00}) // InListPassiveTarget
 	}
 
 	// If we get here without panic, test passes
@@ -1536,7 +1537,7 @@ func TestUART_CollisionMode_DetectsNoTags(t *testing.T) {
 	_ = transport.SetTimeout(100 * time.Millisecond)
 
 	// InListPassiveTarget should return NbTg=0 due to collision
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err, "Collision should not cause transport error")
 	require.NotNil(t, resp)
 
@@ -1556,7 +1557,7 @@ func TestUART_CollisionMode_SingleTagStillWorks(t *testing.T) {
 	_ = transport.SetTimeout(100 * time.Millisecond)
 
 	// Single tag should still be detected
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -1581,7 +1582,7 @@ func TestUART_MultiTag_DetectTwo(t *testing.T) {
 	_ = transport.SetTimeout(100 * time.Millisecond)
 
 	// Request MaxTg=2
-	resp, err := transport.SendCommand(0x4A, []byte{0x02, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x02, 0x00})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -1608,7 +1609,7 @@ func TestUART_MultiTag_SwitchWithInSelect(t *testing.T) {
 	_ = transport.SetTimeout(100 * time.Millisecond)
 
 	// First: Detect both tags
-	resp, err := transport.SendCommand(0x4A, []byte{0x02, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x02, 0x00})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x02), resp[1], "Should detect 2 tags")
 
@@ -1616,7 +1617,7 @@ func TestUART_MultiTag_SwitchWithInSelect(t *testing.T) {
 	assert.Equal(t, 1, sim.GetState().SelectedTarget)
 
 	// Switch to tag 2 using InSelect
-	resp, err = transport.SendCommand(0x54, []byte{0x02}) // InSelect target 2
+	resp, err = transport.SendCommand(context.Background(), 0x54, []byte{0x02}) // InSelect target 2
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x55), resp[0], "Response should be InSelect response")
 	assert.Equal(t, byte(0x00), resp[1], "Status should be success")
@@ -1625,13 +1626,14 @@ func TestUART_MultiTag_SwitchWithInSelect(t *testing.T) {
 	assert.Equal(t, 2, sim.GetState().SelectedTarget)
 
 	// Read from tag 2 (should work) - note: tg=0x02 must match selected target
-	resp, err = transport.SendCommand(0x40, []byte{0x02, 0x30, 0x04}) // InDataExchange: read block 4
+	// InDataExchange: read block 4
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x02, 0x30, 0x04})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x41), resp[0], "Response should be InDataExchange response")
 	assert.Equal(t, byte(0x00), resp[1], "Status should be success")
 
 	// Switch back to tag 1
-	resp, err = transport.SendCommand(0x54, []byte{0x01}) // InSelect target 1
+	resp, err = transport.SendCommand(context.Background(), 0x54, []byte{0x01}) // InSelect target 1
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[1], "InSelect to tag 1 should succeed")
 	assert.Equal(t, 1, sim.GetState().SelectedTarget)
@@ -1649,7 +1651,7 @@ func TestUART_MultiTag_MixedTypes(t *testing.T) {
 	_ = transport.SetTimeout(100 * time.Millisecond)
 
 	// Request MaxTg=2
-	resp, err := transport.SendCommand(0x4A, []byte{0x02, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x02, 0x00})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -1674,7 +1676,7 @@ func TestUART_ACKRetry_SingleFailure(t *testing.T) {
 	_ = transport.SetTimeout(500 * time.Millisecond)
 
 	// Command should succeed after retry
-	resp, err := transport.SendCommand(0x02, nil) // GetFirmwareVersion
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil) // GetFirmwareVersion
 	require.NoError(t, err, "Command should succeed after ACK retry")
 	require.NotNil(t, resp)
 
@@ -1695,7 +1697,7 @@ func TestUART_ACKRetry_TwoFailures(t *testing.T) {
 	_ = transport.SetTimeout(500 * time.Millisecond)
 
 	// Command should succeed on third attempt
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed after 2 ACK retries")
 	require.NotNil(t, resp)
 
@@ -1715,7 +1717,7 @@ func TestUART_ACKRetry_AllRetriesExhausted(t *testing.T) {
 	_ = transport.SetTimeout(200 * time.Millisecond)
 
 	// Command should fail after exhausting retries
-	_, err := transport.SendCommand(0x02, nil)
+	_, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.Error(t, err, "Command should fail when all ACK retries exhausted")
 	assert.Contains(t, err.Error(), "ACK retries", "Error should mention ACK retries")
 }
@@ -1730,14 +1732,14 @@ func TestUART_ACKRetry_WithTagDetection(t *testing.T) {
 	_ = transport.SetTimeout(500 * time.Millisecond)
 
 	// Configure SAM first (without ACK failures)
-	_, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Now set up ACK failure for tag detection
 	sim.SetACKFailures(1)
 
 	// Tag detection should succeed after retry
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err, "Tag detection should succeed after ACK retry")
 	require.GreaterOrEqual(t, len(resp), 2)
 	assert.Equal(t, byte(0x4B), resp[0], "Response code should be 0x4B")
@@ -1756,17 +1758,17 @@ func TestUART_ACKRetry_MultipleCommandsSequence(t *testing.T) {
 
 	// First command: GetFirmwareVersion with 1 ACK failure
 	sim.SetACKFailures(1)
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "GetFirmwareVersion should succeed after retry")
 	assert.Len(t, resp, 5)
 
 	// Second command: SAMConfiguration with no failures (ACK failures exhausted)
-	_, err = transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	_, err = transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err, "SAMConfiguration should succeed")
 
 	// Third command: InListPassiveTarget with 1 ACK failure
 	sim.SetACKFailures(1)
-	resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err, "InListPassiveTarget should succeed after retry")
 	assert.Equal(t, byte(0x01), resp[1], "Should detect 1 tag")
 }
@@ -1790,7 +1792,7 @@ func TestUART_ACKRetry_WithJitter(t *testing.T) {
 	_ = transport.SetTimeout(500 * time.Millisecond)
 
 	// Command should succeed despite both ACK failure and jitter
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "Command should succeed with ACK retry and jitter")
 	require.NotNil(t, resp)
 	assert.Len(t, resp, 5)
@@ -1806,13 +1808,13 @@ func TestUART_ACKRetry_RecoveryAfterFailure(t *testing.T) {
 
 	// Command with ACK failures
 	sim.SetACKFailures(2)
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err, "First command should succeed after retries")
 	assert.Len(t, resp, 5)
 
 	// Subsequent commands should work normally without any ACK issues
 	for i := range 5 {
-		resp, err = transport.SendCommand(0x02, nil)
+		resp, err = transport.SendCommand(context.Background(), 0x02, nil)
 		require.NoError(t, err, "Command %d should succeed normally", i+1)
 		assert.Len(t, resp, 5)
 	}
@@ -1946,7 +1948,7 @@ func TestUART_DisconnectDetection_DeadlineExceeded(t *testing.T) {
 	_ = transport.SetTimeout(100 * time.Millisecond)
 
 	start := time.Now()
-	_, err := transport.SendCommand(0x02, nil) // GetFirmwareVersion
+	_, err := transport.SendCommand(context.Background(), 0x02, nil) // GetFirmwareVersion
 	elapsed := time.Since(start)
 
 	// Should return an error (timeout), not hang forever

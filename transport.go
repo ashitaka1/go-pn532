@@ -27,11 +27,8 @@ import (
 // Transport defines the interface for communication with PN532 devices.
 // This can be implemented by UART, I2C, or SPI backends.
 type Transport interface {
-	// SendCommand sends a command to the PN532 and waits for response
-	SendCommand(cmd byte, args []byte) ([]byte, error)
-
-	// SendCommandWithContext sends a command to the PN532 with context support
-	SendCommandWithContext(ctx context.Context, cmd byte, args []byte) ([]byte, error)
+	// SendCommand sends a command to the PN532 with context support
+	SendCommand(ctx context.Context, cmd byte, args []byte) ([]byte, error)
 
 	// Close closes the transport connection
 	Close() error
@@ -136,61 +133,8 @@ func NewMockTransport() *MockTransport {
 	}
 }
 
-// SendCommand implements Transport interface
-func (m *MockTransport) SendCommand(cmd byte, data []byte) ([]byte, error) {
-	m.mu.RLock()
-	connected := m.connected
-	delay := m.delay
-	m.mu.RUnlock()
-
-	if !connected {
-		return nil, errors.New("transport not connected")
-	}
-
-	// Validate PN532 state machine
-	if err := m.validateState(cmd); err != nil {
-		return nil, err
-	}
-
-	// Simulate hardware delay if configured
-	if delay > 0 {
-		time.Sleep(delay)
-	}
-
-	m.mu.Lock()
-	// Track call count
-	m.callCount[cmd]++
-
-	// Check for injected error
-	if err, exists := m.errorMap[cmd]; exists {
-		m.mu.Unlock()
-		return nil, err
-	}
-
-	// Update state based on command
-	m.updateState(cmd, data)
-
-	// Check queue first (for sequential different responses)
-	if queue, exists := m.responseQueue[cmd]; exists && len(queue) > 0 {
-		response := queue[0]
-		m.responseQueue[cmd] = queue[1:] // Pop from queue
-		m.mu.Unlock()
-		return response, nil
-	}
-
-	// Return configured response (fallback/default)
-	if response, exists := m.responses[cmd]; exists {
-		m.mu.Unlock()
-		return response, nil
-	}
-	m.mu.Unlock()
-
-	// Default responses for common commands that expect specific formats
-	return m.defaultResponse(cmd)
-}
-
-// SendCommandWithContext implements Transport interface with context support
-func (m *MockTransport) SendCommandWithContext(ctx context.Context, cmd byte, data []byte) ([]byte, error) {
+// SendCommand implements Transport interface with context support
+func (m *MockTransport) SendCommand(ctx context.Context, cmd byte, data []byte) ([]byte, error) {
 	// Check context cancellation first
 	select {
 	case <-ctx.Done():

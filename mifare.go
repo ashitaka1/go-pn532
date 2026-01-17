@@ -1500,8 +1500,8 @@ func (t *MIFARETag) formatForNDEFWithKey(ctx context.Context, blankKey []byte) e
 }
 
 // DebugInfo returns detailed debug information about the MIFARE tag
-func (t *MIFARETag) DebugInfo() string {
-	return t.DebugInfoWithNDEF(t)
+func (t *MIFARETag) DebugInfo(ctx context.Context) string {
+	return t.DebugInfoWithNDEF(ctx, t)
 }
 
 // WriteText writes a simple text record to the MIFARE tag

@@ -158,7 +158,7 @@ func connectToDevice(ctx context.Context, cfg *config) (*pn532.Device, error) {
 	// Set reasonable timeout
 	connectOpts = append(connectOpts, pn532.WithConnectTimeout(5*time.Second))
 
-	device, err := pn532.ConnectDevice(cfg.devicePath, connectOpts...)
+	device, err := pn532.ConnectDevice(ctx, cfg.devicePath, connectOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to PN532 device: %w", err)
 	}

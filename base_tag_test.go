@@ -346,7 +346,7 @@ func TestBaseTag_DebugInfo(t *testing.T) {
 				sak:     tt.sak,
 			}
 
-			result := tag.DebugInfo()
+			result := tag.DebugInfo(context.Background())
 
 			// Verify the debug info contains expected information
 			assert.Contains(t, result, string(tt.tagType))
@@ -372,7 +372,7 @@ func TestBaseTag_DebugInfoWithNDEF(t *testing.T) {
 	}
 
 	// Pass the tag itself as the NDEF reader interface (it implements ReadNDEF)
-	result := tag.DebugInfoWithNDEF(tag)
+	result := tag.DebugInfoWithNDEF(context.Background(), tag)
 
 	// Should contain basic debug info
 	assert.Contains(t, result, "NTAG")

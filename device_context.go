@@ -24,8 +24,8 @@ import (
 	"time"
 )
 
-// InitContext initializes the PN532 device with context support
-func (d *Device) InitContext(ctx context.Context) error {
+// Init initializes the PN532 device with context support
+func (d *Device) Init(ctx context.Context) error {
 	skipFirmwareVersion := d.shouldSkipFirmwareVersion()
 
 	// Test with GetFirmwareVersion first to see if any PN532 commands work via PC/SC
@@ -42,7 +42,7 @@ func (d *Device) InitContext(ctx context.Context) error {
 
 	// Configure finite passive activation retries to prevent infinite wait lockups
 	// Each retry is ~100ms per PN532 datasheet, so 10 retries = ~1 second
-	if err := d.SetPassiveActivationRetries(DefaultPassiveActivationRetries); err != nil {
+	if err := d.SetPassiveActivationRetries(ctx, DefaultPassiveActivationRetries); err != nil {
 		// Log but don't fail initialization - this is an optimization, not critical
 		// Some older firmware versions might not support this configuration
 		_ = err
@@ -75,7 +75,7 @@ func (d *Device) Reset(ctx context.Context) error {
 	d.firmwareVersion = nil
 
 	// Reinitialize the device
-	return d.InitContext(ctx)
+	return d.Init(ctx)
 }
 
 // HardReset performs a "nuclear" recovery by closing and reopening the transport
@@ -181,7 +181,7 @@ func (d *Device) setDefaultFirmwareVersion() {
 
 // GetFirmwareVersion returns the PN532 firmware version
 func (d *Device) GetFirmwareVersion(ctx context.Context) (*FirmwareVersion, error) {
-	res, err := d.transport.SendCommandWithContext(ctx, cmdGetFirmwareVersion, []byte{})
+	res, err := d.transport.SendCommand(ctx, cmdGetFirmwareVersion, []byte{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to send GetFirmwareVersion command: %w", err)
 	}
@@ -287,7 +287,7 @@ func (*Device) createDefaultFirmwareVersion() *FirmwareVersion {
 
 // GetGeneralStatus returns the PN532 general status with context support
 func (d *Device) GetGeneralStatus(ctx context.Context) (*GeneralStatus, error) {
-	res, err := d.transport.SendCommandWithContext(ctx, cmdGetGeneralStatus, []byte{})
+	res, err := d.transport.SendCommand(ctx, cmdGetGeneralStatus, []byte{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to send GetGeneralStatus command: %w", err)
 	}
@@ -307,7 +307,7 @@ func (d *Device) Diagnose(ctx context.Context, testNumber byte, data []byte) (*D
 	// Build command: TestNumber + optional data
 	cmdPayload := append([]byte{testNumber}, data...)
 
-	res, err := d.transport.SendCommandWithContext(ctx, cmdDiagnose, cmdPayload)
+	res, err := d.transport.SendCommand(ctx, cmdDiagnose, cmdPayload)
 	if err != nil {
 		return nil, fmt.Errorf("diagnose command failed: %w", err)
 	}
@@ -371,7 +371,7 @@ func (d *Device) setupSAMConfiguration(ctx context.Context) error {
 
 // SAMConfiguration configures the SAM with context support
 func (d *Device) SAMConfiguration(ctx context.Context, mode SAMMode, timeout, irq byte) error {
-	res, err := d.transport.SendCommandWithContext(ctx, cmdSamConfiguration, []byte{byte(mode), timeout, irq})
+	res, err := d.transport.SendCommand(ctx, cmdSamConfiguration, []byte{byte(mode), timeout, irq})
 	if err != nil {
 		return fmt.Errorf("SAM configuration command failed: %w", err)
 	}
@@ -572,7 +572,7 @@ func (d *Device) SendDataExchange(ctx context.Context, data []byte) ([]byte, err
 	} else {
 		Debugf("SendDataExchange: target=%d, data=(empty), len=0", targetNum)
 	}
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInDataExchange, append([]byte{targetNum}, data...))
+	res, err := d.transport.SendCommand(ctx, cmdInDataExchange, append([]byte{targetNum}, data...))
 	if err != nil {
 		return nil, fmt.Errorf("failed to send data exchange command: %w", err)
 	}
@@ -651,7 +651,7 @@ func (d *Device) SendDataExchangeWithRetry(ctx context.Context, data []byte) ([]
 // SendRawCommand sends a raw command with context support
 func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error) {
 	const targetNum byte = 1
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInCommunicateThru, data)
+	res, err := d.transport.SendCommand(ctx, cmdInCommunicateThru, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send communicate through command: %w", err)
 	}
@@ -674,7 +674,7 @@ func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error
 // InRelease releases all selected targets with context support
 func (d *Device) InRelease(ctx context.Context) error {
 	// Always release all targets (target 0 = release all)
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInRelease, []byte{0x00})
+	res, err := d.transport.SendCommand(ctx, cmdInRelease, []byte{0x00})
 	if err != nil {
 		return fmt.Errorf("InRelease command failed: %w", err)
 	}
@@ -697,7 +697,7 @@ func (d *Device) InRelease(ctx context.Context) error {
 // Use InSelect after InDeselect to wake up HALTed tags with WUPA.
 func (d *Device) InDeselect(ctx context.Context) error {
 	// Deselect all targets (target 0 = all targets)
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInDeselect, []byte{0x00})
+	res, err := d.transport.SendCommand(ctx, cmdInDeselect, []byte{0x00})
 	if err != nil {
 		return fmt.Errorf("InDeselect command failed: %w", err)
 	}
@@ -718,7 +718,7 @@ func (d *Device) InDeselect(ctx context.Context) error {
 func (d *Device) InSelect(ctx context.Context) error {
 	const targetNumber byte = 1
 	Debugf("InSelect: selecting target %d", targetNumber)
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInSelect, []byte{targetNumber})
+	res, err := d.transport.SendCommand(ctx, cmdInSelect, []byte{targetNumber})
 	if err != nil {
 		Debugf("InSelect: command failed: %v", err)
 		return fmt.Errorf("InSelect command failed: %w", err)
@@ -761,7 +761,7 @@ func (d *Device) InAutoPoll(
 		data = append(data, byte(tt))
 	}
 
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInAutoPoll, data)
+	res, err := d.transport.SendCommand(ctx, cmdInAutoPoll, data)
 	if err != nil {
 		return nil, fmt.Errorf("InAutoPoll command failed: %w", err)
 	}
@@ -866,13 +866,13 @@ func (d *Device) executeInListPassiveTarget(ctx context.Context, data []byte) ([
 	// Restore previous timeout after the command completes
 	defer func() { _ = d.transport.SetTimeout(prevTimeout) }()
 
-	Debugln("executeInListPassiveTarget: calling SendCommandWithContext")
-	result, err := d.transport.SendCommandWithContext(ctx, cmdInListPassiveTarget, data)
+	Debugln("executeInListPassiveTarget: calling SendCommand")
+	result, err := d.transport.SendCommand(ctx, cmdInListPassiveTarget, data)
 	if err != nil {
-		Debugf("executeInListPassiveTarget: SendCommandWithContext failed: %v", err)
+		Debugf("executeInListPassiveTarget: SendCommand failed: %v", err)
 		return nil, fmt.Errorf("failed to send InListPassiveTarget command: %w", err)
 	}
-	Debugf("executeInListPassiveTarget: SendCommandWithContext succeeded, result len=%d", len(result))
+	Debugf("executeInListPassiveTarget: SendCommand succeeded, result len=%d", len(result))
 	return result, nil
 }
 
@@ -1124,7 +1124,7 @@ func (d *Device) fallbackToInAutoPoll(ctx context.Context, brTy byte) (*Detected
 
 // PowerDown puts the PN532 into power down mode with context support
 func (d *Device) PowerDown(ctx context.Context, wakeupEnable, irqEnable byte) error {
-	res, err := d.transport.SendCommandWithContext(ctx, cmdPowerDown, []byte{wakeupEnable, irqEnable})
+	res, err := d.transport.SendCommand(ctx, cmdPowerDown, []byte{wakeupEnable, irqEnable})
 	if err != nil {
 		return fmt.Errorf("PowerDown command failed: %w", err)
 	}

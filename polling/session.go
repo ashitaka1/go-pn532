@@ -402,7 +402,7 @@ func (s *Session) continuousPolling(ctx context.Context) error {
 func (s *Session) runPollingLoop(ctx context.Context, cycleFunc func(context.Context) error) error {
 	// Configure PN532 hardware polling retries to reduce host-side polling frequency
 	// This tells the PN532 to retry detection internally before returning to the host
-	if err := s.device.SetPollingRetries(s.config.HardwareTimeoutRetries); err != nil {
+	if err := s.device.SetPollingRetries(ctx, s.config.HardwareTimeoutRetries); err != nil {
 		return fmt.Errorf("failed to configure hardware polling retries: %w", err)
 	}
 
@@ -695,7 +695,7 @@ func (s *Session) processPollingResults(ctx context.Context, detectedTag *pn532.
 	// LAYER 1: Verify RF stability before processing
 	// This catches marginal RF connections (e.g., card sliding in from the side)
 	// before we run callbacks that might fail and leave the card in a stuck state.
-	if !s.verifyTagStable() {
+	if !s.verifyTagStable(ctx) {
 		// RF unstable - skip this cycle silently, reset failure counter
 		// The card will be re-detected on the next poll if still present
 		s.stateMutex.Lock()
@@ -765,7 +765,7 @@ func (s *Session) handleCallbackFailure(ctx context.Context, failureErr error) e
 	// Note: Threshold is 1 (not 3) because hangs occur immediately after auth failures
 	if failures >= 1 {
 		pn532.Debugf("Cycling RF field to clear stuck state")
-		if err := s.device.CycleRFField(); errors.Is(err, pn532.ErrNoACK) {
+		if err := s.device.CycleRFField(ctx); errors.Is(err, pn532.ErrNoACK) {
 			pn532.Debugln("NoACK during CycleRFField - attempting hard reset")
 			s.attemptHardReset(ctx)
 		}
@@ -779,13 +779,13 @@ func (s *Session) handleCallbackFailure(ctx context.Context, failureErr error) e
 // callbacks that might fail and leave the card in a "stuck" state.
 //
 // Returns true if tag responds to InSelect, false if RF appears unstable.
-func (s *Session) verifyTagStable() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+func (s *Session) verifyTagStable(ctx context.Context) bool {
+	selectCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 
 	// InSelect verifies the target is still valid and responsive
 	// If RF is marginal (e.g., card sliding in), this will fail
-	err := s.device.InSelect(ctx)
+	err := s.device.InSelect(selectCtx)
 	if err != nil {
 		pn532.Debugf("RF unstable (InSelect failed): %v", err)
 		return false

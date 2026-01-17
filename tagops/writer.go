@@ -77,7 +77,7 @@ func (t *TagOperations) WriteNDEF(ctx context.Context, msg *pn532.NDEFMessage) e
 }
 
 // writeNTAGBlocks writes blocks to NTAG
-func (t *TagOperations) writeNTAGBlocks(_ context.Context, startBlock byte, data []byte) error {
+func (t *TagOperations) writeNTAGBlocks(ctx context.Context, startBlock byte, data []byte) error {
 	// Convert block to page
 	startPage := startBlock
 
@@ -109,7 +109,7 @@ func (t *TagOperations) writeNTAGBlocks(_ context.Context, startBlock byte, data
 
 		// Write command: 0xA2 page data[4]
 		cmd := append([]byte{0xA2, page}, pageData...)
-		_, err := t.device.SendDataExchange(context.Background(), cmd)
+		_, err := t.device.SendDataExchange(ctx, cmd)
 		if err != nil {
 			return fmt.Errorf("failed to write page %d: %w", page, err)
 		}

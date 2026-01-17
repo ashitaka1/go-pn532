@@ -679,8 +679,8 @@ func (*FeliCaTag) validateAIB(aib []byte) bool {
 }
 
 // DebugInfo returns detailed debug information about the FeliCa tag
-func (f *FeliCaTag) DebugInfo() string {
-	return f.DebugInfoWithNDEF(f)
+func (f *FeliCaTag) DebugInfo(ctx context.Context) string {
+	return f.DebugInfoWithNDEF(ctx, f)
 }
 
 // WriteText writes a simple text record to the FeliCa tag

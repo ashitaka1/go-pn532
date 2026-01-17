@@ -147,21 +147,13 @@ func getDetectors(transports []string) []Detector {
 	return filtered
 }
 
-// DetectAll searches for PN532 devices across all registered transports
-func DetectAll(opts *Options) ([]DeviceInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
-	defer cancel()
-
-	return DetectAllContext(ctx, opts)
-}
-
 type detectionResult struct {
 	err     error
 	devices []DeviceInfo
 }
 
-// DetectAllContext searches for PN532 devices with custom context
-func DetectAllContext(ctx context.Context, opts *Options) ([]DeviceInfo, error) {
+// DetectAll searches for PN532 devices with custom context
+func DetectAll(ctx context.Context, opts *Options) ([]DeviceInfo, error) {
 	detectors := getDetectors(opts.Transports)
 	if len(detectors) == 0 {
 		return nil, errors.New("no detectors available for specified transports")

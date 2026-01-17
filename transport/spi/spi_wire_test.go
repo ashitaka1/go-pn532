@@ -2,6 +2,7 @@
 package spi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -304,7 +305,7 @@ func TestSPI_GetFirmwareVersion(t *testing.T) {
 	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
 	transport := newTestSPITransport(sim)
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -327,7 +328,7 @@ func TestSPI_SAMConfiguration(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// SAMConfiguration: Mode=0x01 (Normal), Timeout=0x14, IRQ=0x01
-	resp, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// SPI strips response code, so response should be empty for SAMConfiguration
@@ -339,7 +340,7 @@ func TestSPI_InListPassiveTarget_NoTags(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// InListPassiveTarget: MaxTg=1, BrTy=0x00 (106kbps Type A)
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Response: [NbTg=0] (response code is stripped)
@@ -354,7 +355,7 @@ func TestSPI_InListPassiveTarget_WithTag(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// InListPassiveTarget: MaxTg=1, BrTy=0x00 (106kbps Type A)
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Response: [NbTg, Tg, SENS_RES(2), SEL_RES, NFCIDLength, NFCID...]
@@ -370,11 +371,11 @@ func TestSPI_InDataExchange_Read(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// First select the tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InDataExchange: Tg=1, READ command (0x30), page 0
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0x30, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x00})
 	require.NoError(t, err)
 
 	// Response: [Status, Data...] (response code is stripped)
@@ -389,11 +390,11 @@ func TestSPI_InDataExchange_Write(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// Select tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InDataExchange: Tg=1, WRITE command (0xA2), page 4, data
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0xA2, 0x04, 0xDE, 0xAD, 0xBE, 0xEF})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0xA2, 0x04, 0xDE, 0xAD, 0xBE, 0xEF})
 	require.NoError(t, err)
 
 	// Response: [Status]
@@ -410,7 +411,7 @@ func TestSPI_MIFARE_Authentication(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// Select tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InDataExchange: MIFARE Auth with Key A
@@ -421,7 +422,7 @@ func TestSPI_MIFARE_Authentication(t *testing.T) {
 		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Key (default)
 		0x01, 0x02, 0x03, 0x04, // UID
 	}
-	resp, err := transport.SendCommand(0x40, authCmd)
+	resp, err := transport.SendCommand(context.Background(), 0x40, authCmd)
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, len(resp), 1)
@@ -435,7 +436,7 @@ func TestSPI_MIFARE_ReadAfterAuth(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// Select tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Authenticate
@@ -444,11 +445,11 @@ func TestSPI_MIFARE_ReadAfterAuth(t *testing.T) {
 		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 		0x01, 0x02, 0x03, 0x04,
 	}
-	_, err = transport.SendCommand(0x40, authCmd)
+	_, err = transport.SendCommand(context.Background(), 0x40, authCmd)
 	require.NoError(t, err)
 
 	// Read block 4
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, len(resp), 1)
@@ -468,7 +469,7 @@ func TestSPI_FeliCa_Detection(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// InListPassiveTarget for FeliCa: BrTy=0x01 (212kbps FeliCa)
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x00})
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, len(resp), 1)
@@ -482,7 +483,7 @@ func TestSPI_RFConfiguration(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// RFConfiguration: MaxRetries
-	resp, err := transport.SendCommand(0x32, []byte{0x05, 0xFF, 0x01, 0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x32, []byte{0x05, 0xFF, 0x01, 0x01})
 	require.NoError(t, err)
 
 	// Response should be empty (response code stripped)
@@ -496,11 +497,11 @@ func TestSPI_InRelease(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// Select tag first
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InRelease: Tg=0 (release all)
-	resp, err := transport.SendCommand(0x52, []byte{0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x52, []byte{0x00})
 	require.NoError(t, err)
 
 	// Response: [Status] (response code stripped)
@@ -513,7 +514,7 @@ func TestSPI_PowerDown(t *testing.T) {
 	transport := newTestSPITransport(sim)
 
 	// Send PowerDown with WakeUpEnable byte set to 0x00
-	resp, err := transport.SendCommand(0x16, []byte{0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x16, []byte{0x00})
 	require.NoError(t, err)
 
 	// Response: [Status] (response code stripped)
@@ -530,7 +531,7 @@ func TestSPI_PortClosed(t *testing.T) {
 	// Close the underlying port
 	_ = transport.port.Close()
 
-	_, err := transport.SendCommand(0x02, nil)
+	_, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.Error(t, err)
 }
 
@@ -788,7 +789,7 @@ func TestSPI_Jittery_GetFirmwareVersion(t *testing.T) {
 	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
 	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -801,7 +802,7 @@ func TestSPI_Jittery_SAMConfiguration(t *testing.T) {
 	sim := virt.NewVirtualPN532()
 	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
 
-	resp, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 	assert.Empty(t, resp)
 
@@ -815,7 +816,7 @@ func TestSPI_Jittery_TagDetection(t *testing.T) {
 	sim.AddTag(tag)
 	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
 
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 7)
 	assert.Equal(t, byte(0x01), resp[0], "NbTg should be 1")
@@ -828,17 +829,17 @@ func TestSPI_Jittery_ReadWriteCycle(t *testing.T) {
 	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
 
 	// Detect tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Write data
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0xA2, 0x04, 0xAA, 0xBB, 0xCC, 0xDD})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0xA2, 0x04, 0xAA, 0xBB, 0xCC, 0xDD})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 1)
 	assert.Equal(t, byte(0x00), resp[0])
 
 	// Read it back
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 5)
 	assert.Equal(t, byte(0xAA), resp[1])
@@ -854,7 +855,7 @@ func TestSPI_Jittery_MIFAREAuth(t *testing.T) {
 	transport := newJitteryTestSPITransport(sim, defaultSPIJitterConfig())
 
 	// Detect tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Authenticate
@@ -863,7 +864,7 @@ func TestSPI_Jittery_MIFAREAuth(t *testing.T) {
 		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 		0x01, 0x02, 0x03, 0x04,
 	}
-	resp, err := transport.SendCommand(0x40, authCmd)
+	resp, err := transport.SendCommand(context.Background(), 0x40, authCmd)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 1)
 	assert.Equal(t, byte(0x00), resp[0])
@@ -878,17 +879,17 @@ func TestSPI_Jittery_MultipleCommands(t *testing.T) {
 	// Run 10 command cycles
 	for i := range 10 {
 		// Get firmware version
-		resp, err := transport.SendCommand(0x02, nil)
+		resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 		require.NoError(t, err, "GetFirmwareVersion failed on iteration %d", i)
 		assert.GreaterOrEqual(t, len(resp), 4)
 
 		// Detect tag
-		resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		resp, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		require.NoError(t, err, "InListPassiveTarget failed on iteration %d", i)
 		assert.Equal(t, byte(0x01), resp[0])
 
 		// Release tag
-		_, err = transport.SendCommand(0x52, []byte{0x01})
+		_, err = transport.SendCommand(context.Background(), 0x52, []byte{0x01})
 		require.NoError(t, err, "InRelease failed on iteration %d", i)
 	}
 }
@@ -907,12 +908,12 @@ func TestSPI_Jittery_USBBoundaryStress(t *testing.T) {
 	transport := newJitteryTestSPITransport(sim, config)
 
 	// Detect tag
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x01), resp[0])
 
 	// Read data
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[0])
 }
@@ -931,17 +932,17 @@ func TestSPI_Jittery_AggressiveFragmentation(t *testing.T) {
 	transport := newJitteryTestSPITransport(sim, config)
 
 	// Get firmware
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(resp), 4)
 
 	// Detect tag
-	resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x01), resp[0])
 
 	// Read from tag
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[0])
 }

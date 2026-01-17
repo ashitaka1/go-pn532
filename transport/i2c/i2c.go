@@ -109,71 +109,86 @@ func New(busName string) (*Transport, error) {
 	return transport, nil
 }
 
-// SendCommand sends a command to the PN532 and waits for response.
-// Includes automatic retry on ACK failures to prevent device lockup.
-//
-//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
-func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
-	ackRetryDelays := []time.Duration{pn532.TransportACKDelay1, pn532.TransportACKDelay2, pn532.TransportACKDelay3}
+// sleepCtx performs a context-aware sleep. Returns ctx.Err() if context is cancelled.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
-	// Create trace buffer for this command (only used on error)
-	t.currentTrace = pn532.NewTraceBuffer("I2C", t.busName, 16)
-	defer func() { t.currentTrace = nil }() // Clear after command completes
+// isTransientACKError returns true if the error is a transient ACK-level error worth retrying.
+func isTransientACKError(err error) bool {
+	return errors.Is(err, pn532.ErrNoACK) ||
+		errors.Is(err, pn532.ErrNACKReceived) ||
+		errors.Is(err, pn532.ErrFrameCorrupted)
+}
+
+// sendWithACKRetry sends a frame and waits for ACK, retrying on transient errors.
+// Returns nil on success, or the last error if all retries are exhausted.
+func (t *Transport) sendWithACKRetry(ctx context.Context, cmd byte, args []byte) error {
+	delays := []time.Duration{pn532.TransportACKDelay1, pn532.TransportACKDelay2, pn532.TransportACKDelay3}
 
 	var lastErr error
 	for attempt := range pn532.TransportACKRetries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if err := t.sendFrame(cmd, args); err != nil {
-			return nil, t.currentTrace.WrapError(err)
+			return err
 		}
 
-		err := t.waitAck()
+		err := t.waitAck(ctx)
 		if err == nil {
-			// ACK received successfully, proceed to receive response
-			break
+			return nil // ACK received successfully
 		}
-
+		if !isTransientACKError(err) {
+			return err // Non-transient error, don't retry
+		}
 		lastErr = err
 
-		// Only retry on transient ACK-level errors
-		if !errors.Is(err, pn532.ErrNoACK) &&
-			!errors.Is(err, pn532.ErrNACKReceived) &&
-			!errors.Is(err, pn532.ErrFrameCorrupted) {
-			return nil, t.currentTrace.WrapError(err)
-		}
-
-		// Wait before retry
+		// Wait before retry (except on last attempt)
 		if attempt < pn532.TransportACKRetries-1 {
-			time.Sleep(ackRetryDelays[attempt])
-			continue
+			if err := sleepCtx(ctx, delays[attempt]); err != nil {
+				return err
+			}
 		}
+	}
 
-		// All retries exhausted
-		retryErr := fmt.Errorf("send command failed after %d ACK retries: %w", pn532.TransportACKRetries, lastErr)
-		return nil, t.currentTrace.WrapError(retryErr)
+	return fmt.Errorf("send command failed after %d ACK retries: %w", pn532.TransportACKRetries, lastErr)
+}
+
+// SendCommand sends a command to the PN532 and waits for response.
+// Includes automatic retry on ACK failures to prevent device lockup.
+// Context is checked at key points during the operation to allow cancellation.
+//
+//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
+func (t *Transport) SendCommand(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// Create trace buffer for this command (only used on error)
+	t.currentTrace = pn532.NewTraceBuffer("I2C", t.busName, 16)
+	defer func() { t.currentTrace = nil }()
+
+	if err := t.sendWithACKRetry(ctx, cmd, args); err != nil {
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	// Small delay for PN532 to process command
-	time.Sleep(6 * time.Millisecond)
+	if err := sleepCtx(ctx, 6*time.Millisecond); err != nil {
+		return nil, err
+	}
 
-	resp, err := t.receiveFrame()
+	resp, err := t.receiveFrame(ctx)
 	if err != nil {
 		return nil, t.currentTrace.WrapError(err)
 	}
 	return resp, nil
-}
-
-// SendCommandWithContext sends a command to the PN532 with context support
-func (t *Transport) SendCommandWithContext(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
-	// Check if context is already cancelled
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	// For now, delegate to existing implementation
-	// TODO: Add context-aware operations
-	return t.SendCommand(cmd, args)
 }
 
 // SetTimeout sets the read timeout for the transport
@@ -281,7 +296,7 @@ func (t *Transport) sendFrame(cmd byte, args []byte) error {
 }
 
 // waitAck waits for an ACK frame from the PN532
-func (t *Transport) waitAck() error {
+func (t *Transport) waitAck(ctx context.Context) error {
 	deadline := time.Now().Add(t.timeout)
 
 	// Use buffer pool for ACK frame reading
@@ -289,9 +304,18 @@ func (t *Transport) waitAck() error {
 	defer frame.PutBuffer(ackBuf)
 
 	for time.Now().Before(deadline) {
+		// Check context
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		// Check if PN532 is ready
 		if err := t.checkReady(); err != nil {
-			time.Sleep(time.Millisecond)
+			if err := sleepCtx(ctx, time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -305,7 +329,9 @@ func (t *Transport) waitAck() error {
 			return nil
 		}
 
-		time.Sleep(time.Millisecond)
+		if err := sleepCtx(ctx, time.Millisecond); err != nil {
+			return err
+		}
 	}
 
 	t.traceTimeout("No ACK received")
@@ -331,11 +357,18 @@ func (t *Transport) sendNack() error {
 }
 
 // receiveFrame reads a response frame from the PN532
-func (t *Transport) receiveFrame() ([]byte, error) {
+func (t *Transport) receiveFrame(ctx context.Context) ([]byte, error) {
 	deadline := time.Now().Add(t.timeout)
 	const maxTries = 3
 
 	for range maxTries {
+		// Check context
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		if time.Now().After(deadline) {
 			return nil, &pn532.TransportError{
 				Op: "receiveFrame", Port: t.busName,
@@ -345,7 +378,7 @@ func (t *Transport) receiveFrame() ([]byte, error) {
 			}
 		}
 
-		data, shouldRetry, err := t.receiveFrameAttempt()
+		data, shouldRetry, err := t.receiveFrameAttempt(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -369,10 +402,19 @@ func (t *Transport) receiveFrame() ([]byte, error) {
 }
 
 // receiveFrameAttempt performs a single frame receive attempt
-func (t *Transport) receiveFrameAttempt() (data []byte, shouldRetry bool, err error) {
+func (t *Transport) receiveFrameAttempt(ctx context.Context) (data []byte, shouldRetry bool, err error) {
+	// Check context
+	select {
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	default:
+	}
+
 	// Check if PN532 is ready
 	if readyErr := t.checkReady(); readyErr != nil {
-		time.Sleep(time.Millisecond)
+		if sleepErr := sleepCtx(ctx, time.Millisecond); sleepErr != nil {
+			return nil, false, sleepErr
+		}
 		// Device not ready, retry without error
 		return nil, true, nil
 	}

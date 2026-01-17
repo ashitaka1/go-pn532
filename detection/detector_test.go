@@ -354,7 +354,7 @@ func TestGetDetectors_FilterByTransport(t *testing.T) {
 
 // --- DetectAll Error Cases ---
 
-func TestDetectAllContext_NoDetectors(t *testing.T) {
+func TestDetectAll_NoDetectors(t *testing.T) {
 	originalRegistry := registry
 	defer func() { registry = originalRegistry }()
 
@@ -365,13 +365,13 @@ func TestDetectAllContext_NoDetectors(t *testing.T) {
 	opts.Timeout = 100 * time.Millisecond
 
 	ctx := context.Background()
-	_, err := DetectAllContext(ctx, &opts)
+	_, err := DetectAll(ctx, &opts)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no detectors available")
 }
 
-func TestDetectAllContext_Timeout(t *testing.T) {
+func TestDetectAll_Timeout(t *testing.T) {
 	originalRegistry := registry
 	defer func() { registry = originalRegistry }()
 
@@ -383,7 +383,9 @@ func TestDetectAllContext_Timeout(t *testing.T) {
 	opts.Timeout = 10 * time.Millisecond
 	opts.EnableCache = false
 
-	_, err := DetectAll(&opts)
+	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+	defer cancel()
+	_, err := DetectAll(ctx, &opts)
 	require.Error(t, err)
 	assert.Equal(t, ErrDetectionTimeout, err)
 }

@@ -64,7 +64,7 @@ func (*Device) handleDetectionError(errorCount *int, err error) error {
 	return nil
 }
 
-func (*Device) pauseWithContext(ctx context.Context, interval time.Duration) error {
+func (*Device) pause(ctx context.Context, interval time.Duration) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -113,7 +113,7 @@ func (d *Device) WaitForTag(ctx context.Context) (*DetectedTag, error) {
 		detectedTag, err := d.attemptDetection(ctx, &errorCount)
 		if err != nil {
 			// For any error (including ErrNoTagDetected), pause and continue
-			if pauseErr := d.pauseWithContext(ctx, pollInterval); pauseErr != nil {
+			if pauseErr := d.pause(ctx, pollInterval); pauseErr != nil {
 				return nil, pauseErr
 			}
 			continue

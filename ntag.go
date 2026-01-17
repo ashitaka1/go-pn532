@@ -902,7 +902,11 @@ func (t *NTAGTag) FastRead(ctx context.Context, startAddr, endAddr uint8) ([]byt
 // PwdAuth performs password authentication on the NTAG tag
 // password must be exactly 4 bytes (32-bit)
 // Returns the 2-byte PACK (Password ACKnowledge) on success
-func (t *NTAGTag) PwdAuth(password []byte) ([]byte, error) {
+func (t *NTAGTag) PwdAuth(ctx context.Context, password []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if len(password) != 4 {
 		return nil, fmt.Errorf("password must be 4 bytes, got %d", len(password))
 	}
@@ -912,7 +916,7 @@ func (t *NTAGTag) PwdAuth(password []byte) ([]byte, error) {
 	cmd[0] = ntagCmdPwdAuth
 	copy(cmd[1:], password)
 
-	data, err := t.device.SendDataExchange(context.Background(), cmd)
+	data, err := t.device.SendDataExchange(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("PWD_AUTH failed: %w", err)
 	}
@@ -927,12 +931,16 @@ func (t *NTAGTag) PwdAuth(password []byte) ([]byte, error) {
 
 // GetVersion retrieves version information from the NTAG tag using proper GET_VERSION command
 // This implementation uses SendRawCommand (like FastRead) for better compatibility across PN532 variants
-func (t *NTAGTag) GetVersion() (*NTAGVersion, error) {
+func (t *NTAGTag) GetVersion(ctx context.Context) (*NTAGVersion, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Try GET_VERSION command using SendRawCommand (0x60)
 	// This follows the same pattern as FastRead for better hardware compatibility
 	cmd := []byte{ntagCmdGetVersion}
 
-	data, err := t.device.SendRawCommand(context.Background(), cmd)
+	data, err := t.device.SendRawCommand(ctx, cmd)
 	if err != nil {
 		// If GET_VERSION fails (common with clone devices), fall back to default detection
 		// This maintains backward compatibility while enabling proper detection when possible
@@ -1202,13 +1210,13 @@ func (t *NTAGTag) detectTypeByProbing(ctx context.Context) NTAGType {
 	// NTAG216: 231 pages (0-230), page 231+ inaccessible
 
 	// Test NTAG213 boundary - if page 45 is inaccessible, it's NTAG213
-	if !t.canAccessPageWithContext(ctx, ntag213TotalPages) {
+	if !t.canAccessPage(ctx, ntag213TotalPages) {
 		Debugf("NTAG detected as NTAG213 by probing (page %d inaccessible)", ntag213TotalPages)
 		return NTAGType213
 	}
 
 	// Test NTAG215 boundary - if page 135 is inaccessible, it's NTAG215
-	if !t.canAccessPageWithContext(ctx, ntag215TotalPages) {
+	if !t.canAccessPage(ctx, ntag215TotalPages) {
 		Debugf("NTAG detected as NTAG215 by probing (page %d inaccessible)", ntag215TotalPages)
 		return NTAGType215
 	}
@@ -1216,19 +1224,6 @@ func (t *NTAGTag) detectTypeByProbing(ctx context.Context) NTAGType {
 	// Can access page 135+, assume NTAG216
 	Debugf("NTAG detected as NTAG216 by probing (page %d accessible)", ntag215TotalPages)
 	return NTAGType216
-}
-
-// canAccessPageSafely tests if a specific page can be accessed (readable) with error handling
-// This method is more lenient to avoid disrupting normal operations
-func (t *NTAGTag) canAccessPageSafely(page uint8) bool {
-	// Try to access the page with minimal impact
-	data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, page})
-	if err != nil {
-		// If access fails, the page is likely beyond the boundary
-		return false
-	}
-	// Success if we got at least 4 bytes back
-	return len(data) >= 4
 }
 
 // validateWriteBoundary validates that a write operation is within the actual memory bounds
@@ -1250,7 +1245,7 @@ func (t *NTAGTag) validateWriteBoundary(ctx context.Context, block uint8) error 
 		// do a quick boundary check to catch counterfeit tags
 		if block >= 45 { // Beyond NTAG213 total pages (0-44)
 			// Test if we can actually read this page first
-			if !t.canAccessPageSafely(block) {
+			if !t.canAccessPage(ctx, block) {
 				return fmt.Errorf("write to block %d failed: actual tag appears to be NTAG213 "+
 					"(only 45 pages), not %s as reported by GET_VERSION", block, t.getTagTypeName())
 			}
@@ -1282,14 +1277,14 @@ func (t *NTAGTag) ProbeActualMemorySize(ctx context.Context, claimedBytes int) (
 	}
 
 	// Quick check: if page 4 isn't readable, tag has no user memory
-	if !t.canAccessPageWithContext(ctx, low) {
+	if !t.canAccessPage(ctx, low) {
 		return 3, 0
 	}
 
 	// Binary search for the last readable page
 	for low < high {
 		mid := low + (high-low+1)/2
-		if t.canAccessPageWithContext(ctx, mid) {
+		if t.canAccessPage(ctx, mid) {
 			low = mid
 		} else {
 			high = mid - 1
@@ -1310,8 +1305,8 @@ func (t *NTAGTag) ProbeActualMemorySize(ctx context.Context, claimedBytes int) (
 	return lastPage, userMemory
 }
 
-// canAccessPageWithContext tests if a specific page can be read (with context support)
-func (t *NTAGTag) canAccessPageWithContext(ctx context.Context, page uint8) bool {
+// canAccessPage tests if a specific page can be read
+func (t *NTAGTag) canAccessPage(ctx context.Context, page uint8) bool {
 	if ctx.Err() != nil {
 		return false
 	}
@@ -1705,8 +1700,8 @@ func (t *NTAGTag) readBlockDirectFallback(ctx context.Context, block uint8) ([]b
 }
 
 // DebugInfo returns detailed debug information about the NTAG tag
-func (t *NTAGTag) DebugInfo() string {
-	return t.DebugInfoWithNDEF(t)
+func (t *NTAGTag) DebugInfo(ctx context.Context) string {
+	return t.DebugInfoWithNDEF(ctx, t)
 }
 
 // WriteText writes a simple text record to the NTAG tag

@@ -46,7 +46,7 @@ func TestWindowsSAMConfigurationRetry(t *testing.T) {
 	defer cancel()
 
 	// This should fail initially since we haven't implemented retry yet
-	err = device.InitContext(ctx)
+	err = device.Init(ctx)
 
 	// Currently this will fail - we expect this test to fail until we implement retry
 	if err == nil {

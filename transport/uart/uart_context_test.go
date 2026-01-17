@@ -39,7 +39,7 @@ func TestUARTContextCancellationDuringDelay(t *testing.T) {
 	args := []byte{}
 
 	start := time.Now()
-	_, err := transport.SendCommandWithContext(ctx, cmd, args)
+	_, err := transport.SendCommand(ctx, cmd, args)
 	elapsed := time.Since(start)
 
 	// We expect this to return context.Canceled immediately
@@ -75,7 +75,7 @@ func TestUARTContextTimeoutDuringOperation(t *testing.T) {
 	args := []byte{}
 
 	start := time.Now()
-	_, err := transport.SendCommandWithContext(ctx, cmd, args)
+	_, err := transport.SendCommand(ctx, cmd, args)
 	elapsed := time.Since(start)
 
 	// We expect this to return context.DeadlineExceeded due to timeout

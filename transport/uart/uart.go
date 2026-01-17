@@ -129,88 +129,99 @@ func New(portName string) (*Transport, error) {
 	}, nil
 }
 
-// SendCommand sends a command to the PN532 and waits for response.
+// sleepCtx performs a context-aware sleep. Returns ctx.Err() if context is cancelled.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// handleNilPort handles the case when port is nil (e.g., in tests).
+func (*Transport) handleNilPort(ctx context.Context) error {
+	select {
+	case <-time.After(100 * time.Millisecond):
+		return errors.New("simulated UART error: no port available")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// isDiagnoseROMRAMTest returns true if the command is a ROM or RAM diagnose test.
+func isDiagnoseROMRAMTest(cmd byte, args []byte) bool {
+	return cmd == 0x00 && len(args) > 0 && (args[0] == 0x01 || args[0] == 0x02)
+}
+
+// handleDiagnoseTest handles special Diagnose ROM/RAM test responses.
 //
 //nolint:wrapcheck // WrapError intentionally wraps errors with trace data
-func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	// Create trace buffer for this command (only used on error)
-	t.currentTrace = pn532.NewTraceBuffer("UART", t.portName, 16)
-	defer func() { t.currentTrace = nil }() // Clear after command completes
-
-	// Track the command for special handling
-	t.lastCommand = cmd
-
-	ackData, err := t.sendFrame(cmd, args)
+func (t *Transport) handleDiagnoseTest(ctx context.Context, args []byte) ([]byte, error) {
+	res, err := t.receiveSpecialDiagnoseByte(ctx, args[0])
 	if err != nil {
 		return nil, t.currentTrace.WrapError(err)
 	}
-
-	_ = ackData // ACK data handled in waitAck
-
-	// Wake delay - 6ms has been proven to work reliably
-	time.Sleep(6 * time.Millisecond)
-
-	// Special handling for Diagnose ROM/RAM tests
-	if cmd == 0x00 && len(args) > 0 && (args[0] == 0x01 || args[0] == 0x02) {
-		// ROM test (0x01) and RAM test (0x02) return non-standard single byte response
-		// They return 0x00 for OK, 0xFF for failure
-		res, diagErr := t.receiveSpecialDiagnoseByte(args[0])
-		if diagErr != nil {
-			return nil, t.currentTrace.WrapError(diagErr)
-		}
-
-		// Mark connection as established after first successful command
-		if !t.connectionEstablished {
-			t.connectionEstablished = true
-		}
-
-		// No ACK is sent after receiving the byte response
-		return res, nil
-	}
-
-	res, err := t.receiveFrame(ackData)
-	if err != nil {
-		return nil, t.currentTrace.WrapError(err)
-	}
-
-	if err := t.sendAck(); err != nil {
-		return nil, t.currentTrace.WrapError(err)
-	}
-
-	// Mark connection as established after first successful command
-	if !t.connectionEstablished {
-		t.connectionEstablished = true
-	}
-
+	t.connectionEstablished = true
 	return res, nil
 }
 
-// SendCommandWithContext sends a command to the PN532 with context support
-func (t *Transport) SendCommandWithContext(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
-	// Check if context is already cancelled
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
+// handleNormalResponse handles normal command responses with ACK.
+//
+//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
+func (t *Transport) handleNormalResponse(ctx context.Context, ackData []byte) ([]byte, error) {
+	res, err := t.receiveFrame(ctx, ackData)
+	if err != nil {
+		return nil, t.currentTrace.WrapError(err)
 	}
 
-	// If port is nil (e.g., in tests), simulate a blocking operation that can be cancelled
+	if err := t.sendAck(ctx); err != nil {
+		return nil, t.currentTrace.WrapError(err)
+	}
+
+	t.connectionEstablished = true
+	return res, nil
+}
+
+// SendCommand sends a command to the PN532 with context support.
+// Context is checked at key points during the operation to allow cancellation.
+//
+//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
+func (t *Transport) SendCommand(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if t.port == nil {
-		// Simulate the kind of delays that happen in real UART operations
-		select {
-		case <-time.After(100 * time.Millisecond): // Simulate blocking operation
-			return nil, errors.New("simulated UART error: no port available")
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+		return nil, t.handleNilPort(ctx)
 	}
 
-	// For real ports, delegate to existing implementation
-	// TODO: Add context-aware operations to real implementation
-	return t.SendCommand(cmd, args)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.currentTrace = pn532.NewTraceBuffer("UART", t.portName, 16)
+	defer func() { t.currentTrace = nil }()
+
+	t.lastCommand = cmd
+
+	ackData, err := t.sendFrame(ctx, cmd, args)
+	if err != nil {
+		return nil, t.currentTrace.WrapError(err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if err := sleepCtx(ctx, 6*time.Millisecond); err != nil {
+		return nil, err
+	}
+
+	if isDiagnoseROMRAMTest(cmd, args) {
+		return t.handleDiagnoseTest(ctx, args)
+	}
+
+	return t.handleNormalResponse(ctx, ackData)
 }
 
 // setTimeoutUnlocked sets the read timeout without acquiring the mutex (internal use)
@@ -392,10 +403,16 @@ func isInterruptedSystemCall(err error) bool {
 }
 
 // drainWithRetry performs port drain with retry logic for interrupted system calls
-func (t *Transport) drainWithRetry(operation string) error {
+func (t *Transport) drainWithRetry(ctx context.Context, operation string) error {
 	baseDelay := 2 * time.Millisecond
 
 	for attempt := range pn532.TransportDrainRetries {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		err := t.port.Drain()
 		if err == nil {
 			return nil
@@ -404,7 +421,9 @@ func (t *Transport) drainWithRetry(operation string) error {
 		if isInterruptedSystemCall(err) {
 			if attempt < pn532.TransportDrainRetries-1 {
 				delay := baseDelay * time.Duration(1<<attempt) // 2ms, 4ms, 8ms
-				time.Sleep(delay)
+				if sleepErr := sleepCtx(ctx, delay); sleepErr != nil {
+					return sleepErr
+				}
 				continue
 			}
 		}
@@ -416,12 +435,12 @@ func (t *Transport) drainWithRetry(operation string) error {
 }
 
 // wakeUp wakes up the PN532 over UART with robust retry mechanism
-func (t *Transport) wakeUp() error {
-	return t.wakeUpWithRetry()
+func (t *Transport) wakeUp(ctx context.Context) error {
+	return t.wakeUpWithRetry(ctx)
 }
 
 // wakeUpWithRetry attempts to wake up the PN532 with retry logic and verification
-func (t *Transport) wakeUpWithRetry() error {
+func (t *Transport) wakeUpWithRetry(ctx context.Context) error {
 	delays := []time.Duration{
 		pn532.UARTWakeupDelay1, // First attempt: quick
 		pn532.UARTWakeupDelay2, // Second attempt: medium
@@ -431,7 +450,13 @@ func (t *Transport) wakeUpWithRetry() error {
 	var lastErr error
 
 	for attempt := range pn532.TransportWakeupRetries {
-		err := t.singleWakeUpAttempt()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		err := t.singleWakeUpAttempt(ctx)
 		if err == nil {
 			return nil // Wake-up successful
 		}
@@ -439,7 +464,9 @@ func (t *Transport) wakeUpWithRetry() error {
 		lastErr = err
 		// Wait with increasing delay before retry
 		if attempt < pn532.TransportWakeupRetries-1 {
-			time.Sleep(delays[attempt])
+			if err := sleepCtx(ctx, delays[attempt]); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -447,7 +474,13 @@ func (t *Transport) wakeUpWithRetry() error {
 }
 
 // singleWakeUpAttempt performs a single wake-up attempt
-func (t *Transport) singleWakeUpAttempt() error {
+func (t *Transport) singleWakeUpAttempt(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	// Over UART, PN532 must be "woken up" by sending a 0x55
 	// dummy byte sequence and then waiting
 	wakeSequence := []byte{
@@ -464,7 +497,7 @@ func (t *Transport) singleWakeUpAttempt() error {
 		return pn532.NewTransportWriteError("wakeUp", t.portName)
 	}
 
-	return t.drainWithRetry("wake up")
+	return t.drainWithRetry(ctx, "wake up")
 }
 
 // handleWriteError wraps write errors, checking if device is gone
@@ -483,7 +516,13 @@ func (t *Transport) handleWriteError(op string, err error) error {
 }
 
 // sendAck sends an ACK frame
-func (t *Transport) sendAck() error {
+func (t *Transport) sendAck(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	t.traceTX(ackFrame, "ACK")
 	n, err := t.port.Write(ackFrame)
 	if err != nil {
@@ -492,11 +531,17 @@ func (t *Transport) sendAck() error {
 		return pn532.NewTransportWriteError("sendAck", t.portName)
 	}
 
-	return t.drainWithRetry("ACK")
+	return t.drainWithRetry(ctx, "ACK")
 }
 
 // sendNack sends a NACK frame
-func (t *Transport) sendNack() error {
+func (t *Transport) sendNack(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	t.traceTX(nackFrame, "NACK")
 	n, err := t.port.Write(nackFrame)
 	if err != nil {
@@ -505,7 +550,7 @@ func (t *Transport) sendNack() error {
 		return pn532.NewTransportWriteError("sendNack", t.portName)
 	}
 
-	return t.drainWithRetry("NACK")
+	return t.drainWithRetry(ctx, "NACK")
 }
 
 // applyACKTimeout sets a short timeout for ACK reads and returns a cleanup function.
@@ -550,8 +595,8 @@ func (b *ackBuffers) release() {
 // waitAck waits for an ACK frame, returning any extra data received before it.
 // This handles the Windows driver bug where ACK packets may be delivered out of order.
 //
-//nolint:gocognit // ACK byte-scanning with timeout inherently requires multiple conditions
-func (t *Transport) waitAck() ([]byte, error) {
+//nolint:gocognit,revive // ACK byte-scanning with timeout inherently requires multiple conditions
+func (t *Transport) waitAck(ctx context.Context) ([]byte, error) {
 	bufs := getACKBuffers()
 	defer bufs.release()
 
@@ -563,6 +608,13 @@ func (t *Transport) waitAck() ([]byte, error) {
 
 	tries, maxTries := 0, 32
 	for !time.Now().After(deadline) && tries < maxTries {
+		// Check context on each iteration
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		n, err := t.port.Read(bufs.readBuf)
 		if err != nil {
 			pn532.Debugf("waitAck: read error at try %d: %v", tries, err)
@@ -603,97 +655,109 @@ func (t *Transport) waitAck() ([]byte, error) {
 	return bufs.preAck, pn532.NewNoACKError("waitAck", t.portName)
 }
 
-// sendFrame sends a frame to the PN532 with automatic retry on ACK failures.
-// This prevents device lockup when ACK is not received due to timing issues
-// or card placement problems.
-//
-//nolint:gocognit,revive // Retry logic with frame construction inherently requires multiple branches
-func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
-	ackRetryDelays := []time.Duration{pn532.TransportACKDelay1, pn532.TransportACKDelay2, pn532.TransportACKDelay3}
-
-	// Calculate total frame size
+// buildFrame constructs a PN532 command frame and returns it.
+func buildFrame(cmd byte, args []byte) ([]byte, error) {
 	dataLen := 2 + len(args) // hostToPn532 + cmd + args
 	if dataLen > 255 {
-		// TODO: extended frames are not implemented
-		return nil, pn532.NewDataTooLargeError("sendFrame", t.portName)
+		return nil, errors.New("frame data too large")
 	}
 
 	totalFrameSize := 3 + 2 + dataLen + 2 // preamble(3) + len+lcs(2) + data + dcs+postamble(2)
 
-	// Use buffer pool for frame construction - major optimization
 	frm := frame.GetFrameBuffer()
 	defer frame.PutBuffer(frm)
 
-	// Build frame manually for better performance and control
+	// Build frame: preamble + start code + length + LCS + data + DCS + postamble
 	frm[0] = 0x00 // preamble
 	frm[1] = 0x00
 	frm[2] = 0xFF               // start code
 	frm[3] = byte(dataLen)      // length
 	frm[4] = ^byte(dataLen) + 1 // length checksum
 
-	// Add data: TFI + command + args
 	frm[5] = hostToPn532
 	frm[6] = cmd
 	copy(frm[7:7+len(args)], args)
 
-	// Calculate and add data checksum
 	checksum := hostToPn532 + cmd
 	for _, b := range args {
 		checksum += b
 	}
-
 	frm[7+len(args)] = ^checksum + 1 // data checksum
 	frm[8+len(args)] = 0x00          // postamble
 
-	// Create final frame slice
-	finalFrame := make([]byte, totalFrameSize)
-	copy(finalFrame, frm[:totalFrameSize])
+	result := make([]byte, totalFrameSize)
+	copy(result, frm[:totalFrameSize])
+	return result, nil
+}
+
+// isTransientACKError returns true if the error is a transient ACK-level error worth retrying.
+func isTransientACKError(err error) bool {
+	return errors.Is(err, pn532.ErrNoACK) ||
+		errors.Is(err, pn532.ErrNACKReceived) ||
+		errors.Is(err, pn532.ErrFrameCorrupted)
+}
+
+// writeFrameAttempt performs a single frame write attempt and waits for ACK.
+func (t *Transport) writeFrameAttempt(ctx context.Context, frm []byte, attempt int) ([]byte, error) {
+	if t.port != nil {
+		_ = t.port.ResetInputBuffer()
+	}
+
+	if err := t.wakeUp(ctx); err != nil {
+		return nil, err
+	}
+
+	t.traceTX(frm, fmt.Sprintf("Cmd 0x%02X (attempt %d)", frm[6], attempt+1))
+	n, err := t.port.Write(frm)
+	if err != nil {
+		return nil, t.handleWriteError("sendFrame", err)
+	}
+	if n != len(frm) {
+		return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
+	}
+
+	windowsPostWriteDelay()
+
+	if err := t.drainWithRetry(ctx, "send frame"); err != nil {
+		return nil, err
+	}
+
+	return t.waitAck(ctx)
+}
+
+// sendFrame sends a frame to the PN532 with automatic retry on ACK failures.
+// This prevents device lockup when ACK is not received due to timing issues.
+func (t *Transport) sendFrame(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
+	frm, err := buildFrame(cmd, args)
+	if err != nil {
+		return nil, pn532.NewDataTooLargeError("sendFrame", t.portName)
+	}
+
+	delays := []time.Duration{pn532.TransportACKDelay1, pn532.TransportACKDelay2, pn532.TransportACKDelay3}
 
 	var lastErr error
 	for attempt := range pn532.TransportACKRetries {
-		// Flush any stale data from the input buffer before each attempt
-		if t.port != nil {
-			_ = t.port.ResetInputBuffer()
-		}
-
-		// Wake up and write frame
-		if err := t.wakeUp(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
-		t.traceTX(finalFrame, fmt.Sprintf("Cmd 0x%02X (attempt %d)", cmd, attempt+1))
-		n, err := t.port.Write(finalFrame)
-		if err != nil {
-			return nil, t.handleWriteError("sendFrame", err)
-		} else if n != len(finalFrame) {
-			return nil, pn532.NewTransportWriteError("sendFrame", t.portName)
-		}
-
-		// Give Windows serial drivers time to process the write
-		windowsPostWriteDelay()
-
-		if drainErr := t.drainWithRetry("send frame"); drainErr != nil {
-			return nil, drainErr
-		}
-
-		ackData, err := t.waitAck()
+		ackData, err := t.writeFrameAttempt(ctx, frm, attempt)
 		if err == nil {
 			return ackData, nil
 		}
 
-		lastErr = err
-
-		// Only retry on transient ACK-level errors
-		if !errors.Is(err, pn532.ErrNoACK) && !errors.Is(err, pn532.ErrNACKReceived) && !errors.Is(err, pn532.ErrFrameCorrupted) {
+		if !isTransientACKError(err) {
 			return nil, err
 		}
+		lastErr = err
 
-		// Clear buffer and wait before retry
 		if t.port != nil {
 			_ = t.port.ResetInputBuffer()
 		}
 		if attempt < pn532.TransportACKRetries-1 {
-			time.Sleep(ackRetryDelays[attempt])
+			if err := sleepCtx(ctx, delays[attempt]); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -701,13 +765,19 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 }
 
 // receiveFrame reads a frame from the PN532
-func (t *Transport) receiveFrame(pre []byte) ([]byte, error) {
+func (t *Transport) receiveFrame(ctx context.Context, pre []byte) ([]byte, error) {
 	// WORKAROUND: PN532 firmware quirk - InListPassiveTarget responses may arrive as pre-ACK data
 	_ = pre // Pre-ACK data handled in receiveFrameAttempt
 	const maxTries = 3
 
 	for tries := range maxTries {
-		data, shouldRetry, err := t.receiveFrameAttempt(pre, tries)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		data, shouldRetry, err := t.receiveFrameAttempt(ctx, pre, tries)
 		if err != nil {
 			return nil, err
 		}
@@ -716,7 +786,7 @@ func (t *Transport) receiveFrame(pre []byte) ([]byte, error) {
 		}
 
 		// Send NACK and retry
-		if err := t.sendNack(); err != nil {
+		if err := t.sendNack(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -737,28 +807,38 @@ func (t *Transport) receiveFrame(pre []byte) ([]byte, error) {
 }
 
 // receiveFrameAttempt performs a single frame receive attempt
-func (t *Transport) receiveFrameAttempt(pre []byte, tries int) (data []byte, retry bool, err error) {
+func (t *Transport) receiveFrameAttempt(
+	ctx context.Context, pre []byte, tries int,
+) (data []byte, retry bool, err error) {
+	select {
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	default:
+	}
+
 	// Use buffer pool for frame reception - this is the highest impact optimization
 	buf := frame.GetFrameBuffer()
 	defer frame.PutBuffer(buf)
 
 	// FIRMWARE QUIRK: PN532 may send InListPassiveTarget responses as pre-ACK data
 	// Check if pre contains a valid frame before discarding
-	if data, retry, preErr := t.tryProcessPreAckData(buf, pre, tries); data != nil || preErr != nil {
+	if data, retry, preErr := t.tryProcessPreAckData(ctx, buf, pre, tries); data != nil || preErr != nil {
 		return data, retry, preErr
 	}
 
-	totalLen, err := t.readInitialData(buf)
+	totalLen, err := t.readInitialData(ctx, buf)
 	if err != nil {
 		return nil, false, err
 	}
 
-	return t.processFrameData(buf, totalLen)
+	return t.processFrameData(ctx, buf, totalLen)
 }
 
 // tryProcessPreAckData attempts to process pre-ACK data as a valid frame
 // Returns data if successful, nil data if should continue normal processing
-func (t *Transport) tryProcessPreAckData(buf, pre []byte, tries int) (data []byte, retry bool, err error) {
+func (t *Transport) tryProcessPreAckData(
+	ctx context.Context, buf, pre []byte, tries int,
+) (data []byte, retry bool, err error) {
 	if tries != 0 || len(pre) == 0 {
 		return nil, false, nil // Continue normal processing
 	}
@@ -788,7 +868,7 @@ func (t *Transport) tryProcessPreAckData(buf, pre []byte, tries int) (data []byt
 		return nil, true, nil
 	}
 
-	totalLen, err = t.ensureCompleteFrame(buf, frameOff, frameLen, totalLen)
+	totalLen, err = t.ensureCompleteFrame(ctx, buf, frameOff, frameLen, totalLen)
 	if err != nil {
 		return nil, false, err
 	}
@@ -802,7 +882,9 @@ func (t *Transport) tryProcessPreAckData(buf, pre []byte, tries int) (data []byt
 }
 
 // processFrameData processes the frame data through validation and extraction
-func (t *Transport) processFrameData(buf []byte, totalLen int) (data []byte, retry bool, err error) {
+func (t *Transport) processFrameData(
+	ctx context.Context, buf []byte, totalLen int,
+) (data []byte, retry bool, err error) {
 	off, shouldRetry := t.findFrameStart(buf, totalLen)
 	if shouldRetry {
 		return nil, true, nil
@@ -814,7 +896,7 @@ func (t *Transport) processFrameData(buf []byte, totalLen int) (data []byte, ret
 		return nil, shouldRetry, err
 	}
 
-	totalLen, err = t.ensureCompleteFrame(buf, off, frameLen, totalLen)
+	totalLen, err = t.ensureCompleteFrame(ctx, buf, off, frameLen, totalLen)
 	if err != nil {
 		return nil, false, err
 	}
@@ -837,20 +919,29 @@ const minFrameHeaderBytes = 5
 // Uses deadline-based timeout derived from currentTimeout to properly detect USB disconnection.
 //
 //nolint:gocognit,revive // Accumulation loop with timeout requires multiple conditions
-func (t *Transport) readInitialData(buf []byte) (int, error) {
+func (t *Transport) readInitialData(ctx context.Context, buf []byte) (int, error) {
 	// Platform-specific delay to let the PN532 start sending
 	// Windows USB-serial drivers need more time for reliable responses
 	initialDelay := 8 * time.Millisecond
 	if isWindows() {
 		initialDelay = 10 * time.Millisecond
 	}
-	time.Sleep(initialDelay)
+	if err := sleepCtx(ctx, initialDelay); err != nil {
+		return 0, err
+	}
 
 	totalRead := 0
 	deadline := t.getDeadline()
 
 	// Accumulate data until we have enough for frame header validation
 	for totalRead < minFrameHeaderBytes {
+		// Check context
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		default:
+		}
+
 		// Check hard deadline to prevent infinite loop on USB disconnect
 		if time.Now().After(deadline) {
 			// Deadline exceeded - check if device still exists
@@ -860,7 +951,7 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 			// Device exists but no response
 			if totalRead == 0 {
 				// No data at all - try one more time with longer delay
-				return t.retryInitialRead(buf, deadline)
+				return t.retryInitialRead(ctx, buf, deadline)
 			}
 			// Got some data but not enough - return what we have
 			// This will likely cause a retry at a higher level
@@ -880,7 +971,9 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 
 		// Small delay between reads to avoid tight loop
 		if bytesRead == 0 {
-			time.Sleep(time.Millisecond)
+			if err := sleepCtx(ctx, time.Millisecond); err != nil {
+				return 0, err
+			}
 		}
 	}
 
@@ -888,7 +981,14 @@ func (t *Transport) readInitialData(buf []byte) (int, error) {
 }
 
 // retryInitialRead performs a retry read with platform-specific timing
-func (t *Transport) retryInitialRead(buf []byte, deadline time.Time) (int, error) {
+func (t *Transport) retryInitialRead(ctx context.Context, buf []byte, deadline time.Time) (int, error) {
+	// Check context first
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+
 	// Check if we still have time for a retry
 	if time.Now().After(deadline) {
 		if err := t.checkDeviceExists(); err != nil {
@@ -903,7 +1003,9 @@ func (t *Transport) retryInitialRead(buf []byte, deadline time.Time) (int, error
 	if isWindows() {
 		retryDelay = 100 * time.Millisecond
 	}
-	time.Sleep(retryDelay)
+	if err := sleepCtx(ctx, retryDelay); err != nil {
+		return 0, err
+	}
 
 	bytesRead, err := t.port.Read(buf)
 	if err != nil {
@@ -949,7 +1051,7 @@ func (t *Transport) validateFrameLength(buf []byte, off, totalLen int) FrameVali
 }
 
 // ensureCompleteFrame reads additional data if needed to get the complete frame
-func (t *Transport) ensureCompleteFrame(buf []byte, off, frameLen, totalLen int) (int, error) {
+func (t *Transport) ensureCompleteFrame(ctx context.Context, buf []byte, off, frameLen, totalLen int) (int, error) {
 	expectedLen := off + 2 + frameLen + 1 // off + LEN + LCS + frameLen + DCS
 	if expectedLen <= totalLen {
 		return totalLen, nil // Frame is already complete
@@ -965,16 +1067,23 @@ func (t *Transport) ensureCompleteFrame(buf []byte, off, frameLen, totalLen int)
 		}
 	}
 
-	return t.readRemainingData(buf, totalLen, expectedLen)
+	return t.readRemainingData(ctx, buf, totalLen, expectedLen)
 }
 
 // readRemainingData reads the remaining frame data with deadline-based timeout.
 // Uses the transport's currentTimeout to calculate a proper deadline that can
 // detect USB disconnection (which manifests as endless 0-byte reads on Linux).
-func (t *Transport) readRemainingData(buf []byte, totalLen, expectedLen int) (int, error) {
+func (t *Transport) readRemainingData(ctx context.Context, buf []byte, totalLen, expectedLen int) (int, error) {
 	deadline := t.getDeadline()
 
 	for totalLen < expectedLen {
+		// Check context
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		default:
+		}
+
 		// Check hard deadline to prevent infinite loop on USB disconnect
 		if time.Now().After(deadline) {
 			// Deadline exceeded - check if device still exists
@@ -998,7 +1107,9 @@ func (t *Transport) readRemainingData(buf []byte, totalLen, expectedLen int) (in
 			totalLen += n2
 		} else {
 			// No data available, wait a bit
-			time.Sleep(10 * time.Millisecond)
+			if err := sleepCtx(ctx, 10*time.Millisecond); err != nil {
+				return 0, err
+			}
 		}
 	}
 
@@ -1027,12 +1138,14 @@ func (t *Transport) extractFrameData(buf []byte, off, frameLen, totalLen int) (d
 }
 
 // receiveSpecialDiagnoseByte handles the non-standard single-byte response from ROM/RAM tests
-func (t *Transport) receiveSpecialDiagnoseByte(_ byte) ([]byte, error) {
+func (t *Transport) receiveSpecialDiagnoseByte(ctx context.Context, _ byte) ([]byte, error) {
 	// ROM/RAM tests return a single byte directly without frame format
 	// 0x00 = OK, 0xFF = Not Good
 
 	// Wait a bit for the response
-	time.Sleep(10 * time.Millisecond)
+	if err := sleepCtx(ctx, 10*time.Millisecond); err != nil {
+		return nil, err
+	}
 
 	// Read a single byte using buffer pool
 	buf := frame.GetSmallBuffer(1)
@@ -1044,7 +1157,9 @@ func (t *Transport) receiveSpecialDiagnoseByte(_ byte) ([]byte, error) {
 
 	if bytesRead == 0 {
 		// Try again with longer timeout
-		time.Sleep(50 * time.Millisecond)
+		if sleepErr := sleepCtx(ctx, 50*time.Millisecond); sleepErr != nil {
+			return nil, sleepErr
+		}
 		bytesRead, err = t.port.Read(buf)
 		if err != nil {
 			return nil, fmt.Errorf("UART special diagnose byte retry read failed: %w", err)

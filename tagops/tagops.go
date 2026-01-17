@@ -302,7 +302,7 @@ func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
 
 	// Auth failed but tag is still valid MIFARE - just can't read NDEF
 	// Cycle RF field to clear accumulated bad state from auth failures
-	_ = t.device.CycleRFField()
+	_ = t.device.CycleRFField(ctx)
 	pn532.Debugln("MIFARE auth failed, accepting tag as unauthenticated (UID-only)")
 	t.tagType = pn532.TagTypeMIFARE
 	t.mifareInstance = mifare

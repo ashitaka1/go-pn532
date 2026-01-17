@@ -120,7 +120,7 @@ type Tag interface {
 	WriteText(ctx context.Context, text string) error
 
 	// DebugInfo returns detailed debug information about the tag
-	DebugInfo() string
+	DebugInfo(ctx context.Context) string
 
 	// Summary returns a brief summary of the tag
 	Summary() string
@@ -233,7 +233,7 @@ func (t *BaseTag) Summary() string {
 }
 
 // DebugInfo returns detailed debug information about the tag
-func (t *BaseTag) DebugInfo() string {
+func (t *BaseTag) DebugInfo(_ context.Context) string {
 	info := "=== Tag Debug Info ===\n"
 	info += fmt.Sprintf("Type: %v\n", t.tagType)
 	info += fmt.Sprintf("UID: %s\n", t.UID())
@@ -245,7 +245,7 @@ func (t *BaseTag) DebugInfo() string {
 }
 
 // DebugInfoWithNDEF returns detailed debug information about the tag with NDEF support
-func (t *BaseTag) DebugInfoWithNDEF(ndefReader interface {
+func (t *BaseTag) DebugInfoWithNDEF(ctx context.Context, ndefReader interface {
 	ReadNDEF(context.Context) (*NDEFMessage, error)
 },
 ) string {
@@ -256,7 +256,7 @@ func (t *BaseTag) DebugInfoWithNDEF(ndefReader interface {
 	info += fmt.Sprintf("SAK: %02X\n", t.sak)
 
 	// Try to read NDEF for additional info
-	if ndef, err := ndefReader.ReadNDEF(context.Background()); err == nil && ndef != nil {
+	if ndef, err := ndefReader.ReadNDEF(ctx); err == nil && ndef != nil {
 		info += fmt.Sprintf("NDEF Records: %d\n", len(ndef.Records))
 		for i, record := range ndef.Records {
 			info += fmt.Sprintf("  Record %d: Type=%s", i+1, record.Type)

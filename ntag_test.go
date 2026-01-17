@@ -324,7 +324,7 @@ func TestNTAGTag_GetVersion(t *testing.T) {
 
 			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 
-			version, err := tag.GetVersion()
+			version, err := tag.GetVersion(context.Background())
 
 			switch {
 			case tt.expectError:
@@ -1103,7 +1103,7 @@ func TestNTAGTag_PwdAuth(t *testing.T) {
 
 			tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 
-			pack, err := tag.PwdAuth(tt.password)
+			pack, err := tag.PwdAuth(context.Background(), tt.password)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -1386,7 +1386,7 @@ func TestNTAGTag_DebugInfo(t *testing.T) {
 	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
 	tag.tagType = NTAGType215
 
-	info := tag.DebugInfo()
+	info := tag.DebugInfo(context.Background())
 	assert.NotEmpty(t, info)
 	assert.Contains(t, info, "NTAG")
 }

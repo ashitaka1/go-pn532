@@ -2,6 +2,7 @@
 package i2c
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -130,7 +131,7 @@ func TestI2C_GetFirmwareVersion(t *testing.T) {
 	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
 	transport := newTestI2CTransport(sim)
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -148,7 +149,7 @@ func TestI2C_SAMConfiguration(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// SAMConfiguration: Mode=0x01 (Normal), Timeout=0x14, IRQ=0x01
-	resp, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode] only
@@ -161,7 +162,7 @@ func TestI2C_InListPassiveTarget_NoTags(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// InListPassiveTarget: MaxTg=1, BrTy=0x00 (106kbps Type A)
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode, NbTg=0]
@@ -177,7 +178,7 @@ func TestI2C_InListPassiveTarget_WithTag(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// InListPassiveTarget: MaxTg=1, BrTy=0x00 (106kbps Type A)
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode, NbTg, Tg, SENS_RES(2), SEL_RES, NFCIDLength, NFCID...]
@@ -194,11 +195,11 @@ func TestI2C_InDataExchange_Read(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// First select the tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InDataExchange: Tg=1, READ command (0x30), page 0
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0x30, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x00})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode, Status, Data...]
@@ -214,11 +215,11 @@ func TestI2C_InDataExchange_Write(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// Select tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InDataExchange: Tg=1, WRITE command (0xA2), page 4, data
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0xA2, 0x04, 0xDE, 0xAD, 0xBE, 0xEF})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0xA2, 0x04, 0xDE, 0xAD, 0xBE, 0xEF})
 	require.NoError(t, err)
 
 	// Response: [ResponseCode, Status]
@@ -236,7 +237,7 @@ func TestI2C_MIFARE_Authentication(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// Select tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InDataExchange: MIFARE Auth with Key A
@@ -247,7 +248,7 @@ func TestI2C_MIFARE_Authentication(t *testing.T) {
 		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Key (default)
 		0x01, 0x02, 0x03, 0x04, // UID
 	}
-	resp, err := transport.SendCommand(0x40, authCmd)
+	resp, err := transport.SendCommand(context.Background(), 0x40, authCmd)
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, len(resp), 2)
@@ -262,7 +263,7 @@ func TestI2C_MIFARE_ReadAfterAuth(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// Select tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Authenticate
@@ -271,11 +272,11 @@ func TestI2C_MIFARE_ReadAfterAuth(t *testing.T) {
 		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 		0x01, 0x02, 0x03, 0x04,
 	}
-	_, err = transport.SendCommand(0x40, authCmd)
+	_, err = transport.SendCommand(context.Background(), 0x40, authCmd)
 	require.NoError(t, err)
 
 	// Read block 4
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, len(resp), 2)
@@ -296,7 +297,7 @@ func TestI2C_FeliCa_Detection(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// InListPassiveTarget for FeliCa: BrTy=0x01 (212kbps FeliCa)
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x00})
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, len(resp), 2)
@@ -311,7 +312,7 @@ func TestI2C_RFConfiguration(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// RFConfiguration: MaxRetries
-	resp, err := transport.SendCommand(0x32, []byte{0x05, 0xFF, 0x01, 0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x32, []byte{0x05, 0xFF, 0x01, 0x01})
 	require.NoError(t, err)
 
 	assert.Len(t, resp, 1)
@@ -325,11 +326,11 @@ func TestI2C_InRelease(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// Select tag first
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// InRelease: Tg=0 (release all)
-	resp, err := transport.SendCommand(0x52, []byte{0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x52, []byte{0x00})
 	require.NoError(t, err)
 
 	assert.Len(t, resp, 2)
@@ -342,7 +343,7 @@ func TestI2C_PowerDown(t *testing.T) {
 	transport := newTestI2CTransport(sim)
 
 	// Send PowerDown with WakeUpEnable byte set to 0x00
-	resp, err := transport.SendCommand(0x16, []byte{0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x16, []byte{0x00})
 	require.NoError(t, err)
 
 	assert.Len(t, resp, 2)
@@ -361,7 +362,7 @@ func TestI2C_BusClosed(t *testing.T) {
 		_ = bus.Close()
 	}
 
-	_, err := transport.SendCommand(0x02, nil)
+	_, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.Error(t, err)
 }
 
@@ -527,7 +528,7 @@ func TestI2C_Jittery_GetFirmwareVersion(t *testing.T) {
 	sim.SetFirmwareVersion(0x32, 0x01, 0x06, 0x07)
 	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
 
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -540,7 +541,7 @@ func TestI2C_Jittery_SAMConfiguration(t *testing.T) {
 	sim := virt.NewVirtualPN532()
 	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
 
-	resp, err := transport.SendCommand(0x14, []byte{0x01, 0x14, 0x01})
+	resp, err := transport.SendCommand(context.Background(), 0x14, []byte{0x01, 0x14, 0x01})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -555,7 +556,7 @@ func TestI2C_Jittery_TagDetection(t *testing.T) {
 	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
 
 	// Detect tag
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 7)
 	assert.Equal(t, byte(0x4B), resp[0])
@@ -569,17 +570,17 @@ func TestI2C_Jittery_ReadWriteCycle(t *testing.T) {
 	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
 
 	// Detect tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Write data
-	resp, err := transport.SendCommand(0x40, []byte{0x01, 0xA2, 0x04, 0xAA, 0xBB, 0xCC, 0xDD})
+	resp, err := transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0xA2, 0x04, 0xAA, 0xBB, 0xCC, 0xDD})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 2)
 	assert.Equal(t, byte(0x00), resp[1])
 
 	// Read it back
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 6)
 	assert.Equal(t, byte(0xAA), resp[2])
@@ -595,7 +596,7 @@ func TestI2C_Jittery_MIFAREAuth(t *testing.T) {
 	transport := newJitteryTestI2CTransport(sim, defaultI2CJitterConfig())
 
 	// Detect tag
-	_, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	_, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 
 	// Authenticate
@@ -604,7 +605,7 @@ func TestI2C_Jittery_MIFAREAuth(t *testing.T) {
 		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 		0x01, 0x02, 0x03, 0x04,
 	}
-	resp, err := transport.SendCommand(0x40, authCmd)
+	resp, err := transport.SendCommand(context.Background(), 0x40, authCmd)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp), 2)
 	assert.Equal(t, byte(0x00), resp[1])
@@ -619,17 +620,17 @@ func TestI2C_Jittery_MultipleCommands(t *testing.T) {
 	// Run 10 command cycles
 	for i := range 10 {
 		// Get firmware version
-		resp, err := transport.SendCommand(0x02, nil)
+		resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 		require.NoError(t, err, "GetFirmwareVersion failed on iteration %d", i)
 		assert.Len(t, resp, 5)
 
 		// Detect tag
-		resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+		resp, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 		require.NoError(t, err, "InListPassiveTarget failed on iteration %d", i)
 		assert.Equal(t, byte(0x01), resp[1])
 
 		// Release tag
-		_, err = transport.SendCommand(0x52, []byte{0x01})
+		_, err = transport.SendCommand(context.Background(), 0x52, []byte{0x01})
 		require.NoError(t, err, "InRelease failed on iteration %d", i)
 	}
 }
@@ -648,12 +649,12 @@ func TestI2C_Jittery_USBBoundaryStress(t *testing.T) {
 	transport := newJitteryTestI2CTransport(sim, config)
 
 	// Detect tag
-	resp, err := transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err := transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x01), resp[1])
 
 	// Read data
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[1])
 }
@@ -672,17 +673,17 @@ func TestI2C_Jittery_AggressiveFragmentation(t *testing.T) {
 	transport := newJitteryTestI2CTransport(sim, config)
 
 	// Get firmware
-	resp, err := transport.SendCommand(0x02, nil)
+	resp, err := transport.SendCommand(context.Background(), 0x02, nil)
 	require.NoError(t, err)
 	assert.Len(t, resp, 5)
 
 	// Detect tag
-	resp, err = transport.SendCommand(0x4A, []byte{0x01, 0x00})
+	resp, err = transport.SendCommand(context.Background(), 0x4A, []byte{0x01, 0x00})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x01), resp[1])
 
 	// Read from tag
-	resp, err = transport.SendCommand(0x40, []byte{0x01, 0x30, 0x04})
+	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[1])
 }
