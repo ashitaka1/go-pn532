@@ -135,7 +135,8 @@ type NTAGVersion struct {
 
 // NTAGTag represents an NTAG21X tag
 type NTAGTag struct {
-	fastReadSupported *bool
+	fastReadSupported   *bool
+	capabilityContainer []byte // cached CC from page 3 (set during DetectType)
 	BaseTag
 	tagType NTAGType
 	hasNDEF bool // true if tag has valid NDEF CC (magic byte 0xE1)
@@ -1134,6 +1135,10 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 		return fmt.Errorf("%w (NTAG capability container): %w", ErrTagReadFailed, err)
 	}
 
+	// Cache CC bytes for later access (Amiibo/LEGO detection)
+	t.capabilityContainer = make([]byte, len(ccData))
+	copy(t.capabilityContainer, ccData)
+
 	// Verify this looks like an NTAG capability container
 	// NTAG CC format: [E1] [Version] [Size] [Access]
 	if len(ccData) < 4 || ccData[0] != 0xE1 {
@@ -1322,6 +1327,18 @@ func (t *NTAGTag) canAccessPage(ctx context.Context, page uint8) bool {
 // ReadCapabilityContainer reads the CC (page 3) and returns it
 func (t *NTAGTag) ReadCapabilityContainer(ctx context.Context) ([]byte, error) {
 	return t.ReadBlock(ctx, ntagPageCC)
+}
+
+// GetCachedCapabilityContainer returns the CC bytes cached during DetectType.
+// Returns nil if DetectType has not been called yet.
+// The returned slice is a copy to prevent modification of internal state.
+func (t *NTAGTag) GetCachedCapabilityContainer() []byte {
+	if t.capabilityContainer == nil {
+		return nil
+	}
+	result := make([]byte, len(t.capabilityContainer))
+	copy(result, t.capabilityContainer)
+	return result
 }
 
 // GetClaimedSizeFromCC returns the claimed memory size from the CC size field
@@ -1624,11 +1641,15 @@ func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]
 
 		Debugf("NTAG InCommunicateThru attempt %d/%d for block %d", attempt, NTAGFallbackRetries, block)
 		data, err = t.device.SendRawCommand(ctx, cmd)
+
+		// ALWAYS re-select target after SendRawCommand to restore PN532 internal state,
+		// regardless of success or failure. SendRawCommand uses InCommunicateThru (0x42)
+		// which doesn't maintain target selection state.
+		if selectErr := t.device.InSelect(ctx); selectErr != nil {
+			Debugln("NTAG readBlockCommunicateThru: InSelect failed:", selectErr)
+		}
+
 		if err == nil {
-			// Re-select target after SendRawCommand to restore PN532 internal state
-			if selectErr := t.device.InSelect(ctx); selectErr != nil {
-				Debugln("NTAG readBlockCommunicateThru: InSelect failed:", selectErr)
-			}
 			successAttempt = attempt
 			break
 		}
@@ -1677,6 +1698,13 @@ func (t *NTAGTag) readBlockDirectFallback(ctx context.Context, block uint8) ([]b
 	}
 
 	Debugf("NTAG attempting direct InDataExchange fallback for block %d", block)
+
+	// Restore target selection before fallback attempt.
+	// This is needed because we're coming from readBlockCommunicateThru which used
+	// InCommunicateThru (0x42) that may have disrupted the PN532's target selection state.
+	if selectErr := t.device.InSelect(ctx); selectErr != nil {
+		Debugf("NTAG readBlockDirectFallback: InSelect failed (continuing): %v", selectErr)
+	}
 
 	// Try direct InDataExchange with retry, ignoring the error 14 that originally triggered the fallback chain
 	data, err := t.device.SendDataExchangeWithRetry(ctx, []byte{ntagCmdRead, block})
