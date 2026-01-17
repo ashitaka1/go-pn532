@@ -1810,7 +1810,7 @@ func TestNTAGDetectType_Real4ByteUIDIsNotRetryable(t *testing.T) {
 		"Error should indicate wrong UID length")
 }
 
-func TestNTAGDetectType_NonNDEFTag_UsesProbing(t *testing.T) {
+func TestNTAGDetectType_NonNDEFTag_DefaultsToNTAG215(t *testing.T) {
 	t.Parallel()
 
 	device, mockTransport := createMockDeviceWithTransport(t)
@@ -1821,22 +1821,21 @@ func TestNTAGDetectType_NonNDEFTag_UsesProbing(t *testing.T) {
 
 	// Mock CC read - returns non-NDEF data (like Amiibo uses page 3 for proprietary data)
 	amiiboPage3 := []byte{0xA5, 0x00, 0x00, 0x00} // No 0xE1 magic byte
-	// Mock probe for page 45 - accessible (not NTAG213)
-	page45Data := []byte{0x00, 0x00, 0x00, 0x00}
-	// Mock probe for page 135 - inaccessible (short response = NAK)
+	// Mock page 4 read for user data caching
+	page4Data := []byte{0xA5, 0x00, 0x00, 0x04}
 
 	mockTransport.QueueResponses(0x40,
 		append([]byte{0x41, 0x00}, amiiboPage3...), // CC read - non-NDEF
-		append([]byte{0x41, 0x00}, page45Data...),  // page 45 accessible
-		[]byte{0x41, 0x00},                         // page 135 inaccessible (short response)
+		append([]byte{0x41, 0x00}, page4Data...),   // page 4 read
 	)
 
 	err := tag.DetectType(context.Background())
 
-	// Should succeed using probe-based detection
-	require.NoError(t, err, "Non-NDEF tag should be detected via probing")
+	// Non-NDEF tags default to NTAG215 (most common for Amiibo/Lego Dimensions)
+	// We skip probing to avoid NAK errors that break subsequent reads
+	require.NoError(t, err, "Non-NDEF tag detection should succeed")
 	assert.Equal(t, NTAGType215, tag.tagType,
-		"Tag should be detected as NTAG215 (page 45 accessible, page 135 not)")
+		"Non-NDEF tag should default to NTAG215")
 
 	// Non-NDEF tag should have hasNDEF = false
 	assert.False(t, tag.HasNDEF(), "Non-NDEF tag should have HasNDEF() = false")
@@ -1845,52 +1844,10 @@ func TestNTAGDetectType_NonNDEFTag_UsesProbing(t *testing.T) {
 	msg, err := tag.ReadNDEF(context.Background())
 	require.NoError(t, err, "ReadNDEF should not error for non-NDEF tags")
 	assert.Empty(t, msg.Records, "ReadNDEF should return empty message for non-NDEF tags")
-}
 
-func TestNTAGDetectType_NonNDEFTag_NTAG213(t *testing.T) {
-	t.Parallel()
-
-	device, mockTransport := createMockDeviceWithTransport(t)
-
-	validUID := []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	tag := NewNTAGTag(device, validUID, 0x00)
-
-	// Non-NDEF CC data
-	nonNDEFPage3 := []byte{0x00, 0x00, 0x00, 0x00}
-	mockTransport.QueueResponses(0x40,
-		append([]byte{0x41, 0x00}, nonNDEFPage3...), // CC read - non-NDEF
-		[]byte{0x41, 0x00},                          // page 45 inaccessible (short response)
-	)
-
-	err := tag.DetectType(context.Background())
-
-	require.NoError(t, err, "Non-NDEF NTAG213 should be detected via probing")
-	assert.Equal(t, NTAGType213, tag.tagType, "Tag should be detected as NTAG213")
-}
-
-func TestNTAGDetectType_NonNDEFTag_NTAG216(t *testing.T) {
-	t.Parallel()
-
-	device, mockTransport := createMockDeviceWithTransport(t)
-
-	validUID := []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	tag := NewNTAGTag(device, validUID, 0x00)
-
-	// Non-NDEF CC data
-	nonNDEFPage3 := []byte{0x00, 0x00, 0x00, 0x00}
-	page45Data := []byte{0x00, 0x00, 0x00, 0x00}
-	page135Data := []byte{0x00, 0x00, 0x00, 0x00}
-
-	mockTransport.QueueResponses(0x40,
-		append([]byte{0x41, 0x00}, nonNDEFPage3...), // CC read - non-NDEF
-		append([]byte{0x41, 0x00}, page45Data...),   // page 45 accessible
-		append([]byte{0x41, 0x00}, page135Data...),  // page 135 accessible
-	)
-
-	err := tag.DetectType(context.Background())
-
-	require.NoError(t, err, "Non-NDEF NTAG216 should be detected via probing")
-	assert.Equal(t, NTAGType216, tag.tagType, "Tag should be detected as NTAG216")
+	// Verify user data page was cached
+	cachedPage := tag.GetCachedUserDataPage()
+	assert.Equal(t, page4Data, cachedPage, "User data page should be cached")
 }
 
 func TestNTAGReadBlock_ShortResponseIsRetryable(t *testing.T) {

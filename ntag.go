@@ -137,6 +137,7 @@ type NTAGVersion struct {
 type NTAGTag struct {
 	fastReadSupported   *bool
 	capabilityContainer []byte // cached CC from page 3 (set during DetectType)
+	userDataPage        []byte // cached page 4 (first user data page, set during DetectType)
 	BaseTag
 	tagType NTAGType
 	hasNDEF bool // true if tag has valid NDEF CC (magic byte 0xE1)
@@ -1139,18 +1140,28 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	t.capabilityContainer = make([]byte, len(ccData))
 	copy(t.capabilityContainer, ccData)
 
+	// Read page 4 (first user data page) for Amiibo detection
+	// Do this immediately after CC read, before any operations that might cause NAK
+	page4Data, err := t.ReadBlock(ctx, 4)
+	if err != nil {
+		Debugf("NTAG DetectType: failed to read page 4: %v", err)
+		// Non-fatal - continue with CC-based detection only
+	} else {
+		t.userDataPage = make([]byte, len(page4Data))
+		copy(t.userDataPage, page4Data)
+	}
+
 	// Verify this looks like an NTAG capability container
 	// NTAG CC format: [E1] [Version] [Size] [Access]
 	if len(ccData) < 4 || ccData[0] != 0xE1 {
 		// Non-NDEF tag (Amiibo, Lego Dimensions, blank tags, etc.)
-		// Fall back to probe-based detection using page boundaries
+		// Skip probing - it causes NAK errors that break subsequent reads.
+		// Use page 4 data for Amiibo detection, assume NTAG215 (most common).
 		if len(ccData) >= 1 {
-			Debugf("NTAG CC magic byte 0x%02X != 0xE1, using probe-based detection", ccData[0])
-		} else {
-			Debugf("NTAG CC too short (%d bytes), using probe-based detection", len(ccData))
+			Debugf("NTAG CC magic byte 0x%02X != 0xE1, skipping probe", ccData[0])
 		}
-		t.tagType = t.detectTypeByProbing(ctx)
-		t.hasNDEF = false // No valid NDEF CC - skip NDEF operations
+		t.tagType = NTAGType215 // Default for non-NDEF tags
+		t.hasNDEF = false       // No valid NDEF CC - skip NDEF operations
 		return nil
 	}
 
@@ -1203,32 +1214,6 @@ func (*NTAGTag) detectTypeFromCapabilityContainer(ccData []byte) NTAGType {
 			return NTAGType216
 		}
 	}
-}
-
-// detectTypeByProbing determines NTAG type by probing page boundaries.
-// This is used for non-NDEF tags (Amiibo, Lego Dimensions, etc.) that don't have
-// the standard CC magic byte 0xE1 at page 3.
-func (t *NTAGTag) detectTypeByProbing(ctx context.Context) NTAGType {
-	// NTAG variants have fixed memory sizes:
-	// NTAG213: 45 pages (0-44), page 45+ inaccessible
-	// NTAG215: 135 pages (0-134), page 135+ inaccessible
-	// NTAG216: 231 pages (0-230), page 231+ inaccessible
-
-	// Test NTAG213 boundary - if page 45 is inaccessible, it's NTAG213
-	if !t.canAccessPage(ctx, ntag213TotalPages) {
-		Debugf("NTAG detected as NTAG213 by probing (page %d inaccessible)", ntag213TotalPages)
-		return NTAGType213
-	}
-
-	// Test NTAG215 boundary - if page 135 is inaccessible, it's NTAG215
-	if !t.canAccessPage(ctx, ntag215TotalPages) {
-		Debugf("NTAG detected as NTAG215 by probing (page %d inaccessible)", ntag215TotalPages)
-		return NTAGType215
-	}
-
-	// Can access page 135+, assume NTAG216
-	Debugf("NTAG detected as NTAG216 by probing (page %d accessible)", ntag215TotalPages)
-	return NTAGType216
 }
 
 // validateWriteBoundary validates that a write operation is within the actual memory bounds
@@ -1338,6 +1323,19 @@ func (t *NTAGTag) GetCachedCapabilityContainer() []byte {
 	}
 	result := make([]byte, len(t.capabilityContainer))
 	copy(result, t.capabilityContainer)
+	return result
+}
+
+// GetCachedUserDataPage returns the first user data page (page 4) cached during DetectType.
+// This is useful for detecting special token types like Amiibo (byte 0 = 0xA5).
+// Returns nil if DetectType has not been called yet or if page 4 read failed.
+// The returned slice is a copy to prevent modification of internal state.
+func (t *NTAGTag) GetCachedUserDataPage() []byte {
+	if t.userDataPage == nil {
+		return nil
+	}
+	result := make([]byte, len(t.userDataPage))
+	copy(result, t.userDataPage)
 	return result
 }
 

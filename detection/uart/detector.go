@@ -250,7 +250,7 @@ func (*detector) addPortMetadata(device *detection.DeviceInfo, port *serialPort)
 
 // probePortWithTimeout performs device probing with timeout
 func (*detector) probePortWithTimeout(ctx context.Context, path string, mode detection.Mode) bool {
-	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
 	return probeDevice(probeCtx, path, mode)
