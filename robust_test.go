@@ -28,13 +28,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestReadNDEFRobust_FunctionExists verifies that the robust reading functions exist and can be called
-func TestReadNDEFRobust_FunctionExists(t *testing.T) {
+// TestReadNDEFWithRetry_FunctionExists verifies that the robust reading functions exist and can be called
+func TestReadNDEFWithRetry_FunctionExists(t *testing.T) {
 	t.Parallel()
 
 	device, mockTransport := createMockDeviceWithTransport(t)
 
-	// Test NTAG ReadNDEFRobust exists
+	// Test NTAG ReadNDEFWithRetry exists
 	uid := []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB}
 	ntagTag := NewNTAGTag(device, uid, 0x00)
 
@@ -45,11 +45,11 @@ func TestReadNDEFRobust_FunctionExists(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	})
 
-	_, err := ntagTag.ReadNDEFRobust(context.Background())
+	_, err := ntagTag.ReadNDEFWithRetry(context.Background())
 	require.Error(t, err) // Should error because no NDEF data
-	t.Log("✓ NTAGTag.ReadNDEFRobust(context.Background()) function exists and callable")
+	t.Log("✓ NTAGTag.ReadNDEFWithRetry(context.Background()) function exists and callable")
 
-	// Test MIFARE ReadNDEFRobust exists
+	// Test MIFARE ReadNDEFWithRetry exists
 	mifareUID := []byte{0x04, 0x12, 0x34, 0x56}
 	mifareTag := NewMIFARETag(device, mifareUID, 0x00)
 
@@ -58,11 +58,11 @@ func TestReadNDEFRobust_FunctionExists(t *testing.T) {
 	// Mock auth failure - this means tag is not NDEF formatted, should return empty NDEF
 	mockTransport.SetError(0x40, errors.New("authentication failed"))
 
-	msg, err := mifareTag.ReadNDEFRobust(context.Background())
+	msg, err := mifareTag.ReadNDEFWithRetry(context.Background())
 	require.NoError(t, err) // Auth failure = not NDEF formatted = empty NDEF, not error
 	require.NotNil(t, msg)
 	require.Empty(t, msg.Records)
-	t.Log("✓ MIFARETag.ReadNDEFRobust(context.Background()) function exists and callable")
+	t.Log("✓ MIFARETag.ReadNDEFWithRetry(context.Background()) function exists and callable")
 }
 
 // TestErrorTypeEnhancements verifies that the new error types exist
@@ -267,8 +267,8 @@ func TestReadNDEFWithRetry(t *testing.T) {
 	}
 }
 
-// TestNTAGReadNDEFRobust tests NTAG robust reading functionality
-func TestNTAGReadNDEFRobust(t *testing.T) {
+// TestNTAGReadNDEFWithRetry tests NTAG robust reading functionality
+func TestNTAGReadNDEFWithRetry(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -327,7 +327,7 @@ func TestNTAGReadNDEFRobust(t *testing.T) {
 			uid := []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB}
 			tag := NewNTAGTag(device, uid, 0x00)
 
-			_, err := tag.ReadNDEFRobust(context.Background())
+			_, err := tag.ReadNDEFWithRetry(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -343,8 +343,8 @@ func TestNTAGReadNDEFRobust(t *testing.T) {
 	}
 }
 
-// TestMIFAREReadNDEFRobust tests MIFARE robust reading functionality
-func TestMIFAREReadNDEFRobust(t *testing.T) {
+// TestMIFAREReadNDEFWithRetry tests MIFARE robust reading functionality
+func TestMIFAREReadNDEFWithRetry(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -395,7 +395,7 @@ func TestMIFAREReadNDEFRobust(t *testing.T) {
 			uid := []byte{0x04, 0x12, 0x34, 0x56}
 			tag := NewMIFARETag(device, uid, 0x00)
 
-			_, err := tag.ReadNDEFRobust(context.Background())
+			_, err := tag.ReadNDEFWithRetry(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)

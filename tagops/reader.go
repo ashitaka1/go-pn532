@@ -74,7 +74,7 @@ func (t *TagOperations) ReadNDEF(ctx context.Context) (*pn532.NDEFMessage, error
 
 	switch t.tagType {
 	case pn532.TagTypeNTAG:
-		ndefMsg, err := t.ntagInstance.ReadNDEFRobust(ctx)
+		ndefMsg, err := t.ntagInstance.ReadNDEFWithRetry(ctx)
 		if err != nil {
 			if errors.Is(err, pn532.ErrNoNDEF) {
 				// No NDEF present is a valid state - return empty message
@@ -88,7 +88,7 @@ func (t *TagOperations) ReadNDEF(ctx context.Context) (*pn532.NDEFMessage, error
 		if !t.mifareInstance.IsAuthenticated() {
 			return &pn532.NDEFMessage{}, nil
 		}
-		ndefMsg, err := t.mifareInstance.ReadNDEFRobust(ctx)
+		ndefMsg, err := t.mifareInstance.ReadNDEFWithRetry(ctx)
 		if err != nil {
 			if errors.Is(err, pn532.ErrNoNDEF) {
 				// No NDEF present is a valid state - return empty message

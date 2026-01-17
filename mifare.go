@@ -228,7 +228,7 @@ func (t *MIFARETag) authenticateWithNDEFKey(ctx context.Context, sector uint8, k
 	}
 
 	key := t.ndefKey.bytes()
-	err := t.AuthenticateRobust(ctx, sector, keyType, key)
+	err := t.AuthenticateWithRetry(ctx, sector, keyType, key)
 
 	// SECURITY: Zero key copy after use
 	for i := range key {
@@ -528,9 +528,9 @@ func (t *MIFARETag) readBlockCommunicateThru(ctx context.Context, block uint8) (
 	return data[:mifareBlockSize], nil
 }
 
-// ReadNDEFRobust reads NDEF data with retry logic to handle intermittent empty data issues
+// ReadNDEFWithRetry reads NDEF data with retry logic to handle intermittent empty data issues
 // This addresses the "empty valid tag" problem where tags are detected but return no data
-func (t *MIFARETag) ReadNDEFRobust(ctx context.Context) (*NDEFMessage, error) {
+func (t *MIFARETag) ReadNDEFWithRetry(ctx context.Context) (*NDEFMessage, error) {
 	return readNDEFWithRetry(func() (*NDEFMessage, error) {
 		return t.ReadNDEF(ctx)
 	}, isMifareRetryableError, "MIFARE")
@@ -1102,7 +1102,7 @@ func (t *MIFARETag) Authenticate(ctx context.Context, sector uint8, keyType byte
 }
 
 // authenticateOnce performs a single authentication attempt with quick reinit on failure.
-// Used during key probing to avoid the heavy retry logic of AuthenticateRobust.
+// Used during key probing to avoid the heavy retry logic of AuthenticateWithRetry.
 // Returns nil on success, error on failure.
 func (t *MIFARETag) authenticateOnce(ctx context.Context, sector uint8, keyType byte, key []byte) error {
 	if err := ctx.Err(); err != nil {
@@ -1119,9 +1119,9 @@ func (t *MIFARETag) authenticateOnce(ctx context.Context, sector uint8, keyType 
 	return err
 }
 
-// AuthenticateRobust performs robust authentication with retry logic and Chinese clone support
+// AuthenticateWithRetry performs robust authentication with retry logic and Chinese clone support
 // This is the recommended method for authenticating with unreliable tags
-func (t *MIFARETag) AuthenticateRobust(ctx context.Context, sector uint8, keyType byte, key []byte) error {
+func (t *MIFARETag) AuthenticateWithRetry(ctx context.Context, sector uint8, keyType byte, key []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1132,7 +1132,7 @@ func (t *MIFARETag) AuthenticateRobust(ctx context.Context, sector uint8, keyTyp
 	}()
 
 	// Try standard authentication first
-	err := t.authenticateWithRetry(ctx, sector, keyType, key)
+	err := t.authRetryLoop(ctx, sector, keyType, key)
 	if err == nil {
 		return nil
 	}
@@ -1163,8 +1163,8 @@ func (t *MIFARETag) AuthenticateRobust(ctx context.Context, sector uint8, keyTyp
 	return fmt.Errorf("%w after all attempts: %w", ErrTagAuthFailed, err)
 }
 
-// authenticateWithRetry implements progressive retry strategy
-func (t *MIFARETag) authenticateWithRetry(ctx context.Context, sector uint8, keyType byte, key []byte) error {
+// authRetryLoop implements progressive retry strategy
+func (t *MIFARETag) authRetryLoop(ctx context.Context, sector uint8, keyType byte, key []byte) error {
 	var lastErr error
 
 	for attempt := range t.config.RetryConfig.MaxAttempts {
@@ -1458,7 +1458,7 @@ func (t *MIFARETag) updateSectorKeys(ctx context.Context, sector uint8, ndefKeyB
 func (t *MIFARETag) reAuthenticateWithNDEFKey(ctx context.Context, sector uint8, ndefKeyBytes []byte) error {
 	// CRITICAL FIX: Re-authenticate with the new NDEF key
 	// This ensures the PN532 authentication state matches the new keys on the tag
-	if err := t.AuthenticateRobust(ctx, sector, MIFAREKeyA, ndefKeyBytes); err != nil {
+	if err := t.AuthenticateWithRetry(ctx, sector, MIFAREKeyA, ndefKeyBytes); err != nil {
 		return fmt.Errorf("failed to re-authenticate sector %d with new NDEF key: %w", sector, err)
 	}
 	return nil
@@ -1476,7 +1476,7 @@ func (t *MIFARETag) formatForNDEFWithKey(ctx context.Context, blankKey []byte) e
 
 	for sector := uint8(1); sector < maxSectors; sector++ {
 		// First authenticate with the blank key
-		if err := t.AuthenticateRobust(ctx, sector, MIFAREKeyA, blankKey); err != nil {
+		if err := t.AuthenticateWithRetry(ctx, sector, MIFAREKeyA, blankKey); err != nil {
 			// If we can't authenticate, assume this sector is already formatted or protected
 			continue
 		}

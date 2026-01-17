@@ -94,7 +94,7 @@ func (t *MIFARETag) IsNDEFFormatted(ctx context.Context) bool {
 // Returns an error if formatting fails at any step.
 func (t *MIFARETag) FormatForNDEF(ctx context.Context) error {
 	// Authenticate with sector 0 using factory key
-	if err := t.AuthenticateRobust(ctx, 0, MIFAREKeyA, factoryKey); err != nil {
+	if err := t.AuthenticateWithRetry(ctx, 0, MIFAREKeyA, factoryKey); err != nil {
 		return fmt.Errorf("failed to authenticate sector 0: %w", err)
 	}
 
@@ -112,7 +112,7 @@ func (t *MIFARETag) FormatForNDEF(ctx context.Context) error {
 	// Format remaining sectors for NDEF
 	for sector := uint8(1); sector < maxSectors; sector++ {
 		// Try to authenticate with factory key - skip if not accessible
-		if err := t.AuthenticateRobust(ctx, sector, MIFAREKeyA, factoryKey); err != nil {
+		if err := t.AuthenticateWithRetry(ctx, sector, MIFAREKeyA, factoryKey); err != nil {
 			continue
 		}
 
@@ -141,7 +141,7 @@ func (t *MIFARETag) authenticateWithKeyFallbackAlt(ctx context.Context) (*authen
 	result := &authenticationResult{}
 
 	// Try to authenticate with NDEF key on sector 1
-	err := t.AuthenticateRobust(ctx, 1, MIFAREKeyA, ndefKey)
+	err := t.AuthenticateWithRetry(ctx, 1, MIFAREKeyA, ndefKey)
 	if err == nil {
 		result.isNDEFFormatted = true
 		return result, nil
@@ -251,9 +251,9 @@ func (t *MIFARETag) WriteBlockAutoAlternative(ctx context.Context, block uint8, 
 func (t *MIFARETag) authenticateWithNDEFKeyAlt(ctx context.Context, sector uint8, keyType byte) error {
 	switch keyType {
 	case MIFAREKeyA:
-		return t.AuthenticateRobust(ctx, sector, keyType, ndefKey)
+		return t.AuthenticateWithRetry(ctx, sector, keyType, ndefKey)
 	case MIFAREKeyB:
-		return t.AuthenticateRobust(ctx, sector, keyType, factoryKey)
+		return t.AuthenticateWithRetry(ctx, sector, keyType, factoryKey)
 	}
 	return nil
 }

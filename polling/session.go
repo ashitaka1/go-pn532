@@ -340,7 +340,7 @@ func (s *Session) WriteToTag(
 	s.writeMutex.Lock()
 	defer s.writeMutex.Unlock()
 
-	// Enhanced pause with acknowledgment - now requires context
+	// Pause with ACK handshake to ensure clean state before stopping
 	if err := s.pauseWithAck(sessionCtx); err != nil {
 		return fmt.Errorf("failed to pause polling: %w", err)
 	}

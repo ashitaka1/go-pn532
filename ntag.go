@@ -223,9 +223,9 @@ func (t *NTAGTag) WriteBlock(ctx context.Context, block uint8, data []byte) erro
 	return nil
 }
 
-// ReadNDEFRobust reads NDEF data with retry logic to handle intermittent empty data issues
+// ReadNDEFWithRetry reads NDEF data with retry logic to handle intermittent empty data issues
 // This addresses the "empty valid tag" problem where tags are detected but return no data
-func (t *NTAGTag) ReadNDEFRobust(ctx context.Context) (*NDEFMessage, error) {
+func (t *NTAGTag) ReadNDEFWithRetry(ctx context.Context) (*NDEFMessage, error) {
 	return readNDEFWithRetry(func() (*NDEFMessage, error) {
 		return t.ReadNDEF(ctx)
 	}, isRetryableError, "NDEF")

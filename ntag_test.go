@@ -1380,7 +1380,7 @@ func TestNTAGTag_DebugInfo(t *testing.T) {
 
 	device, mockTransport := createMockDeviceWithTransport(t)
 
-	// Mock for ReadNDEFRobust called by DebugInfoWithNDEF
+	// Mock for ReadNDEFWithRetry called by DebugInfoWithNDEF
 	mockTransport.SetError(0x40, errors.New("read error"))
 
 	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56}, 0x00)
