@@ -798,6 +798,8 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 func setupMIFARETagTest(t *testing.T, setupMock func(*MockTransport)) (*MIFARETag, *MockTransport) {
 	t.Helper()
 	mt := NewMockTransport()
+	// Select target by default - tag operations require a target to be selected
+	mt.SelectTarget()
 	setupMock(mt)
 	device := &Device{transport: mt}
 	uid := []byte{0x04, 0x56, 0x78, 0x9A}
@@ -937,17 +939,15 @@ func TestMIFARETag_ResetAuthState(t *testing.T) {
 	}{
 		{
 			name: "Successful_Reset",
-			setupMock: func(mt *MockTransport) {
-				// Setup successful InListPassiveTarget response
-				resetData := []byte{0xD5, 0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04, 0x56, 0x78, 0x9A}
-				mt.SetResponse(0x4A, resetData) // InListPassiveTarget
+			setupMock: func(_ *MockTransport) {
+				// Default responses from mock are sufficient
 			},
 		},
 		{
 			name: "Reset_Communication_Error",
 			setupMock: func(mt *MockTransport) {
-				// Setup communication error
-				mt.SetError(0x4A, errors.New("communication error"))
+				// InDeselect succeeds but InSelect fails with communication error
+				mt.SetError(0x54, errors.New("communication error"))
 			},
 			expectError:   true,
 			errorContains: "communication error",
@@ -960,6 +960,8 @@ func TestMIFARETag_ResetAuthState(t *testing.T) {
 
 			// Create mock transport and device
 			mt := NewMockTransport()
+			// Select target by default - tag operations require a target to be selected
+			mt.SelectTarget()
 			tt.setupMock(mt)
 
 			device := &Device{transport: mt}
@@ -1392,7 +1394,7 @@ func TestMIFARETag_authenticateWithNDEFKeyAlt(t *testing.T) {
 //
 // These tests verify the fix for MIFARE key fallback.
 // When the first key fails, the code should:
-// 1. Call InListPassiveTarget to re-select the tag (failed auth puts tag in HALT)
+// 1. Call InDeselect + InSelect to re-select the tag (failed auth puts tag in HALT)
 // 2. Try the alternative key
 // 3. Proceed with the read/write operation
 
@@ -1409,8 +1411,7 @@ func TestMIFARETag_ReadBlockAuto_KeyFallbackSucceeds(t *testing.T) {
 			[]byte{0x41, 0x00}, // Key B auth succeeds
 			append([]byte{0x41, 0x00}, make([]byte, 16)...), // Read returns 16 bytes
 		)
-		// InListPassiveTarget response for re-select
-		mt.SetResponse(0x4A, []byte{0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04})
+		// Default mock responses for InDeselect (0x44) and InSelect (0x54) are sufficient
 	})
 	tag.SetConfig(testMIFAREConfig())
 
@@ -1420,8 +1421,10 @@ func TestMIFARETag_ReadBlockAuto_KeyFallbackSucceeds(t *testing.T) {
 	assert.Len(t, data, 16)
 	// The fact that this succeeds proves the re-select is working
 	// (without re-select, Key B auth would fail due to HALT state)
-	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x4A), 1,
-		"InListPassiveTarget should be called for re-select")
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x44), 1,
+		"InDeselect should be called for re-select")
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x54), 1,
+		"InSelect should be called for re-select")
 }
 
 func TestMIFARETag_WriteBlockAuto_KeyFallbackSucceeds(t *testing.T) {
@@ -1436,14 +1439,15 @@ func TestMIFARETag_WriteBlockAuto_KeyFallbackSucceeds(t *testing.T) {
 			[]byte{0x41, 0x00}, // Key A auth succeeds
 			[]byte{0x41, 0x00}, // Write succeeds
 		)
-		// InListPassiveTarget response for re-select
-		mt.SetResponse(0x4A, []byte{0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04})
+		// Default mock responses for InDeselect (0x44) and InSelect (0x54) are sufficient
 	})
 	tag.SetConfig(testMIFAREConfig())
 
 	err := tag.WriteBlockAuto(context.Background(), 4, make([]byte, 16))
 
 	require.NoError(t, err, "WriteBlockAuto should succeed with Key A fallback")
-	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x4A), 1,
-		"InListPassiveTarget should be called for re-select")
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x44), 1,
+		"InDeselect should be called for re-select")
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x54), 1,
+		"InSelect should be called for re-select")
 }

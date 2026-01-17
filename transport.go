@@ -83,6 +83,15 @@ type TransportCapabilityChecker interface {
 	HasCapability(capability TransportCapability) bool
 }
 
+// Reconnecter is implemented by transports that support reconnecting without
+// recreating the transport instance. This is used for "nuclear" recovery when
+// the PN532 firmware enters a complete lockup state (no ACKs to any commands).
+type Reconnecter interface {
+	// Reconnect closes and reopens the underlying connection.
+	// This is a last-resort recovery mechanism for firmware lockups.
+	Reconnect() error
+}
+
 // PN532PowerMode represents the power mode state of the PN532
 type PN532PowerMode int
 
@@ -175,8 +184,8 @@ func (m *MockTransport) SendCommand(cmd byte, data []byte) ([]byte, error) {
 	}
 	m.mu.Unlock()
 
-	// Default response for unknown commands
-	return []byte{0xD5, cmd + 1, 0x00}, nil // Basic ACK response
+	// Default responses for common commands that expect specific formats
+	return m.defaultResponse(cmd)
 }
 
 // SendCommandWithContext implements Transport interface with context support
@@ -239,8 +248,22 @@ func (m *MockTransport) SendCommandWithContext(ctx context.Context, cmd byte, da
 	}
 	m.mu.Unlock()
 
-	// Default response for unknown commands
-	return []byte{0xD5, cmd + 1, 0x00}, nil // Basic ACK response
+	// Default responses for common commands that expect specific formats
+	return m.defaultResponse(cmd)
+}
+
+// defaultResponse returns the appropriate default response for common commands
+func (*MockTransport) defaultResponse(cmd byte) ([]byte, error) {
+	switch cmd {
+	case cmdInDeselect:
+		return []byte{0x45, 0x00}, nil // InDeselect success
+	case cmdInSelect:
+		return []byte{0x55, 0x00}, nil // InSelect success
+	case cmdInRelease:
+		return []byte{0x53, 0x00}, nil // InRelease success
+	default:
+		return []byte{0xD5, cmd + 1, 0x00}, nil // Generic ACK response
+	}
 }
 
 // Close implements Transport interface
@@ -362,7 +385,7 @@ func (m *MockTransport) validateState(cmd byte) error {
 		if !m.targetSelected {
 			return fmt.Errorf("no target selected, cannot execute command 0x%02X (call InListPassiveTarget first)", cmd)
 		}
-	case cmdInRelease, cmdInSelect:
+	case cmdInRelease, cmdInSelect, cmdInDeselect:
 		// These require a target to be selected
 		if !m.targetSelected {
 			return fmt.Errorf("no target selected, cannot execute command 0x%02X", cmd)

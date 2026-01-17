@@ -208,7 +208,7 @@ func (t *NTAGTag) WriteBlock(ctx context.Context, block uint8, data []byte) erro
 	cmd = append(cmd, ntagCmdWrite, block)
 	cmd = append(cmd, data...)
 
-	_, err := t.device.SendDataExchange(ctx, cmd)
+	_, err := t.device.SendDataExchangeWithRetry(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 	}
@@ -227,6 +227,11 @@ func (t *NTAGTag) ReadNDEFRobust(ctx context.Context) (*NDEFMessage, error) {
 // isRetryableError determines if an error is worth retrying
 func isRetryableError(err error) bool {
 	if err == nil {
+		return false
+	}
+
+	// Never retry on transport lockup - device needs hard reset
+	if errors.Is(err, ErrNoACK) {
 		return false
 	}
 

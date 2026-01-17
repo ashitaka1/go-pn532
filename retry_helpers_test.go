@@ -49,7 +49,7 @@ func TestWriteNDEFWithRetry_SuccessAfterRetries(t *testing.T) {
 		callCount++
 		if callCount < 3 {
 			// Return a retryable error for the first 2 attempts
-			return ErrNoACK
+			return ErrTransportTimeout
 		}
 		return nil
 	}
@@ -110,7 +110,7 @@ func TestWriteNDEFWithRetry_ContextCancelledDuringBackoff(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 				cancel()
 			}()
-			return ErrNoACK // Retryable error
+			return ErrTransportTimeout // Retryable error
 		}
 		return nil
 	}
@@ -132,14 +132,14 @@ func TestWriteNDEFWithRetry_MaxRetriesExhausted(t *testing.T) {
 	callCount := 0
 	writeFunc := func(_ context.Context) error {
 		callCount++
-		return ErrNoACK // Always return retryable error
+		return ErrTransportTimeout // Always return retryable error
 	}
 
 	err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to write TEST NDEF data after 3 retries")
-	require.ErrorIs(t, err, ErrNoACK)
+	require.ErrorIs(t, err, ErrTransportTimeout)
 	assert.Equal(t, 3, callCount, "should call writeFunc maxRetries times")
 }
 
@@ -149,7 +149,7 @@ func TestWriteNDEFWithRetry_DefaultMaxRetries(t *testing.T) {
 	callCount := 0
 	writeFunc := func(_ context.Context) error {
 		callCount++
-		return ErrNoACK // Always return retryable error
+		return ErrTransportTimeout // Always return retryable error
 	}
 
 	err := WriteNDEFWithRetry(context.Background(), writeFunc, 0, "TEST")
@@ -164,7 +164,7 @@ func TestWriteNDEFWithRetry_ExponentialBackoffTiming(t *testing.T) {
 	var timestamps []time.Time
 	writeFunc := func(_ context.Context) error {
 		timestamps = append(timestamps, time.Now())
-		return ErrNoACK // Always return retryable error
+		return ErrTransportTimeout // Always return retryable error
 	}
 
 	start := time.Now()
@@ -197,7 +197,7 @@ func TestWriteNDEFWithRetry_MixedRetryableAndNonRetryable(t *testing.T) {
 	writeFunc := func(_ context.Context) error {
 		callCount++
 		if callCount == 1 {
-			return ErrNoACK // First: retryable
+			return ErrTransportTimeout // First: retryable
 		}
 		return nonRetryableErr // Second: non-retryable
 	}
@@ -213,10 +213,9 @@ func TestWriteNDEFWithRetry_VariousRetryableErrors(t *testing.T) {
 	t.Parallel()
 
 	retryableErrors := []error{
-		ErrNoACK,
 		ErrTransportTimeout,
 		ErrFrameCorrupted,
-		NewTransportError("write", "/dev/test", ErrNoACK, ErrorTypeTransient),
+		NewTransportError("write", "/dev/test", ErrTransportTimeout, ErrorTypeTransient),
 	}
 
 	for _, testErr := range retryableErrors {

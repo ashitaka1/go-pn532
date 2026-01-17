@@ -89,7 +89,7 @@ func TestSession_CallbackSetters(t *testing.T) {
 		session := NewSession(device, nil)
 
 		var called atomic.Bool
-		session.SetOnCardDetected(func(_ *pn532.DetectedTag) error {
+		session.SetOnCardDetected(func(_ context.Context, _ *pn532.DetectedTag) error {
 			called.Store(true)
 			return nil
 		})
@@ -121,7 +121,7 @@ func TestSession_CallbackSetters(t *testing.T) {
 		session := NewSession(device, nil)
 
 		var called atomic.Bool
-		session.SetOnCardChanged(func(_ *pn532.DetectedTag) error {
+		session.SetOnCardChanged(func(_ context.Context, _ *pn532.DetectedTag) error {
 			called.Store(true)
 			return nil
 		})
@@ -148,7 +148,7 @@ func TestSession_CallbackSettersConcurrent(t *testing.T) {
 
 		go func() {
 			defer wg.Done()
-			session.SetOnCardDetected(func(_ *pn532.DetectedTag) error {
+			session.SetOnCardDetected(func(_ context.Context, _ *pn532.DetectedTag) error {
 				return nil
 			})
 		}()
@@ -160,7 +160,7 @@ func TestSession_CallbackSettersConcurrent(t *testing.T) {
 
 		go func() {
 			defer wg.Done()
-			session.SetOnCardChanged(func(_ *pn532.DetectedTag) error {
+			session.SetOnCardChanged(func(_ context.Context, _ *pn532.DetectedTag) error {
 				return nil
 			})
 		}()
@@ -1707,13 +1707,13 @@ func TestSession_RFStabilityCheck(t *testing.T) {
 
 		detectedTag := createTestDetectedTag()
 		var callbackCalled bool
-		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+		session.OnCardDetected = func(_ context.Context, _ *pn532.DetectedTag) error {
 			callbackCalled = true
 			return nil
 		}
 
 		// Process should return nil (silent skip), not call callback
-		err := session.processPollingResults(detectedTag)
+		err := session.processPollingResults(context.Background(), detectedTag)
 
 		require.NoError(t, err)
 		assert.False(t, callbackCalled, "callback should not be called when RF is unstable")
@@ -1732,12 +1732,12 @@ func TestSession_RFStabilityCheck(t *testing.T) {
 
 		detectedTag := createTestDetectedTag()
 		var callbackCalled bool
-		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+		session.OnCardDetected = func(_ context.Context, _ *pn532.DetectedTag) error {
 			callbackCalled = true
 			return nil
 		}
 
-		err := session.processPollingResults(detectedTag)
+		err := session.processPollingResults(context.Background(), detectedTag)
 
 		require.NoError(t, err)
 		assert.True(t, callbackCalled, "callback should be called when RF is stable")
@@ -1754,12 +1754,12 @@ func TestSession_RFStabilityCheck(t *testing.T) {
 
 		detectedTag := createTestDetectedTag()
 		callbackErr := errors.New("NDEF read failed")
-		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+		session.OnCardDetected = func(_ context.Context, _ *pn532.DetectedTag) error {
 			return callbackErr
 		}
 
 		// First call - should fail silently (not return error)
-		err := session.processPollingResults(detectedTag)
+		err := session.processPollingResults(context.Background(), detectedTag)
 
 		require.NoError(t, err, "first failure should be silent")
 		state := session.GetState()
@@ -1782,14 +1782,14 @@ func TestSession_RFStabilityCheck_RepeatedFailures(t *testing.T) {
 
 		detectedTag := createTestDetectedTag()
 		callbackErr := errors.New("NDEF read failed")
-		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+		session.OnCardDetected = func(_ context.Context, _ *pn532.DetectedTag) error {
 			return callbackErr
 		}
 
 		// All calls should return nil - we never give up, just keep retrying
 		// until success or physical card removal (inferred from absence)
 		for i := 1; i <= 5; i++ {
-			err := session.processPollingResults(detectedTag)
+			err := session.processPollingResults(context.Background(), detectedTag)
 			require.NoError(t, err, "failure %d should still return nil (never give up)", i)
 			assert.Equal(t, i, session.GetState().ConsecutiveStableFailures)
 		}
@@ -1804,7 +1804,7 @@ func TestSession_RFStabilityCheck_RepeatedFailures(t *testing.T) {
 
 		detectedTag := createTestDetectedTag()
 		failCount := 0
-		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+		session.OnCardDetected = func(_ context.Context, _ *pn532.DetectedTag) error {
 			failCount++
 			if failCount <= 2 {
 				return errors.New("transient error")
@@ -1813,14 +1813,14 @@ func TestSession_RFStabilityCheck_RepeatedFailures(t *testing.T) {
 		}
 
 		// First two calls fail silently
-		_ = session.processPollingResults(detectedTag)
+		_ = session.processPollingResults(context.Background(), detectedTag)
 		assert.Equal(t, 1, session.GetState().ConsecutiveStableFailures)
 
-		_ = session.processPollingResults(detectedTag)
+		_ = session.processPollingResults(context.Background(), detectedTag)
 		assert.Equal(t, 2, session.GetState().ConsecutiveStableFailures)
 
 		// Third call succeeds - should reset counter
-		err := session.processPollingResults(detectedTag)
+		err := session.processPollingResults(context.Background(), detectedTag)
 		require.NoError(t, err)
 		state := session.GetState()
 		assert.Equal(t, 0, state.ConsecutiveStableFailures)
@@ -1841,19 +1841,19 @@ func TestSession_RFStabilityCheck_CounterReset(t *testing.T) {
 		mockTransport.SetResponse(0x54, []byte{0x55, 0x00})
 
 		detectedTag := createTestDetectedTag()
-		session.OnCardDetected = func(_ *pn532.DetectedTag) error {
+		session.OnCardDetected = func(_ context.Context, _ *pn532.DetectedTag) error {
 			return errors.New("callback error")
 		}
 
 		// First call increments failure counter
-		_ = session.processPollingResults(detectedTag)
+		_ = session.processPollingResults(context.Background(), detectedTag)
 		assert.Equal(t, 1, session.GetState().ConsecutiveStableFailures)
 
 		// Now make InSelect fail (RF becomes unstable)
 		mockTransport.SetError(0x54, errors.New("RF unstable"))
 
 		// This should reset the failure counter
-		err := session.processPollingResults(detectedTag)
+		err := session.processPollingResults(context.Background(), detectedTag)
 		require.NoError(t, err)
 		assert.Equal(t, 0, session.GetState().ConsecutiveStableFailures)
 	})
@@ -1919,7 +1919,7 @@ func TestHandleCallbackFailure_ResetsPresentFlag(t *testing.T) {
 	session.stateMutex.Unlock()
 
 	// Handle a callback failure
-	err := session.handleCallbackFailure(errors.New("NDEF read failed"))
+	err := session.handleCallbackFailure(context.Background(), errors.New("NDEF read failed"))
 
 	// Verify behavior
 	state := session.GetState()
@@ -1950,7 +1950,7 @@ func TestHandleCallbackFailure_IncrementsFailureCounter(t *testing.T) {
 		session.state.Present = true
 		session.stateMutex.Unlock()
 
-		err := session.handleCallbackFailure(errors.New("failure"))
+		err := session.handleCallbackFailure(context.Background(), errors.New("failure"))
 		require.NoError(t, err)
 
 		state := session.GetState()
@@ -1975,7 +1975,7 @@ func TestHandleCallbackFailure_AlwaysReturnsNil(t *testing.T) {
 	}
 
 	for _, testErr := range testErrors {
-		err := session.handleCallbackFailure(testErr)
+		err := session.handleCallbackFailure(context.Background(), testErr)
 		assert.NoError(t, err,
 			"handleCallbackFailure should always return nil for error: %v", testErr)
 	}

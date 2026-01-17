@@ -23,6 +23,7 @@ const (
 	cmdGetGeneralStatus    = 0x04
 	cmdInListPassiveTarget = 0x4A
 	cmdInDataExchange      = 0x40
+	cmdInDeselect          = 0x44
 	cmdInRelease           = 0x52
 	cmdInSelect            = 0x54
 	cmdInAutoPoll          = 0x60

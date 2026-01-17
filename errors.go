@@ -220,7 +220,6 @@ func IsRetryable(err error) bool {
 		errors.Is(err, ErrTransportRead),
 		errors.Is(err, ErrTransportWrite),
 		errors.Is(err, ErrCommunicationFailed),
-		errors.Is(err, ErrNoACK),
 		errors.Is(err, ErrFrameCorrupted),
 		errors.Is(err, ErrChecksumMismatch),
 		errors.Is(err, ErrTagReadFailed),

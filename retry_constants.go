@@ -101,4 +101,9 @@ const (
 	TransportACKDelay2 = 100 * time.Millisecond
 	// TransportACKDelay3 is the final ACK wait delay.
 	TransportACKDelay3 = 200 * time.Millisecond
+
+	// TransportACKTimeout is the maximum time to wait for an ACK response.
+	// ACKs should arrive quickly - this timeout catches device lockups fast.
+	// Note: This caps the per-retry ACK wait; total time = ACKTimeout * ACKRetries.
+	TransportACKTimeout = 500 * time.Millisecond
 )

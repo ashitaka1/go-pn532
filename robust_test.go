@@ -619,21 +619,18 @@ func TestWriteNDEFWithRetry(t *testing.T) {
 		assert.Equal(t, int32(3), atomic.LoadInt32(&attempts), "Should default to 3 retries when 0 provided")
 	})
 
-	t.Run("ACK error is retried", func(t *testing.T) {
+	t.Run("ACK error is not retried", func(t *testing.T) {
 		t.Parallel()
 
 		var attempts int32
 		writeFunc := func(_ context.Context) error {
-			count := atomic.AddInt32(&attempts, 1)
-			if count < 2 {
-				return ErrNoACK // ACK error should be retryable
-			}
-			return nil
+			atomic.AddInt32(&attempts, 1)
+			return ErrNoACK // ACK error is NOT retryable (transport already retried)
 		}
 
 		err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
-		require.NoError(t, err)
-		assert.Equal(t, int32(2), atomic.LoadInt32(&attempts), "Should retry on ACK errors")
+		require.Error(t, err)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&attempts), "Should NOT retry on ACK errors")
 	})
 
 	t.Run("PN532 timeout error is retried", func(t *testing.T) {

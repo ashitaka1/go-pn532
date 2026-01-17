@@ -76,9 +76,9 @@ func getIsRetryableTestCases() []struct {
 			want: true,
 		},
 		{
-			name: "no ACK retryable",
+			name: "no ACK not retryable",
 			err:  ErrNoACK,
-			want: true,
+			want: false,
 		},
 		{
 			name: "frame corrupted retryable",

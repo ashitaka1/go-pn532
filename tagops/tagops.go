@@ -280,7 +280,6 @@ func isDefinitivelyNotNTAG(err error) bool {
 func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
 	mifare := pn532.NewMIFARETag(t.device, t.tag.UIDBytes, t.tag.SAK)
 
-	var lastErr error
 	for i := range initMaxRetries {
 		if err := ctx.Err(); err != nil {
 			return false
@@ -295,19 +294,17 @@ func (t *TagOperations) tryInitMIFARE(ctx context.Context) bool {
 			return true
 		}
 
-		lastErr = err
-
 		if i < initMaxRetries-1 {
 			pn532.Debugf("MIFARE init attempt %d/%d failed (retrying): %v", i+1, initMaxRetries, err)
 			time.Sleep(initRetryDelay)
 		}
 	}
 
-	if lastErr != nil {
-		pn532.Debugf("MIFARE init failed after %d attempts: %v", initMaxRetries, lastErr)
-		// Cycle RF field to clear accumulated bad state from auth failures
-		// This prevents PN532 hang on next InListPassiveTarget call
-		_ = t.device.CycleRFField()
-	}
-	return false
+	// Auth failed but tag is still valid MIFARE - just can't read NDEF
+	// Cycle RF field to clear accumulated bad state from auth failures
+	_ = t.device.CycleRFField()
+	pn532.Debugln("MIFARE auth failed, accepting tag as unauthenticated (UID-only)")
+	t.tagType = pn532.TagTypeMIFARE
+	t.mifareInstance = mifare
+	return true
 }

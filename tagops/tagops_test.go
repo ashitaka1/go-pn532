@@ -340,6 +340,27 @@ func TestTagOperations_ReadNDEF_UnsupportedType(t *testing.T) {
 	assert.Nil(t, message)
 }
 
+func TestTagOperations_ReadNDEF_UnauthenticatedMIFARE(t *testing.T) {
+	// Unauthenticated MIFARE tags should return empty NDEF (not error)
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+
+	mifare := pn532.NewMIFARETag(device, []byte{0x01, 0x02, 0x03, 0x04}, 0x08)
+	// Don't call TryAuthenticate - tag is unauthenticated
+
+	ops := &TagOperations{
+		tag:            &pn532.DetectedTag{UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}},
+		tagType:        pn532.TagTypeMIFARE,
+		mifareInstance: mifare,
+	}
+
+	message, err := ops.ReadNDEF(context.Background())
+	require.NoError(t, err, "Unauthenticated MIFARE should not error")
+	require.NotNil(t, message, "Should return empty NDEF message")
+	assert.Empty(t, message.Records, "NDEF message should have no records")
+}
+
 // --- Writer Tests ---
 
 func TestTagOperations_WriteBlocks_NoTag(t *testing.T) {
@@ -549,9 +570,11 @@ func TestTryInitMIFARE_SucceedsWithValidAuth(t *testing.T) {
 	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType)
 }
 
-func TestDetectAndInitializeTag_NTAG_FallsBackToMIFARE(t *testing.T) {
-	// Test that when pre-detected as NTAG but NTAG init fails,
+func TestDetectAndInitializeTag_UnknownFallsBackToMIFARE(t *testing.T) {
+	// Test that when type is Unknown and NTAG init fails,
 	// the code falls back to MIFARE and succeeds if MIFARE auth works.
+	// Note: Only Unknown/FeliCa types try both NTAG and MIFARE fallback.
+	// Pre-typed tags (NTAG, MIFARE) only try their specific init.
 
 	mockTransport := pn532.NewMockTransport()
 	device, err := pn532.New(mockTransport)
@@ -563,14 +586,14 @@ func TestDetectAndInitializeTag_NTAG_FallsBackToMIFARE(t *testing.T) {
 
 	ops := New(device)
 	ops.tag = &pn532.DetectedTag{
-		Type:     pn532.TagTypeNTAG,              // Pre-detected as NTAG
-		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}, // But 4-byte UID = invalid for NTAG
+		Type:     pn532.TagTypeUnknown,           // Unknown type triggers fallback
+		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}, // 4-byte UID
 		SAK:      0x08,
 	}
 
 	err = ops.detectAndInitializeTag(context.Background())
 
-	// Should succeed via MIFARE fallback
+	// Should succeed via MIFARE fallback (NTAG fails, MIFARE succeeds)
 	require.NoError(t, err)
 	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType, "Should fall back to MIFARE")
 }
@@ -835,16 +858,16 @@ func TestTryInitNTAG_StopsOnDefinitiveFailure(t *testing.T) {
 }
 
 func TestTryInitMIFARE_RetriesOnTransientErrors(t *testing.T) {
-	// Verify that tryInitMIFARE attempts multiple retries on failure
-	// Note: Full MIFARE init requires auth+read which is complex to mock,
-	// so we just verify that multiple attempts are made
+	// Verify that tryInitMIFARE attempts multiple retries on auth failure
+	// Even when all auth attempts fail, MIFARE init succeeds (tag is usable for UID)
+	// but the MIFARE instance will be marked as unauthenticated
 
 	mockTransport := pn532.NewMockTransport()
 	device, err := pn532.New(mockTransport)
 	require.NoError(t, err)
 	mockTransport.SelectTarget()
 
-	// Make all attempts fail - we just want to verify retry count
+	// Make all auth attempts fail - we just want to verify retry count
 	mockTransport.SetResponse(0x40, []byte{0x41, 0x01}) // Timeout error
 
 	ops := New(device)
@@ -855,8 +878,11 @@ func TestTryInitMIFARE_RetriesOnTransientErrors(t *testing.T) {
 
 	result := ops.tryInitMIFARE(context.Background())
 
-	assert.False(t, result, "tryInitMIFARE should fail when all retries fail")
-	// Verify multiple attempts were made (should be initMaxRetries = 3)
+	// MIFARE init now succeeds even without auth (tag is usable for UID-only)
+	assert.True(t, result, "tryInitMIFARE should succeed (unauthenticated)")
+	assert.NotNil(t, ops.mifareInstance, "MIFARE instance should be set")
+	assert.False(t, ops.mifareInstance.IsAuthenticated(), "MIFARE should be unauthenticated")
+	// Verify multiple attempts were made
 	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x40), 2,
 		"Should make multiple retry attempts")
 }
@@ -889,16 +915,16 @@ func TestDetectAndInitializeTag_TriesFallbackOnNTAGFailure(t *testing.T) {
 	assert.Positive(t, mockTransport.GetCallCount(0x40), "Should have sent commands")
 }
 
-func TestDetectAndInitializeTag_TriesFallbackOnMIFAREFailure(t *testing.T) {
+func TestDetectAndInitializeTag_MIFARESucceedsWithoutAuth(t *testing.T) {
 	t.Parallel()
 
-	// Verify that when MIFARE init fails, NTAG fallback is attempted
+	// Verify that MIFARE init succeeds even when auth fails (unauthenticated mode)
 	mockTransport := pn532.NewMockTransport()
 	device, err := pn532.New(mockTransport)
 	require.NoError(t, err)
 	mockTransport.SelectTarget()
 
-	// Make all init attempts fail
+	// Make all auth attempts fail
 	mockTransport.SetResponse(0x40, []byte{0x41, 0x14}) // Auth error
 
 	ops := New(device)
@@ -908,21 +934,23 @@ func TestDetectAndInitializeTag_TriesFallbackOnMIFAREFailure(t *testing.T) {
 		SAK:      0x08,
 	}
 
-	// Should fail after trying both MIFARE and NTAG
+	// Should succeed - MIFARE tags are valid even without auth (UID-only mode)
 	err = ops.detectAndInitializeTag(context.Background())
-	require.Error(t, err)
-	assert.Equal(t, ErrUnsupportedTag, err)
+	require.NoError(t, err)
+	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType)
+	assert.NotNil(t, ops.mifareInstance)
+	assert.False(t, ops.mifareInstance.IsAuthenticated(), "Should be unauthenticated")
 
-	// Verify commands were sent
-	assert.Positive(t, mockTransport.GetCallCount(0x40), "Should have sent commands")
+	// Verify auth commands were attempted
+	assert.Positive(t, mockTransport.GetCallCount(0x40), "Should have sent auth commands")
 }
 
 // --- Retry Constants Tests ---
 
 func TestRetryConstants(t *testing.T) {
 	// Verify the retry constants are set to expected values
-	assert.Equal(t, 3, initMaxRetries,
-		"initMaxRetries should be 3")
-	assert.Equal(t, 10*time.Millisecond, initRetryDelay,
-		"initRetryDelay should be 10ms")
+	assert.Equal(t, 5, initMaxRetries,
+		"initMaxRetries should be 5")
+	assert.Equal(t, 50*time.Millisecond, initRetryDelay,
+		"initRetryDelay should be 50ms")
 }

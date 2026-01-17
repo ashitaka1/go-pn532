@@ -267,8 +267,10 @@ func runReadMode(ctx context.Context, device *pn532.Device, _ *config) error {
 	ops := tagops.New(device)
 
 	// Set up tag detection callback using the setter method
-	session.SetOnCardDetected(func(detectedTag *pn532.DetectedTag) error {
-		return handleTagDetected(ctx, ops, detectedTag)
+	// The callback receives a context with a timeout from the poll cycle,
+	// ensuring long-running operations (like MIFARE auth) can be cancelled
+	session.SetOnCardDetected(func(callbackCtx context.Context, detectedTag *pn532.DetectedTag) error {
+		return handleTagDetected(callbackCtx, ops, detectedTag)
 	})
 
 	// Set up tag removal callback using the setter method

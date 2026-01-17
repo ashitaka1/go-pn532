@@ -189,7 +189,7 @@ func TestErrorChainRetryability(t *testing.T) {
 		{
 			name: "mixed chain with retryable",
 			errorChain: func() error {
-				base := ErrNoACK
+				base := ErrFrameCorrupted
 				wrapped := fmt.Errorf("command failed: %w", base)
 				return fmt.Errorf("operation failed: %w", wrapped)
 			},

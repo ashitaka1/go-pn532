@@ -314,6 +314,47 @@ func (t *Transport) IsConnected() bool {
 	return t.port != nil
 }
 
+// Reconnect closes and reopens the serial port connection.
+// This is used for "nuclear" recovery when the PN532 firmware enters a
+// complete lockup state where it stops ACKing any commands.
+func (t *Transport) Reconnect() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Close existing port if open
+	if t.port != nil {
+		_ = t.port.Close()
+		t.port = nil
+	}
+
+	// Wait for hardware settle time
+	time.Sleep(100 * time.Millisecond)
+
+	// Reopen with same settings
+	port, err := serial.Open(t.portName, &serial.Mode{
+		BaudRate: 115200,
+		DataBits: 8,
+		Parity:   serial.NoParity,
+		StopBits: serial.OneStopBit,
+	})
+	if err != nil {
+		return fmt.Errorf("reconnect failed: %w", err)
+	}
+
+	// Set read timeout
+	timeout := getReadTimeout()
+	if err := port.SetReadTimeout(timeout); err != nil {
+		_ = port.Close()
+		return fmt.Errorf("reconnect set timeout failed: %w", err)
+	}
+
+	t.port = port
+	t.currentTimeout = timeout
+	t.connectionEstablished = false // Will be set true on first successful command
+
+	return nil
+}
+
 // Type returns the transport type
 func (*Transport) Type() pn532.TransportType {
 	return pn532.TransportUART
@@ -467,57 +508,99 @@ func (t *Transport) sendNack() error {
 	return t.drainWithRetry("NACK")
 }
 
-// waitAck waits for an ACK frame, returning any extra data received before it
-// This handles the Windows driver bug where ACK packets may be delivered out of order
+// applyACKTimeout sets a short timeout for ACK reads and returns a cleanup function.
+// ACKs should arrive quickly, so we cap at TransportACKTimeout to detect lockups faster.
+func (t *Transport) applyACKTimeout() (deadline time.Time, cleanup func(), err error) {
+	ackTimeout := min(t.currentTimeout, pn532.TransportACKTimeout)
+	originalTimeout := t.currentTimeout
+
+	if err := t.setTimeoutUnlocked(ackTimeout); err != nil {
+		return time.Time{}, nil, fmt.Errorf("failed to set ACK timeout: %w", err)
+	}
+
+	cleanup = func() { _ = t.setTimeoutUnlocked(originalTimeout) }
+	deadline = time.Now().Add(ackTimeout)
+	pn532.Debugf("waitAck: starting, currentTimeout=%v", ackTimeout)
+	return deadline, cleanup, nil
+}
+
+// ackBuffers holds pooled buffers for ACK processing
+type ackBuffers struct {
+	readBuf []byte // single byte read buffer
+	ackBuf  []byte // ACK frame accumulator (6 bytes)
+	preAck  []byte // pre-ACK data buffer
+}
+
+// getACKBuffers allocates pooled buffers for ACK processing
+func getACKBuffers() *ackBuffers {
+	return &ackBuffers{
+		readBuf: frame.GetSmallBuffer(1),
+		ackBuf:  frame.GetSmallBuffer(6)[:0],
+		preAck:  frame.GetSmallBuffer(16)[:0],
+	}
+}
+
+// release returns buffers to the pool
+func (b *ackBuffers) release() {
+	frame.PutBuffer(b.readBuf)
+	frame.PutBuffer(b.ackBuf[:cap(b.ackBuf)])
+	frame.PutBuffer(b.preAck[:cap(b.preAck)])
+}
+
+// waitAck waits for an ACK frame, returning any extra data received before it.
+// This handles the Windows driver bug where ACK packets may be delivered out of order.
+//
+//nolint:gocognit // ACK byte-scanning with timeout inherently requires multiple conditions
 func (t *Transport) waitAck() ([]byte, error) {
-	tries := 0
-	maxTries := 32 // bytes to scan through
+	bufs := getACKBuffers()
+	defer bufs.release()
 
-	// Use buffer pool for ACK processing - reduces small allocations
-	buf := frame.GetSmallBuffer(1)
-	defer frame.PutBuffer(buf)
+	deadline, cleanup, err := t.applyACKTimeout()
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 
-	ackBuf := frame.GetSmallBuffer(6) // ACK is 6 bytes
-	defer frame.PutBuffer(ackBuf)
-	ackBuf = ackBuf[:0] // Reset length
-
-	preAck := frame.GetSmallBuffer(16) // Pre-ACK data buffer
-	defer frame.PutBuffer(preAck)
-	preAck = preAck[:0] // Reset length
-
-	for {
-		if tries >= maxTries {
-			t.traceTimeout("No ACK after 32 bytes")
-			return preAck, pn532.NewNoACKError("waitAck", t.portName)
-		}
-
-		n, err := t.port.Read(buf)
+	tries, maxTries := 0, 32
+	for !time.Now().After(deadline) && tries < maxTries {
+		n, err := t.port.Read(bufs.readBuf)
 		if err != nil {
-			return preAck, fmt.Errorf("UART ACK read failed: %w", err)
-		} else if n == 0 {
+			pn532.Debugf("waitAck: read error at try %d: %v", tries, err)
+			return bufs.preAck, fmt.Errorf("UART ACK read failed: %w", err)
+		}
+		if n == 0 {
 			tries++
 			continue
 		}
 
-		ackBuf = append(ackBuf, buf[0])
-		if len(ackBuf) < 6 {
+		bufs.ackBuf = append(bufs.ackBuf, bufs.readBuf[0])
+		if len(bufs.ackBuf) < 6 {
 			continue
 		}
 
-		if bytes.Equal(ackBuf, ackFrame) {
+		if bytes.Equal(bufs.ackBuf, ackFrame) {
 			t.traceRX(ackFrame, "ACK")
-			// Copy preAck data to new buffer for return since we'll release the pooled buffer
-			if len(preAck) == 0 {
+			if len(bufs.preAck) == 0 {
 				return []byte{}, nil
 			}
-			result := make([]byte, len(preAck))
-			copy(result, preAck)
+			result := make([]byte, len(bufs.preAck))
+			copy(result, bufs.preAck)
 			return result, nil
 		}
-		preAck = append(preAck, ackBuf[0])
-		ackBuf = ackBuf[1:]
+		bufs.preAck = append(bufs.preAck, bufs.ackBuf[0])
+		bufs.ackBuf = bufs.ackBuf[1:]
 		tries++
 	}
+
+	// Timeout or max tries reached
+	if time.Now().After(deadline) {
+		t.traceTimeout("ACK deadline exceeded")
+		pn532.Debugf("waitAck: deadline exceeded after %d tries", tries)
+	} else {
+		t.traceTimeout("No ACK after 32 bytes")
+		pn532.Debugf("waitAck: no ACK after %d tries", maxTries)
+	}
+	return bufs.preAck, pn532.NewNoACKError("waitAck", t.portName)
 }
 
 // sendFrame sends a frame to the PN532 with automatic retry on ACK failures.
@@ -600,8 +683,8 @@ func (t *Transport) sendFrame(cmd byte, args []byte) ([]byte, error) {
 
 		lastErr = err
 
-		// Only retry on transient errors (ACK timeout, NACK, frame corruption, etc.)
-		if !pn532.IsRetryable(err) {
+		// Only retry on transient ACK-level errors
+		if !errors.Is(err, pn532.ErrNoACK) && !errors.Is(err, pn532.ErrNACKReceived) && !errors.Is(err, pn532.ErrFrameCorrupted) {
 			return nil, err
 		}
 
@@ -1002,5 +1085,8 @@ func (*Transport) HasCapability(capability pn532.TransportCapability) bool {
 	}
 }
 
-// Ensure Transport implements pn532.Transport
-var _ pn532.Transport = (*Transport)(nil)
+// Ensure Transport implements pn532.Transport and pn532.Reconnecter
+var (
+	_ pn532.Transport   = (*Transport)(nil)
+	_ pn532.Reconnecter = (*Transport)(nil)
+)

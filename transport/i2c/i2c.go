@@ -19,6 +19,7 @@ package i2c
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -133,8 +134,10 @@ func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
 
 		lastErr = err
 
-		// Only retry on ACK-related errors (no ACK received)
-		if !pn532.IsRetryable(err) {
+		// Only retry on transient ACK-level errors
+		if !errors.Is(err, pn532.ErrNoACK) &&
+			!errors.Is(err, pn532.ErrNACKReceived) &&
+			!errors.Is(err, pn532.ErrFrameCorrupted) {
 			return nil, t.currentTrace.WrapError(err)
 		}
 

@@ -78,6 +78,44 @@ func (d *Device) Reset(ctx context.Context) error {
 	return d.InitContext(ctx)
 }
 
+// HardReset performs a "nuclear" recovery by closing and reopening the transport
+// connection, then reinitializing the PN532. This is the last resort when the PN532
+// enters a complete firmware lockup (stops ACKing any commands).
+//
+// This recovery is more disruptive than Reset() but handles cases where the PN532
+// firmware is completely unresponsive. It requires the transport to implement the
+// Reconnecter interface.
+//
+// Returns an error if the transport doesn't support reconnection or if recovery fails.
+func (d *Device) HardReset(ctx context.Context) error {
+	Debugln("HardReset: attempting nuclear recovery")
+
+	// Check if transport supports reconnection
+	reconnecter, ok := d.transport.(Reconnecter)
+	if !ok {
+		return errors.New("transport does not support reconnection")
+	}
+
+	// Close and reopen the transport
+	if err := reconnecter.Reconnect(); err != nil {
+		return fmt.Errorf("HardReset reconnect failed: %w", err)
+	}
+
+	// Allow PN532 to boot after reconnection
+	time.Sleep(50 * time.Millisecond)
+
+	// Clear internal state
+	d.firmwareVersion = nil
+
+	// Reinitialize with SAMConfiguration
+	if err := d.SAMConfiguration(ctx, SAMModeNormal, 0, 0); err != nil {
+		return fmt.Errorf("HardReset SAMConfiguration failed: %w", err)
+	}
+
+	Debugln("HardReset: recovery successful")
+	return nil
+}
+
 // shouldSkipFirmwareVersion checks if transport supports firmware version retrieval
 func (*Device) shouldSkipFirmwareVersion() bool {
 	// All transports now support firmware version retrieval
@@ -653,6 +691,29 @@ func (d *Device) InRelease(ctx context.Context) error {
 	return nil
 }
 
+// InDeselect deselects all targets while keeping target information in PN532 memory.
+// Unlike InRelease, this allows InSelect to re-select the target later.
+// For MIFARE cards, this sends HLTA which puts the tag in HALT state.
+// Use InSelect after InDeselect to wake up HALTed tags with WUPA.
+func (d *Device) InDeselect(ctx context.Context) error {
+	// Deselect all targets (target 0 = all targets)
+	res, err := d.transport.SendCommandWithContext(ctx, cmdInDeselect, []byte{0x00})
+	if err != nil {
+		return fmt.Errorf("InDeselect command failed: %w", err)
+	}
+
+	if len(res) != 2 || res[0] != 0x45 {
+		return errors.New("unexpected InDeselect response")
+	}
+
+	// Check status byte
+	if res[1] != 0x00 {
+		return fmt.Errorf("InDeselect failed with status: %02x", res[1])
+	}
+
+	return nil
+}
+
 // InSelect selects target 1 for communication with context support
 func (d *Device) InSelect(ctx context.Context) error {
 	const targetNumber byte = 1
@@ -797,15 +858,21 @@ func (d *Device) executeInListPassiveTarget(ctx context.Context, data []byte) ([
 		prevTimeout = d.config.Timeout
 	}
 	computed := d.computeInListHostTimeout(ctx, data)
+	Debugf("executeInListPassiveTarget: computed timeout=%v, prevTimeout=%v", computed, prevTimeout)
 	// Best-effort set; if it fails we'll proceed with previous timeout
-	_ = d.transport.SetTimeout(computed)
+	if err := d.transport.SetTimeout(computed); err != nil {
+		Debugf("executeInListPassiveTarget: SetTimeout failed: %v", err)
+	}
 	// Restore previous timeout after the command completes
 	defer func() { _ = d.transport.SetTimeout(prevTimeout) }()
 
+	Debugln("executeInListPassiveTarget: calling SendCommandWithContext")
 	result, err := d.transport.SendCommandWithContext(ctx, cmdInListPassiveTarget, data)
 	if err != nil {
+		Debugf("executeInListPassiveTarget: SendCommandWithContext failed: %v", err)
 		return nil, fmt.Errorf("failed to send InListPassiveTarget command: %w", err)
 	}
+	Debugf("executeInListPassiveTarget: SendCommandWithContext succeeded, result len=%d", len(result))
 	return result, nil
 }
 
@@ -819,7 +886,7 @@ func (d *Device) computeInListHostTimeout(ctx context.Context, data []byte) time
 
 	// When mxRtyATR (3rd byte) is provided, derive a timeout from it.
 	if len(data) >= 3 {
-		return d.computeTimeoutFromRetryCount(ctx, data[2], fallback)
+		return d.computeTimeoutFromRetryCount(ctx, data[2])
 	}
 
 	// No mxRtyATR provided; use context deadline if present or fallback
@@ -827,7 +894,7 @@ func (d *Device) computeInListHostTimeout(ctx context.Context, data []byte) time
 }
 
 // computeTimeoutFromRetryCount calculates timeout based on mxRtyATR retry count
-func (d *Device) computeTimeoutFromRetryCount(ctx context.Context, mx byte, fallback time.Duration) time.Duration {
+func (d *Device) computeTimeoutFromRetryCount(ctx context.Context, mx byte) time.Duration {
 	// 0xFF means infinite retry on hardware; rely on context or cap to a safe upper bound
 	if mx == 0xFF {
 		return d.handleInfiniteRetry(ctx)
@@ -836,8 +903,14 @@ func (d *Device) computeTimeoutFromRetryCount(ctx context.Context, mx byte, fall
 	// Each retry ~150ms; add small baseline slack for host/driver overhead
 	expected := time.Duration(int(mx))*150*time.Millisecond + 300*time.Millisecond
 
-	// Apply bounds and respect context deadline
-	return d.applyTimeoutBounds(ctx, expected, fallback)
+	// When mx is explicitly set (not 0xFF), honor the calculated timeout directly
+	// without enforcing the device default minimum. This allows quick re-selects
+	// with low retry counts (e.g., mx=0x02 for ~600ms timeout).
+	// Only cap to reasonable maximum and respect context deadline.
+	expected = min(expected, 8*time.Second)
+
+	// Respect context deadline if sooner
+	return d.getContextTimeoutOrFallback(ctx, expected)
 }
 
 // handleInfiniteRetry handles the special case of infinite retry (0xFF)
@@ -849,22 +922,6 @@ func (*Device) handleInfiniteRetry(ctx context.Context) time.Duration {
 	}
 	// No deadline; choose a conservative cap
 	return 10 * time.Second
-}
-
-// applyTimeoutBounds ensures timeout is within reasonable bounds and respects context
-func (d *Device) applyTimeoutBounds(ctx context.Context, expected, fallback time.Duration) time.Duration {
-	// Ensure we don't go below device default
-	if expected < fallback {
-		expected = fallback
-	}
-
-	// Cap to a reasonable maximum to avoid excessive blocking when mx is large
-	if expected > 8*time.Second {
-		expected = 8 * time.Second
-	}
-
-	// Respect context deadline if sooner
-	return d.getContextTimeoutOrFallback(ctx, expected)
 }
 
 // getContextTimeoutOrFallback returns context deadline if present and positive, otherwise fallback

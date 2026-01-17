@@ -79,6 +79,10 @@ func (t *TagOperations) ReadNDEF(ctx context.Context) (*pn532.NDEFMessage, error
 		}
 		return ndefMsg, nil
 	case pn532.TagTypeMIFARE:
+		// Unauthenticated MIFARE tags can't be read - return empty NDEF
+		if !t.mifareInstance.IsAuthenticated() {
+			return &pn532.NDEFMessage{}, nil
+		}
 		ndefMsg, err := t.mifareInstance.ReadNDEFRobust(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read NDEF from MIFARE: %w", err)
