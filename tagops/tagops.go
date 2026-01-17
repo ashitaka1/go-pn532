@@ -180,6 +180,15 @@ func (t *TagOperations) GetUID() []byte {
 	return t.tag.UIDBytes
 }
 
+// GetCachedCapabilityContainer returns the CC bytes cached during NTAG detection.
+// Returns nil if the tag is not an NTAG or if DetectType has not been called.
+func (t *TagOperations) GetCachedCapabilityContainer() []byte {
+	if t.ntagInstance == nil {
+		return nil
+	}
+	return t.ntagInstance.GetCachedCapabilityContainer()
+}
+
 // detectAndInitializeTag determines the tag type and sets up the appropriate handler
 func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 	if t.tag == nil {

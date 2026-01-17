@@ -954,3 +954,66 @@ func TestRetryConstants(t *testing.T) {
 	assert.Equal(t, 50*time.Millisecond, initRetryDelay,
 		"initRetryDelay should be 50ms")
 }
+
+// --- GetCachedCapabilityContainer Tests ---
+
+func TestTagOperations_GetCachedCapabilityContainer_NilNtagInstance(t *testing.T) {
+	ops := &TagOperations{
+		tag:          &pn532.DetectedTag{UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}},
+		tagType:      pn532.TagTypeNTAG,
+		ntagInstance: nil, // NTAG type but no instance
+	}
+
+	cc := ops.GetCachedCapabilityContainer()
+
+	assert.Nil(t, cc, "GetCachedCapabilityContainer should return nil when ntagInstance is nil")
+}
+
+func TestTagOperations_GetCachedCapabilityContainer_NotNTAG(t *testing.T) {
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+
+	mifare := pn532.NewMIFARETag(device, []byte{0x01, 0x02, 0x03, 0x04}, 0x08)
+
+	ops := &TagOperations{
+		tag:            &pn532.DetectedTag{UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}},
+		tagType:        pn532.TagTypeMIFARE,
+		mifareInstance: mifare,
+		ntagInstance:   nil,
+	}
+
+	cc := ops.GetCachedCapabilityContainer()
+
+	assert.Nil(t, cc, "GetCachedCapabilityContainer should return nil for non-NTAG tags")
+}
+
+func TestTagOperations_GetCachedCapabilityContainer_ReturnsCC(t *testing.T) {
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// Expected CC for NTAG215: [0xE1, 0x10, 0x3E, 0x00]
+	expectedCC := []byte{0xE1, 0x10, 0x3E, 0x00}
+	ccResponse := make([]byte, 16) // NTAG read returns 16 bytes
+	copy(ccResponse, expectedCC)
+
+	// Mock CC read response
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, ccResponse...))
+
+	ops := New(device)
+	tag := &pn532.DetectedTag{
+		UID:      "04010203040506",
+		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+		Type:     pn532.TagTypeNTAG,
+	}
+
+	err = ops.InitFromDetectedTag(context.Background(), tag)
+	require.NoError(t, err)
+
+	// After initialization, GetCachedCapabilityContainer should return the CC
+	cc := ops.GetCachedCapabilityContainer()
+	require.NotNil(t, cc, "GetCachedCapabilityContainer should return cached CC after init")
+	assert.Equal(t, expectedCC, cc, "Cached CC should match the CC read during DetectType")
+}

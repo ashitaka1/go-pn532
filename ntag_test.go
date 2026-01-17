@@ -1911,3 +1911,98 @@ func TestNTAGReadBlock_ShortResponseIsRetryable(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid response length",
 		"Error should mention invalid response length")
 }
+
+// --- Capability Container Caching Tests ---
+// These tests verify the CC caching feature for Amiibo/LEGO Dimensions identification.
+
+func TestNTAGTag_GetCachedCapabilityContainer_NilBeforeDetectType(t *testing.T) {
+	t.Parallel()
+
+	device, _ := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
+
+	// Before DetectType is called, GetCachedCapabilityContainer should return nil
+	cc := tag.GetCachedCapabilityContainer()
+	assert.Nil(t, cc, "GetCachedCapabilityContainer should return nil before DetectType")
+}
+
+func TestNTAGTag_GetCachedCapabilityContainer_ReturnsCC(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
+
+	// Expected CC for NTAG215: [0xE1, 0x10, 0x3E, 0x00]
+	expectedCC := []byte{0xE1, 0x10, 0x3E, 0x00}
+	ccResponse := make([]byte, 16) // NTAG read returns 16 bytes
+	copy(ccResponse, expectedCC)
+
+	// Mock CC read response
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, ccResponse...))
+
+	err := tag.DetectType(context.Background())
+	require.NoError(t, err)
+
+	// After DetectType, GetCachedCapabilityContainer should return the CC
+	cc := tag.GetCachedCapabilityContainer()
+	require.NotNil(t, cc, "GetCachedCapabilityContainer should return cached CC after DetectType")
+	assert.Equal(t, expectedCC, cc, "Cached CC should match the CC read during DetectType")
+}
+
+func TestNTAGTag_GetCachedCapabilityContainer_ReturnsNonNDEFCC(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
+
+	// Non-NDEF CC (e.g., Amiibo) - magic byte is NOT 0xE1
+	nonNDEFCC := []byte{0xA5, 0x00, 0x00, 0x00}
+	ccResponse := make([]byte, 16)
+	copy(ccResponse, nonNDEFCC)
+
+	// Mock responses: CC read, then probe reads for type detection
+	mockTransport.QueueResponses(0x40,
+		append([]byte{0x41, 0x00}, ccResponse...), // CC read
+		[]byte{0x41, 0x00},                        // page 45 probe - short response = inaccessible
+	)
+
+	err := tag.DetectType(context.Background())
+	require.NoError(t, err)
+
+	// CC should still be cached even for non-NDEF tags
+	cc := tag.GetCachedCapabilityContainer()
+	require.NotNil(t, cc, "GetCachedCapabilityContainer should return cached CC for non-NDEF tags")
+	assert.Equal(t, nonNDEFCC, cc, "Cached CC should match the CC read during DetectType")
+}
+
+func TestNTAGTag_GetCachedCapabilityContainer_ReturnsCopy(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+	tag := NewNTAGTag(device, []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, 0x00)
+
+	expectedCC := []byte{0xE1, 0x10, 0x3E, 0x00}
+	ccResponse := make([]byte, 16)
+	copy(ccResponse, expectedCC)
+
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, ccResponse...))
+
+	err := tag.DetectType(context.Background())
+	require.NoError(t, err)
+
+	// Get the cached CC
+	cc1 := tag.GetCachedCapabilityContainer()
+	require.NotNil(t, cc1)
+
+	// Modify the returned slice
+	cc1[0] = 0xFF
+
+	// Get it again - should be unchanged (proves it's a copy, not reference)
+	cc2 := tag.GetCachedCapabilityContainer()
+	require.NotNil(t, cc2)
+
+	assert.Equal(t, expectedCC, cc2,
+		"GetCachedCapabilityContainer should return a copy, not a reference to internal state")
+	assert.NotEqual(t, cc1[0], cc2[0],
+		"Modifying returned CC should not affect subsequent calls")
+}
