@@ -189,6 +189,16 @@ func (t *TagOperations) GetCachedCapabilityContainer() []byte {
 	return t.ntagInstance.GetCachedCapabilityContainer()
 }
 
+// GetCachedUserDataPage returns the first user data page (page 4) cached during NTAG detection.
+// This is useful for detecting special token types like Amiibo (byte 0 = 0xA5).
+// Returns nil if the tag is not an NTAG or if DetectType has not been called.
+func (t *TagOperations) GetCachedUserDataPage() []byte {
+	if t.ntagInstance == nil {
+		return nil
+	}
+	return t.ntagInstance.GetCachedUserDataPage()
+}
+
 // detectAndInitializeTag determines the tag type and sets up the appropriate handler
 func (t *TagOperations) detectAndInitializeTag(ctx context.Context) error {
 	if t.tag == nil {
