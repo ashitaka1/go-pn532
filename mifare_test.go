@@ -363,10 +363,6 @@ func getMIFAREWriteBlockErrorCases() []struct {
 	}
 }
 
-// Removed - test cases consolidated into getMIFAREWriteBlockTestCases
-
-// Removed - test cases consolidated into getMIFAREWriteBlockTestCases
-
 func TestMIFARETag_Authenticate(t *testing.T) {
 	t.Parallel()
 

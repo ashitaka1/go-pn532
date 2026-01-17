@@ -490,9 +490,7 @@ func TestIdentifyTagType(t *testing.T) {
 	}
 }
 
-// TestCreateTag tests tag creation for different tag types
-//
-
+// TestCreateTag tests tag creation for different tag types.
 func TestCreateTag(t *testing.T) {
 	t.Parallel()
 

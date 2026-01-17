@@ -343,9 +343,7 @@ func (t *MIFARETag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) 
 	return data[:mifareBlockSize], nil
 }
 
-// ReadBlockDirect reads a block directly without authentication (for clone tags)
-//
-
+// ReadBlockDirect reads a block directly without authentication (for clone tags).
 func (t *MIFARETag) ReadBlockDirect(ctx context.Context, block uint8) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

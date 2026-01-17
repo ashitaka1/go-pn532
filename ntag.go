@@ -168,9 +168,7 @@ func (t *NTAGTag) HasNDEF() bool {
 	return t.hasNDEF
 }
 
-// ReadBlock reads a block from the NTAG tag
-//
-
+// ReadBlock reads a block from the NTAG tag.
 func (t *NTAGTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

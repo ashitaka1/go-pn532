@@ -440,8 +440,6 @@ func createMockDevice(t *testing.T) *Device {
 	return device
 }
 
-// Removed duplicate - using the one from mifare_test.go
-
 // TestNTAG215LargeDataCrash reproduces the crash reported by user with large NDEF data
 func TestNTAG215LargeDataCrash(t *testing.T) {
 	t.Parallel()
