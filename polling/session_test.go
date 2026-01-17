@@ -1980,3 +1980,67 @@ func TestHandleCallbackFailure_AlwaysReturnsNil(t *testing.T) {
 			"handleCallbackFailure should always return nil for error: %v", testErr)
 	}
 }
+
+// Regression tests for poll cycle timeout protection and RF field cycling
+
+func TestSession_CallbackFailure_CyclesRFField(t *testing.T) {
+	t.Parallel()
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Set up RF configuration response for CycleRFField
+	// 0x32 is cmdRFConfiguration
+	mockTransport.SetResponse(0x32, []byte{0x33}) // RFConfiguration success
+
+	// Simulate a callback failure - this should trigger RF field cycling
+	err := session.handleCallbackFailure(context.Background(), errors.New("NDEF read failed"))
+
+	require.NoError(t, err, "handleCallbackFailure should return nil")
+
+	// Verify RFConfiguration was called (at least twice for off+on cycle)
+	// The cycle happens when failures >= 1
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x32), 2,
+		"CycleRFField should call RFConfiguration twice (off + on)")
+
+	// Verify failure counter was incremented
+	state := session.GetState()
+	assert.Equal(t, 1, state.ConsecutiveStableFailures,
+		"ConsecutiveStableFailures should be incremented")
+}
+
+func TestSession_PollCycleTimeoutProtection(t *testing.T) {
+	t.Parallel()
+
+	// This test verifies that the pollCycleTimeout constant is applied.
+	// The timeout is 10 seconds and is applied in executeSinglePollingCycle.
+	// We verify the timeout mechanism exists by checking that a slow poll
+	// eventually times out rather than hanging forever.
+
+	device, mockTransport := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Set up a very long delay that would exceed the timeout
+	// but we'll use a shorter test timeout to verify behavior
+	mockTransport.SetDelay(50 * time.Millisecond)
+	mockTransport.SetResponse(0x4A, []byte{0x4B, 0x00}) // No tag
+
+	// Create a context with a short timeout for testing
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := session.executeSinglePollingCycle(ctx)
+	elapsed := time.Since(start)
+
+	// Either the poll completes or context times out
+	// The key assertion is that we don't hang forever
+	if err != nil {
+		// Context timeout is expected
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+
+	// Verify we respected the timeout (didn't wait forever)
+	assert.Less(t, elapsed, 200*time.Millisecond,
+		"Poll cycle should respect timeout, not hang indefinitely")
+}

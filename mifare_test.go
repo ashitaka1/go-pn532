@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -720,6 +721,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 		name          string
 		errorContains string
 		expectError   bool
+		expectEmpty   bool // When true, verify message has empty Records
 	}{
 		{
 			name: "Authentication_Failure",
@@ -728,6 +730,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				mt.SetError(0x40, errors.New("authentication failed"))
 			},
 			expectError: false, // Auth failure = not NDEF formatted = empty NDEF, not error
+			expectEmpty: true,  // Regression: auth failure should return empty NDEF, not nil
 		},
 		{
 			name: "Empty_NDEF_Data",
@@ -773,7 +776,11 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				assert.Nil(t, message)
 			} else {
 				require.NoError(t, err)
-				assert.NotNil(t, message)
+				require.NotNil(t, message, "NDEF message should not be nil")
+				if tt.expectEmpty {
+					assert.Empty(t, message.Records,
+						"Auth failure should return empty NDEF message, not records")
+				}
 			}
 		})
 	}
@@ -1436,4 +1443,73 @@ func TestMIFARETag_WriteBlockAuto_KeyFallbackSucceeds(t *testing.T) {
 		"InDeselect should be called for re-select")
 	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x54), 1,
 		"InSelect should be called for re-select")
+}
+
+// Regression test: TryAuthenticate sets authenticated field
+
+func TestMIFARETag_TryAuthenticate_SetsAuthenticatedField(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success_SetsAuthenticated", func(t *testing.T) {
+		t.Parallel()
+
+		tag, _ := setupMIFARETagTest(t, func(mt *MockTransport) {
+			// Authentication succeeds
+			mt.SetResponse(0x40, []byte{0x41, 0x00})
+		})
+		tag.SetConfig(testMIFAREConfig())
+
+		// Initially not authenticated
+		assert.False(t, tag.IsAuthenticated(), "tag should not be authenticated before TryAuthenticate")
+
+		err := tag.TryAuthenticate(context.Background())
+
+		require.NoError(t, err)
+		assert.True(t, tag.IsAuthenticated(),
+			"tag.authenticated should be true after successful TryAuthenticate")
+	})
+
+	t.Run("Failure_LeavesUnauthenticated", func(t *testing.T) {
+		t.Parallel()
+
+		tag, _ := setupMIFARETagTest(t, func(mt *MockTransport) {
+			// All authentication attempts fail
+			mt.SetError(0x40, errors.New("authentication failed"))
+		})
+		tag.SetConfig(testMIFAREConfig())
+
+		// Initially not authenticated
+		assert.False(t, tag.IsAuthenticated())
+
+		err := tag.TryAuthenticate(context.Background())
+
+		require.Error(t, err)
+		assert.False(t, tag.IsAuthenticated(),
+			"tag.authenticated should remain false after failed TryAuthenticate")
+	})
+}
+
+// Regression test: DefaultMIFAREConfig has correct defaults
+
+func TestMIFAREConfig_DefaultMaxAttempts(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultMIFAREConfig()
+
+	require.NotNil(t, config, "DefaultMIFAREConfig should not return nil")
+	require.NotNil(t, config.RetryConfig, "RetryConfig should not be nil")
+
+	// Verify MaxAttempts is 3 (default for production)
+	assert.Equal(t, 3, config.RetryConfig.MaxAttempts,
+		"DefaultMIFAREConfig.RetryConfig.MaxAttempts should be 3")
+
+	// Also verify other retry config defaults are sensible
+	assert.Greater(t, config.RetryConfig.InitialBackoff, time.Duration(0),
+		"InitialBackoff should be positive")
+	assert.Greater(t, config.RetryConfig.MaxBackoff, config.RetryConfig.InitialBackoff,
+		"MaxBackoff should be greater than InitialBackoff")
+	assert.Greater(t, config.RetryConfig.BackoffMultiplier, float64(1),
+		"BackoffMultiplier should be greater than 1")
+	assert.Greater(t, config.HardwareDelay, time.Duration(0),
+		"HardwareDelay should be positive")
 }

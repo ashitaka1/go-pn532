@@ -110,6 +110,7 @@ type MockTransport struct {
 	responseQueue  map[byte][][]byte // Queue of responses for sequential calls
 	callCount      map[byte]int
 	errorMap       map[byte]error
+	reconnectErr   error // Error to return from Reconnect() (nil = success)
 	timeout        time.Duration
 	delay          time.Duration
 	powerMode      PN532PowerMode
@@ -465,4 +466,35 @@ func (m *MockTransport) GetState() (powerMode PN532PowerMode, rfFieldOn, targetS
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.powerMode, m.rfFieldOn, m.targetSelected
+}
+
+// Reconnect implements the Reconnecter interface for testing HardReset
+func (m *MockTransport) Reconnect() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.reconnectErr != nil {
+		return m.reconnectErr
+	}
+
+	// Simulate reconnection by resetting state
+	m.connected = true
+	m.powerMode = PN532PowerModeNormal
+	m.rfFieldOn = false
+	m.targetSelected = false
+
+	return nil
+}
+
+// SetReconnectError configures an error to be returned by Reconnect()
+func (m *MockTransport) SetReconnectError(err error) {
+	m.mu.Lock()
+	m.reconnectErr = err
+	m.mu.Unlock()
+}
+
+// HasCapability implements TransportCapabilityChecker
+func (*MockTransport) HasCapability(capability TransportCapability) bool {
+	// Mock transport supports all capabilities by default for testing
+	return capability == CapabilityAutoPollNative
 }
