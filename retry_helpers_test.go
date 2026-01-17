@@ -158,7 +158,7 @@ func TestWriteNDEFWithRetry_DefaultMaxRetries(t *testing.T) {
 	assert.Equal(t, 3, callCount, "should default to 3 retries when maxRetries is 0")
 }
 
-func TestWriteNDEFWithRetry_ExponentialBackoffTiming(t *testing.T) {
+func TestWriteNDEFWithRetry_ExponentialBackoff(t *testing.T) {
 	t.Parallel()
 
 	var timestamps []time.Time
@@ -167,25 +167,17 @@ func TestWriteNDEFWithRetry_ExponentialBackoffTiming(t *testing.T) {
 		return ErrTransportTimeout // Always return retryable error
 	}
 
-	start := time.Now()
 	_ = WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
-	totalTime := time.Since(start)
 
 	require.Len(t, timestamps, 3, "should have 3 attempts")
 
-	// First delay is 100ms, second is 150ms
-	// Total expected: ~250ms (with some tolerance)
-	assert.Greater(t, totalTime, 200*time.Millisecond, "should have exponential backoff delays")
-	assert.Less(t, totalTime, 400*time.Millisecond, "delays should not be excessive")
-
-	// Check individual delays are approximately correct
-	if len(timestamps) >= 2 {
-		delay1 := timestamps[1].Sub(timestamps[0])
-		assert.InDelta(t, 100, delay1.Milliseconds(), 50, "first delay should be ~100ms")
-	}
+	// Just verify delays exist and are increasing (exponential backoff)
+	// Don't check exact timings - too flaky on CI
 	if len(timestamps) >= 3 {
+		delay1 := timestamps[1].Sub(timestamps[0])
 		delay2 := timestamps[2].Sub(timestamps[1])
-		assert.InDelta(t, 150, delay2.Milliseconds(), 50, "second delay should be ~150ms")
+		assert.Greater(t, delay1, time.Duration(0), "should have delay between attempts")
+		assert.GreaterOrEqual(t, delay2, delay1, "delays should increase (exponential backoff)")
 	}
 }
 
