@@ -28,13 +28,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestReadNDEFRobust_FunctionExists verifies that the robust reading functions exist and can be called
-func TestReadNDEFRobust_FunctionExists(t *testing.T) {
+// TestReadNDEFWithRetry_FunctionExists verifies that the robust reading functions exist and can be called
+func TestReadNDEFWithRetry_FunctionExists(t *testing.T) {
 	t.Parallel()
 
 	device, mockTransport := createMockDeviceWithTransport(t)
 
-	// Test NTAG ReadNDEFRobust exists
+	// Test NTAG ReadNDEFWithRetry exists
 	uid := []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB}
 	ntagTag := NewNTAGTag(device, uid, 0x00)
 
@@ -45,22 +45,24 @@ func TestReadNDEFRobust_FunctionExists(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	})
 
-	_, err := ntagTag.ReadNDEFRobust(context.Background())
+	_, err := ntagTag.ReadNDEFWithRetry(context.Background())
 	require.Error(t, err) // Should error because no NDEF data
-	t.Log("✓ NTAGTag.ReadNDEFRobust(context.Background()) function exists and callable")
+	t.Log("✓ NTAGTag.ReadNDEFWithRetry(context.Background()) function exists and callable")
 
-	// Test MIFARE ReadNDEFRobust exists
+	// Test MIFARE ReadNDEFWithRetry exists
 	mifareUID := []byte{0x04, 0x12, 0x34, 0x56}
 	mifareTag := NewMIFARETag(device, mifareUID, 0x00)
 
 	// Reset mock for MIFARE test
 	mockTransport.Reset()
-	// Mock auth failure (which should be retryable)
+	// Mock auth failure - this means tag is not NDEF formatted, should return empty NDEF
 	mockTransport.SetError(0x40, errors.New("authentication failed"))
 
-	_, err = mifareTag.ReadNDEFRobust(context.Background())
-	require.Error(t, err) // Should error because auth failed
-	t.Log("✓ MIFARETag.ReadNDEFRobust(context.Background()) function exists and callable")
+	msg, err := mifareTag.ReadNDEFWithRetry(context.Background())
+	require.NoError(t, err) // Auth failure = not NDEF formatted = empty NDEF, not error
+	require.NotNil(t, msg)
+	require.Empty(t, msg.Records)
+	t.Log("✓ MIFARETag.ReadNDEFWithRetry(context.Background()) function exists and callable")
 }
 
 // TestErrorTypeEnhancements verifies that the new error types exist
@@ -170,31 +172,19 @@ func TestReadNDEFWithRetry(t *testing.T) {
 			},
 		},
 		{
-			name: "Empty data on first attempt, success on second",
+			name: "Empty data is valid success",
 			setupFunc: func() (ReadNDEFFunc, IsRetryableFunc) {
-				attempt := 0
 				readFunc := func() (*NDEFMessage, error) {
-					attempt++
-					if attempt == 1 {
-						// Return empty data (simulates "empty valid tag" issue)
-						return &NDEFMessage{Records: []NDEFRecord{}}, nil
-					}
-					// Success on second attempt
-					return &NDEFMessage{
-						Records: []NDEFRecord{
-							{Type: NDEFTypeText, Payload: []byte("Success")},
-						},
-					}, nil
+					// Return empty data - this is valid (e.g., tag with [03 00 FE] TLV)
+					return &NDEFMessage{Records: []NDEFRecord{}}, nil
 				}
 				retryFunc := func(_ error) bool {
-					return false // No errors, just empty data
+					return false
 				}
 				return readFunc, retryFunc
 			},
 			expectedResult: &NDEFMessage{
-				Records: []NDEFRecord{
-					{Type: NDEFTypeText, Payload: []byte("Success")},
-				},
+				Records: []NDEFRecord{}, // Empty is valid
 			},
 		},
 		{
@@ -223,20 +213,6 @@ func TestReadNDEFWithRetry(t *testing.T) {
 					{Type: NDEFTypeText, Payload: []byte("Retry Success")},
 				},
 			},
-		},
-		{
-			name: "Empty data exhausts all retries",
-			setupFunc: func() (ReadNDEFFunc, IsRetryableFunc) {
-				readFunc := func() (*NDEFMessage, error) {
-					// Always return empty data
-					return &NDEFMessage{Records: []NDEFRecord{}}, nil
-				}
-				retryFunc := func(_ error) bool {
-					return false // No errors, just empty data
-				}
-				return readFunc, retryFunc
-			},
-			expectedError: ErrTagEmptyData,
 		},
 		{
 			name: "Non-retryable error fails immediately",
@@ -291,8 +267,8 @@ func TestReadNDEFWithRetry(t *testing.T) {
 	}
 }
 
-// TestNTAGReadNDEFRobust tests NTAG robust reading functionality
-func TestNTAGReadNDEFRobust(t *testing.T) {
+// TestNTAGReadNDEFWithRetry tests NTAG robust reading functionality
+func TestNTAGReadNDEFWithRetry(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -351,7 +327,7 @@ func TestNTAGReadNDEFRobust(t *testing.T) {
 			uid := []byte{0x04, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB}
 			tag := NewNTAGTag(device, uid, 0x00)
 
-			_, err := tag.ReadNDEFRobust(context.Background())
+			_, err := tag.ReadNDEFWithRetry(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -367,8 +343,8 @@ func TestNTAGReadNDEFRobust(t *testing.T) {
 	}
 }
 
-// TestMIFAREReadNDEFRobust tests MIFARE robust reading functionality
-func TestMIFAREReadNDEFRobust(t *testing.T) {
+// TestMIFAREReadNDEFWithRetry tests MIFARE robust reading functionality
+func TestMIFAREReadNDEFWithRetry(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -378,20 +354,21 @@ func TestMIFAREReadNDEFRobust(t *testing.T) {
 		expectError bool
 	}{
 		{
-			name: "Authentication failure retry",
+			name: "Authentication failure returns empty NDEF",
 			setupMock: func(mt *MockTransport) {
-				// Authentication will fail
+				// Authentication will fail - but this is now treated as "not NDEF formatted"
+				// and returns empty NDEF instead of error (consistent with NTAG behavior)
 				mt.SetError(0x40, NewPN532Error(0x14, "InDataExchange", "auth failed"))
 			},
-			expectError: true,
-			errorType:   ErrTagAuthFailed,
+			expectError: false, // Auth failure on sector 1 = not NDEF formatted = empty NDEF
+			errorType:   nil,
 		},
 		{
-			name: "Read failure retry",
+			name: "Read failure after auth success",
 			setupMock: func(mt *MockTransport) {
 				// Set up authentication success first
 				mt.SetResponse(0x40, []byte{0x41, 0x00}) // Auth success
-				// Then read failure
+				// Then read failure - this should still error (auth succeeded, read failed)
 				mt.SetError(0x40, ErrTagReadFailed)
 			},
 			expectError: true,
@@ -400,6 +377,7 @@ func TestMIFAREReadNDEFRobust(t *testing.T) {
 		{
 			name: "Transport timeout triggers retry",
 			setupMock: func(mt *MockTransport) {
+				// Transport timeout is a communication error, not auth failure
 				mt.SetError(0x40, ErrTransportTimeout)
 			},
 			expectError: true,
@@ -417,7 +395,7 @@ func TestMIFAREReadNDEFRobust(t *testing.T) {
 			uid := []byte{0x04, 0x12, 0x34, 0x56}
 			tag := NewMIFARETag(device, uid, 0x00)
 
-			_, err := tag.ReadNDEFRobust(context.Background())
+			_, err := tag.ReadNDEFWithRetry(context.Background())
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -619,21 +597,18 @@ func TestWriteNDEFWithRetry(t *testing.T) {
 		assert.Equal(t, int32(3), atomic.LoadInt32(&attempts), "Should default to 3 retries when 0 provided")
 	})
 
-	t.Run("ACK error is retried", func(t *testing.T) {
+	t.Run("ACK error is not retried", func(t *testing.T) {
 		t.Parallel()
 
 		var attempts int32
 		writeFunc := func(_ context.Context) error {
-			count := atomic.AddInt32(&attempts, 1)
-			if count < 2 {
-				return ErrNoACK // ACK error should be retryable
-			}
-			return nil
+			atomic.AddInt32(&attempts, 1)
+			return ErrNoACK // ACK error is NOT retryable (transport already retried)
 		}
 
 		err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
-		require.NoError(t, err)
-		assert.Equal(t, int32(2), atomic.LoadInt32(&attempts), "Should retry on ACK errors")
+		require.Error(t, err)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&attempts), "Should NOT retry on ACK errors")
 	})
 
 	t.Run("PN532 timeout error is retried", func(t *testing.T) {

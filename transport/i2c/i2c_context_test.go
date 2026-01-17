@@ -37,7 +37,7 @@ func TestI2CContextCancellation(t *testing.T) {
 	cmd := byte(0x02) // GetFirmwareVersion
 	args := []byte{}
 
-	_, err := transport.SendCommandWithContext(ctx, cmd, args)
+	_, err := transport.SendCommand(ctx, cmd, args)
 
 	// We expect this to return context.Canceled immediately
 	if err == nil {

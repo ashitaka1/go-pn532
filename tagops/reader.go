@@ -17,6 +17,7 @@ package tagops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/ZaparooProject/go-pn532"
@@ -73,14 +74,26 @@ func (t *TagOperations) ReadNDEF(ctx context.Context) (*pn532.NDEFMessage, error
 
 	switch t.tagType {
 	case pn532.TagTypeNTAG:
-		ndefMsg, err := t.ntagInstance.ReadNDEFRobust(ctx)
+		ndefMsg, err := t.ntagInstance.ReadNDEFWithRetry(ctx)
 		if err != nil {
+			if errors.Is(err, pn532.ErrNoNDEF) {
+				// No NDEF present is a valid state - return empty message
+				return &pn532.NDEFMessage{}, nil
+			}
 			return nil, fmt.Errorf("failed to read NDEF from NTAG: %w", err)
 		}
 		return ndefMsg, nil
 	case pn532.TagTypeMIFARE:
-		ndefMsg, err := t.mifareInstance.ReadNDEFRobust(ctx)
+		// Unauthenticated MIFARE tags can't be read - return empty NDEF
+		if !t.mifareInstance.IsAuthenticated() {
+			return &pn532.NDEFMessage{}, nil
+		}
+		ndefMsg, err := t.mifareInstance.ReadNDEFWithRetry(ctx)
 		if err != nil {
+			if errors.Is(err, pn532.ErrNoNDEF) {
+				// No NDEF present is a valid state - return empty message
+				return &pn532.NDEFMessage{}, nil
+			}
 			return nil, fmt.Errorf("failed to read NDEF from MIFARE: %w", err)
 		}
 		return ndefMsg, nil

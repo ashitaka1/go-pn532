@@ -19,6 +19,7 @@ package spi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -171,73 +172,89 @@ func (t *Transport) waitReady() error {
 	return pn532.NewTransportNotReadyError("waitReady", t.portName)
 }
 
-// SendCommand sends a command to the PN532 and waits for response.
-// Includes automatic retry on ACK failures to prevent device lockup.
-//
-//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
-func (t *Transport) SendCommand(cmd byte, args []byte) ([]byte, error) {
-	const maxACKRetries = 3
-	ackRetryDelays := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
+// sleepCtx performs a context-aware sleep. Returns ctx.Err() if context is cancelled.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
-	// Create trace buffer for this command (only used on error)
-	t.currentTrace = pn532.NewTraceBuffer("SPI", t.portName, 16)
-	defer func() { t.currentTrace = nil }() // Clear after command completes
+// isTransientACKError returns true if the error is a transient ACK-level error worth retrying.
+func isTransientACKError(err error) bool {
+	return errors.Is(err, pn532.ErrNoACK) ||
+		errors.Is(err, pn532.ErrNACKReceived) ||
+		errors.Is(err, pn532.ErrFrameCorrupted)
+}
+
+// sendWithACKRetry sends a frame and waits for ACK, retrying on transient errors.
+// Returns nil on success, or the last error if all retries are exhausted.
+func (t *Transport) sendWithACKRetry(ctx context.Context, cmd byte, args []byte) error {
+	delays := []time.Duration{pn532.TransportACKDelay1, pn532.TransportACKDelay2, pn532.TransportACKDelay3}
 
 	var lastErr error
-	for attempt := range maxACKRetries {
+	for attempt := range pn532.TransportACKRetries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if err := t.sendFrame(cmd, args); err != nil {
-			return nil, t.currentTrace.WrapError(err)
+			return err
 		}
 
 		err := t.waitAck()
 		if err == nil {
-			// ACK received successfully, proceed to receive response
-			break
+			return nil // ACK received successfully
 		}
-
+		if !isTransientACKError(err) {
+			return err // Non-transient error, don't retry
+		}
 		lastErr = err
-
-		// Only retry on ACK-related errors (no ACK received, NACK received)
-		if !pn532.IsRetryable(err) {
-			return nil, t.currentTrace.WrapError(err)
-		}
 
 		// Wake up device before retry
 		t.wakeup()
 
-		// Wait before retry
-		if attempt < maxACKRetries-1 {
-			time.Sleep(ackRetryDelays[attempt])
-			continue
+		// Wait before retry (except on last attempt)
+		if attempt < pn532.TransportACKRetries-1 {
+			if err := sleepCtx(ctx, delays[attempt]); err != nil {
+				return err
+			}
 		}
+	}
 
-		// All retries exhausted
-		retryErr := fmt.Errorf("send command failed after %d ACK retries: %w", maxACKRetries, lastErr)
-		return nil, t.currentTrace.WrapError(retryErr)
+	return fmt.Errorf("send command failed after %d ACK retries: %w", pn532.TransportACKRetries, lastErr)
+}
+
+// SendCommand sends a command to the PN532 and waits for response.
+// Includes automatic retry on ACK failures to prevent device lockup.
+// Context is checked at key points during the operation to allow cancellation.
+//
+//nolint:wrapcheck // WrapError intentionally wraps errors with trace data
+func (t *Transport) SendCommand(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// Create trace buffer for this command (only used on error)
+	t.currentTrace = pn532.NewTraceBuffer("SPI", t.portName, 16)
+	defer func() { t.currentTrace = nil }()
+
+	if err := t.sendWithACKRetry(ctx, cmd, args); err != nil {
+		return nil, t.currentTrace.WrapError(err)
 	}
 
 	// Small delay for PN532 to process command
-	time.Sleep(6 * time.Millisecond)
+	if err := sleepCtx(ctx, 6*time.Millisecond); err != nil {
+		return nil, err
+	}
 
 	resp, err := t.receiveFrame()
 	if err != nil {
 		return nil, t.currentTrace.WrapError(err)
 	}
 	return resp, nil
-}
-
-// SendCommandWithContext sends a command to the PN532 with context support
-func (t *Transport) SendCommandWithContext(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
-	// Check if context is already cancelled
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	// For now, delegate to existing implementation
-	// TODO: Add context-aware operations
-	return t.SendCommand(cmd, args)
 }
 
 // sendFrame sends a command frame to the PN532

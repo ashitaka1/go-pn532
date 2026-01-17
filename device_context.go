@@ -24,8 +24,8 @@ import (
 	"time"
 )
 
-// InitContext initializes the PN532 device with context support
-func (d *Device) InitContext(ctx context.Context) error {
+// Init initializes the PN532 device with context support
+func (d *Device) Init(ctx context.Context) error {
 	skipFirmwareVersion := d.shouldSkipFirmwareVersion()
 
 	// Test with GetFirmwareVersion first to see if any PN532 commands work via PC/SC
@@ -41,8 +41,8 @@ func (d *Device) InitContext(ctx context.Context) error {
 	}
 
 	// Configure finite passive activation retries to prevent infinite wait lockups
-	// Use 10 retries (~1 second) instead of default 0xFF (infinite)
-	if err := d.SetPassiveActivationRetries(0x0A); err != nil {
+	// Each retry is ~100ms per PN532 datasheet, so 10 retries = ~1 second
+	if err := d.SetPassiveActivationRetries(ctx, DefaultPassiveActivationRetries); err != nil {
 		// Log but don't fail initialization - this is an optimization, not critical
 		// Some older firmware versions might not support this configuration
 		_ = err
@@ -75,7 +75,45 @@ func (d *Device) Reset(ctx context.Context) error {
 	d.firmwareVersion = nil
 
 	// Reinitialize the device
-	return d.InitContext(ctx)
+	return d.Init(ctx)
+}
+
+// HardReset performs a "nuclear" recovery by closing and reopening the transport
+// connection, then reinitializing the PN532. This is the last resort when the PN532
+// enters a complete firmware lockup (stops ACKing any commands).
+//
+// This recovery is more disruptive than Reset() but handles cases where the PN532
+// firmware is completely unresponsive. It requires the transport to implement the
+// Reconnecter interface.
+//
+// Returns an error if the transport doesn't support reconnection or if recovery fails.
+func (d *Device) HardReset(ctx context.Context) error {
+	Debugln("HardReset: attempting nuclear recovery")
+
+	// Check if transport supports reconnection
+	reconnecter, ok := d.transport.(Reconnecter)
+	if !ok {
+		return errors.New("transport does not support reconnection")
+	}
+
+	// Close and reopen the transport
+	if err := reconnecter.Reconnect(); err != nil {
+		return fmt.Errorf("HardReset reconnect failed: %w", err)
+	}
+
+	// Allow PN532 to boot after reconnection
+	time.Sleep(50 * time.Millisecond)
+
+	// Clear internal state
+	d.firmwareVersion = nil
+
+	// Reinitialize with SAMConfiguration
+	if err := d.SAMConfiguration(ctx, SAMModeNormal, 0, 0); err != nil {
+		return fmt.Errorf("HardReset SAMConfiguration failed: %w", err)
+	}
+
+	Debugln("HardReset: recovery successful")
+	return nil
 }
 
 // shouldSkipFirmwareVersion checks if transport supports firmware version retrieval
@@ -143,7 +181,7 @@ func (d *Device) setDefaultFirmwareVersion() {
 
 // GetFirmwareVersion returns the PN532 firmware version
 func (d *Device) GetFirmwareVersion(ctx context.Context) (*FirmwareVersion, error) {
-	res, err := d.transport.SendCommandWithContext(ctx, cmdGetFirmwareVersion, []byte{})
+	res, err := d.transport.SendCommand(ctx, cmdGetFirmwareVersion, []byte{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to send GetFirmwareVersion command: %w", err)
 	}
@@ -249,7 +287,7 @@ func (*Device) createDefaultFirmwareVersion() *FirmwareVersion {
 
 // GetGeneralStatus returns the PN532 general status with context support
 func (d *Device) GetGeneralStatus(ctx context.Context) (*GeneralStatus, error) {
-	res, err := d.transport.SendCommandWithContext(ctx, cmdGetGeneralStatus, []byte{})
+	res, err := d.transport.SendCommand(ctx, cmdGetGeneralStatus, []byte{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to send GetGeneralStatus command: %w", err)
 	}
@@ -269,7 +307,7 @@ func (d *Device) Diagnose(ctx context.Context, testNumber byte, data []byte) (*D
 	// Build command: TestNumber + optional data
 	cmdPayload := append([]byte{testNumber}, data...)
 
-	res, err := d.transport.SendCommandWithContext(ctx, cmdDiagnose, cmdPayload)
+	res, err := d.transport.SendCommand(ctx, cmdDiagnose, cmdPayload)
 	if err != nil {
 		return nil, fmt.Errorf("diagnose command failed: %w", err)
 	}
@@ -333,7 +371,7 @@ func (d *Device) setupSAMConfiguration(ctx context.Context) error {
 
 // SAMConfiguration configures the SAM with context support
 func (d *Device) SAMConfiguration(ctx context.Context, mode SAMMode, timeout, irq byte) error {
-	res, err := d.transport.SendCommandWithContext(ctx, cmdSamConfiguration, []byte{byte(mode), timeout, irq})
+	res, err := d.transport.SendCommand(ctx, cmdSamConfiguration, []byte{byte(mode), timeout, irq})
 	if err != nil {
 		return fmt.Errorf("SAM configuration command failed: %w", err)
 	}
@@ -534,7 +572,7 @@ func (d *Device) SendDataExchange(ctx context.Context, data []byte) ([]byte, err
 	} else {
 		Debugf("SendDataExchange: target=%d, data=(empty), len=0", targetNum)
 	}
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInDataExchange, append([]byte{targetNum}, data...))
+	res, err := d.transport.SendCommand(ctx, cmdInDataExchange, append([]byte{targetNum}, data...))
 	if err != nil {
 		return nil, fmt.Errorf("failed to send data exchange command: %w", err)
 	}
@@ -549,28 +587,34 @@ func (d *Device) SendDataExchange(ctx context.Context, data []byte) ([]byte, err
 		return nil, errors.New("unexpected data exchange response")
 	}
 	if res[1] != 0x00 {
-		// Use enhanced error type for protocol errors with context
 		return nil, NewPN532ErrorWithDetails(res[1], "InDataExchange", len(data), targetNum)
 	}
 	return res[2:], nil
 }
 
-// isRetryableTimeoutError checks if an error is a PN532 timeout (0x01) that should be retried.
-func isRetryableTimeoutError(err error) bool {
+// isRetryableRFError checks if an error is an RF-related PN532 error that should be retried.
+// This includes timeout (0x01) and RF communication errors (CRC, parity, framing, etc.)
+// that commonly occur during card sliding into a reader slot.
+func isRetryableRFError(err error) bool {
 	var pn532Err *PN532Error
-	return errors.As(err, &pn532Err) && pn532Err.IsTimeoutError()
+	if errors.As(err, &pn532Err) {
+		return pn532Err.IsTimeoutError() || pn532Err.IsRFError()
+	}
+	return false
 }
 
-// SendDataExchangeWithRetry sends a data exchange command with automatic retry on timeout.
-// Error 0x01 (timeout) indicates a transient RF communication failure where the packet was
-// lost. Immediate retry typically succeeds as the tag is still in the field.
+// SendDataExchangeWithRetry sends a data exchange command with automatic retry on RF errors.
+// RF errors (timeout, CRC, parity, framing) indicate transient communication failures that
+// commonly occur during card sliding into a reader slot. A small delay between retries
+// allows the RF field to stabilize.
 //
 // Configuration:
 //   - 3 attempts total (1 initial + 2 retries)
-//   - No delay between retries (immediate retry)
-//   - Only retries on timeout errors (0x01)
+//   - 15ms delay between retries (allows RF stabilization)
+//   - Retries on timeout (0x01) and RF errors (CRC, parity, framing, etc.)
 func (d *Device) SendDataExchangeWithRetry(ctx context.Context, data []byte) ([]byte, error) {
 	const maxAttempts = 3
+	const retryDelay = 15 * time.Millisecond
 
 	var lastErr error
 	for attempt := range maxAttempts {
@@ -589,14 +633,15 @@ func (d *Device) SendDataExchangeWithRetry(ctx context.Context, data []byte) ([]
 			return result, nil
 		}
 
-		if !isRetryableTimeoutError(err) {
+		if !isRetryableRFError(err) {
 			return nil, err
 		}
 
-		// Timeout error - save it and retry immediately
+		// RF error - save it and retry after delay
 		lastErr = err
 		if attempt < maxAttempts-1 {
-			Debugf("SendDataExchangeWithRetry: timeout on attempt %d, retrying immediately", attempt+1)
+			Debugf("SendDataExchangeWithRetry: RF error on attempt %d, retrying after %v", attempt+1, retryDelay)
+			time.Sleep(retryDelay)
 		}
 	}
 
@@ -606,7 +651,7 @@ func (d *Device) SendDataExchangeWithRetry(ctx context.Context, data []byte) ([]
 // SendRawCommand sends a raw command with context support
 func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error) {
 	const targetNum byte = 1
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInCommunicateThru, data)
+	res, err := d.transport.SendCommand(ctx, cmdInCommunicateThru, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send communicate through command: %w", err)
 	}
@@ -621,7 +666,6 @@ func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error
 		return nil, errors.New("unexpected InCommunicateThru response")
 	}
 	if res[1] != 0x00 {
-		// Use enhanced error type for protocol errors with context
 		return nil, NewPN532ErrorWithDetails(res[1], "InCommunicateThru", len(data), targetNum)
 	}
 	return res[2:], nil
@@ -630,7 +674,7 @@ func (d *Device) SendRawCommand(ctx context.Context, data []byte) ([]byte, error
 // InRelease releases all selected targets with context support
 func (d *Device) InRelease(ctx context.Context) error {
 	// Always release all targets (target 0 = release all)
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInRelease, []byte{0x00})
+	res, err := d.transport.SendCommand(ctx, cmdInRelease, []byte{0x00})
 	if err != nil {
 		return fmt.Errorf("InRelease command failed: %w", err)
 	}
@@ -647,11 +691,34 @@ func (d *Device) InRelease(ctx context.Context) error {
 	return nil
 }
 
+// InDeselect deselects all targets while keeping target information in PN532 memory.
+// Unlike InRelease, this allows InSelect to re-select the target later.
+// For MIFARE cards, this sends HLTA which puts the tag in HALT state.
+// Use InSelect after InDeselect to wake up HALTed tags with WUPA.
+func (d *Device) InDeselect(ctx context.Context) error {
+	// Deselect all targets (target 0 = all targets)
+	res, err := d.transport.SendCommand(ctx, cmdInDeselect, []byte{0x00})
+	if err != nil {
+		return fmt.Errorf("InDeselect command failed: %w", err)
+	}
+
+	if len(res) != 2 || res[0] != 0x45 {
+		return errors.New("unexpected InDeselect response")
+	}
+
+	// Check status byte
+	if res[1] != 0x00 {
+		return fmt.Errorf("InDeselect failed with status: %02x", res[1])
+	}
+
+	return nil
+}
+
 // InSelect selects target 1 for communication with context support
 func (d *Device) InSelect(ctx context.Context) error {
 	const targetNumber byte = 1
 	Debugf("InSelect: selecting target %d", targetNumber)
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInSelect, []byte{targetNumber})
+	res, err := d.transport.SendCommand(ctx, cmdInSelect, []byte{targetNumber})
 	if err != nil {
 		Debugf("InSelect: command failed: %v", err)
 		return fmt.Errorf("InSelect command failed: %w", err)
@@ -694,7 +761,7 @@ func (d *Device) InAutoPoll(
 		data = append(data, byte(tt))
 	}
 
-	res, err := d.transport.SendCommandWithContext(ctx, cmdInAutoPoll, data)
+	res, err := d.transport.SendCommand(ctx, cmdInAutoPoll, data)
 	if err != nil {
 		return nil, fmt.Errorf("InAutoPoll command failed: %w", err)
 	}
@@ -791,15 +858,21 @@ func (d *Device) executeInListPassiveTarget(ctx context.Context, data []byte) ([
 		prevTimeout = d.config.Timeout
 	}
 	computed := d.computeInListHostTimeout(ctx, data)
+	Debugf("executeInListPassiveTarget: computed timeout=%v, prevTimeout=%v", computed, prevTimeout)
 	// Best-effort set; if it fails we'll proceed with previous timeout
-	_ = d.transport.SetTimeout(computed)
+	if err := d.transport.SetTimeout(computed); err != nil {
+		Debugf("executeInListPassiveTarget: SetTimeout failed: %v", err)
+	}
 	// Restore previous timeout after the command completes
 	defer func() { _ = d.transport.SetTimeout(prevTimeout) }()
 
-	result, err := d.transport.SendCommandWithContext(ctx, cmdInListPassiveTarget, data)
+	Debugln("executeInListPassiveTarget: calling SendCommand")
+	result, err := d.transport.SendCommand(ctx, cmdInListPassiveTarget, data)
 	if err != nil {
+		Debugf("executeInListPassiveTarget: SendCommand failed: %v", err)
 		return nil, fmt.Errorf("failed to send InListPassiveTarget command: %w", err)
 	}
+	Debugf("executeInListPassiveTarget: SendCommand succeeded, result len=%d", len(result))
 	return result, nil
 }
 
@@ -813,7 +886,7 @@ func (d *Device) computeInListHostTimeout(ctx context.Context, data []byte) time
 
 	// When mxRtyATR (3rd byte) is provided, derive a timeout from it.
 	if len(data) >= 3 {
-		return d.computeTimeoutFromRetryCount(ctx, data[2], fallback)
+		return d.computeTimeoutFromRetryCount(ctx, data[2])
 	}
 
 	// No mxRtyATR provided; use context deadline if present or fallback
@@ -821,7 +894,7 @@ func (d *Device) computeInListHostTimeout(ctx context.Context, data []byte) time
 }
 
 // computeTimeoutFromRetryCount calculates timeout based on mxRtyATR retry count
-func (d *Device) computeTimeoutFromRetryCount(ctx context.Context, mx byte, fallback time.Duration) time.Duration {
+func (d *Device) computeTimeoutFromRetryCount(ctx context.Context, mx byte) time.Duration {
 	// 0xFF means infinite retry on hardware; rely on context or cap to a safe upper bound
 	if mx == 0xFF {
 		return d.handleInfiniteRetry(ctx)
@@ -830,8 +903,14 @@ func (d *Device) computeTimeoutFromRetryCount(ctx context.Context, mx byte, fall
 	// Each retry ~150ms; add small baseline slack for host/driver overhead
 	expected := time.Duration(int(mx))*150*time.Millisecond + 300*time.Millisecond
 
-	// Apply bounds and respect context deadline
-	return d.applyTimeoutBounds(ctx, expected, fallback)
+	// When mx is explicitly set (not 0xFF), honor the calculated timeout directly
+	// without enforcing the device default minimum. This allows quick re-selects
+	// with low retry counts (e.g., mx=0x02 for ~600ms timeout).
+	// Only cap to reasonable maximum and respect context deadline.
+	expected = min(expected, 8*time.Second)
+
+	// Respect context deadline if sooner
+	return d.getContextTimeoutOrFallback(ctx, expected)
 }
 
 // handleInfiniteRetry handles the special case of infinite retry (0xFF)
@@ -843,22 +922,6 @@ func (*Device) handleInfiniteRetry(ctx context.Context) time.Duration {
 	}
 	// No deadline; choose a conservative cap
 	return 10 * time.Second
-}
-
-// applyTimeoutBounds ensures timeout is within reasonable bounds and respects context
-func (d *Device) applyTimeoutBounds(ctx context.Context, expected, fallback time.Duration) time.Duration {
-	// Ensure we don't go below device default
-	if expected < fallback {
-		expected = fallback
-	}
-
-	// Cap to a reasonable maximum to avoid excessive blocking when mx is large
-	if expected > 8*time.Second {
-		expected = 8 * time.Second
-	}
-
-	// Respect context deadline if sooner
-	return d.getContextTimeoutOrFallback(ctx, expected)
 }
 
 // getContextTimeoutOrFallback returns context deadline if present and positive, otherwise fallback
@@ -1061,7 +1124,7 @@ func (d *Device) fallbackToInAutoPoll(ctx context.Context, brTy byte) (*Detected
 
 // PowerDown puts the PN532 into power down mode with context support
 func (d *Device) PowerDown(ctx context.Context, wakeupEnable, irqEnable byte) error {
-	res, err := d.transport.SendCommandWithContext(ctx, cmdPowerDown, []byte{wakeupEnable, irqEnable})
+	res, err := d.transport.SendCommand(ctx, cmdPowerDown, []byte{wakeupEnable, irqEnable})
 	if err != nil {
 		return fmt.Errorf("PowerDown command failed: %w", err)
 	}

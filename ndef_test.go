@@ -172,6 +172,7 @@ func TestBuildNDEFMessageEx(t *testing.T) {
 	}
 }
 
+//nolint:funlen // Table-driven test with multiple test cases
 func TestParseNDEFMessage(t *testing.T) {
 	t.Parallel()
 
@@ -215,23 +216,35 @@ func TestParseNDEFMessage(t *testing.T) {
 				return []byte{}
 			},
 			expectError:   true,
-			errorContains: "invalid NDEF message",
+			errorContains: "no NDEF", // No TLV data at all
 		},
 		{
 			name: "Invalid_Header",
 			setupData: func() []byte {
-				return []byte{0x01, 0x02, 0x03} // Invalid NDEF header
+				return []byte{0x01, 0x02, 0x03} // No NDEF TLV marker
 			},
 			expectError:   true,
-			errorContains: "invalid NDEF message",
+			errorContains: "no NDEF", // No NDEF TLV found
 		},
 		{
 			name: "Truncated_Data",
 			setupData: func() []byte {
-				return []byte{0x03, 0x05} // Valid header but truncated
+				return []byte{0x03, 0x05} // NDEF TLV but truncated
 			},
 			expectError:   true,
-			errorContains: "invalid NDEF message",
+			errorContains: "no NDEF", // TLV extraction fails
+		},
+		{
+			name: "Empty_TLV_Payload",
+			setupData: func() []byte {
+				// NDEF TLV with 0-length payload: 03 00 FE
+				// 0x03 = NDEF TLV type
+				// 0x00 = length (zero)
+				// 0xFE = Terminator TLV
+				return []byte{0x03, 0x00, 0xFE}
+			},
+			expectError:   false,
+			expectedCount: 0, // Empty NDEF = no records
 		},
 	}
 

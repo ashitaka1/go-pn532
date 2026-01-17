@@ -138,6 +138,7 @@ type NTAGTag struct {
 	fastReadSupported *bool
 	BaseTag
 	tagType NTAGType
+	hasNDEF bool // true if tag has valid NDEF CC (magic byte 0xE1)
 }
 
 // AccessControlConfig holds the access control settings for NTAG tags
@@ -156,12 +157,18 @@ func NewNTAGTag(device *Device, uid []byte, sak byte) *NTAGTag {
 			device:  device,
 			sak:     sak,
 		},
+		hasNDEF: true, // Assume NDEF capability; Init will set false if no valid CC
 	}
 }
 
-// ReadBlock reads a block from the NTAG tag
-//
+// HasNDEF returns true if the tag has a valid NDEF capability container.
+// Non-NDEF tags (Amiibo, Lego Dimensions, etc.) return false but are still
+// valid for UID reading and raw data access via ReadBlock/ReadAll.
+func (t *NTAGTag) HasNDEF() bool {
+	return t.hasNDEF
+}
 
+// ReadBlock reads a block from the NTAG tag.
 func (t *NTAGTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -181,7 +188,8 @@ func (t *NTAGTag) ReadBlock(ctx context.Context, block uint8) ([]byte, error) {
 
 	// NTAG returns 16 bytes (4 blocks) on read
 	if len(data) < ntagBlockSize {
-		return nil, fmt.Errorf("invalid read response length: %d", len(data))
+		return nil, fmt.Errorf("%w: invalid response length %d (expected at least %d)",
+			ErrTagReadFailed, len(data), ntagBlockSize)
 	}
 
 	// Return only the requested block
@@ -207,7 +215,7 @@ func (t *NTAGTag) WriteBlock(ctx context.Context, block uint8, data []byte) erro
 	cmd = append(cmd, ntagCmdWrite, block)
 	cmd = append(cmd, data...)
 
-	_, err := t.device.SendDataExchange(ctx, cmd)
+	_, err := t.device.SendDataExchangeWithRetry(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("%w (block %d): %w", ErrTagWriteFailed, block, err)
 	}
@@ -215,9 +223,9 @@ func (t *NTAGTag) WriteBlock(ctx context.Context, block uint8, data []byte) erro
 	return nil
 }
 
-// ReadNDEFRobust reads NDEF data with retry logic to handle intermittent empty data issues
+// ReadNDEFWithRetry reads NDEF data with retry logic to handle intermittent empty data issues
 // This addresses the "empty valid tag" problem where tags are detected but return no data
-func (t *NTAGTag) ReadNDEFRobust(ctx context.Context) (*NDEFMessage, error) {
+func (t *NTAGTag) ReadNDEFWithRetry(ctx context.Context) (*NDEFMessage, error) {
 	return readNDEFWithRetry(func() (*NDEFMessage, error) {
 		return t.ReadNDEF(ctx)
 	}, isRetryableError, "NDEF")
@@ -229,6 +237,11 @@ func isRetryableError(err error) bool {
 		return false
 	}
 
+	// Never retry on transport lockup - device needs hard reset
+	if errors.Is(err, ErrNoACK) {
+		return false
+	}
+
 	// Use the centralized retry logic from errors.go
 	// This handles timeouts, read failures, and communication errors including data exchange error 14
 	return IsRetryable(err) ||
@@ -236,9 +249,18 @@ func isRetryableError(err error) bool {
 }
 
 // ReadNDEF reads NDEF data from the NTAG tag using FastRead for optimal performance
+//
+//nolint:gocognit,revive // Complexity from necessary error handling and NDEF capability check
 func (t *NTAGTag) ReadNDEF(ctx context.Context) (*NDEFMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+
+	// Non-NDEF tags (Amiibo, Lego Dimensions, etc.) don't have valid NDEF CC
+	// Return empty message immediately - the tag is still valid for UID/raw data
+	if !t.hasNDEF {
+		Debugf("NTAG ReadNDEF: tag has no NDEF CC, returning empty message")
+		return &NDEFMessage{}, nil
 	}
 
 	// Ensure target is selected before reading. This is defensive against any prior
@@ -643,7 +665,13 @@ func (t *NTAGTag) processBlock(ctx context.Context, blockNum int, state *blockBy
 	blockData, err := t.readBlockWithRetry(ctx, uint8(blockNum)) // #nosec G115
 	if err != nil {
 		Debugf("NTAG block-by-block read failed at block %d: %v", blockNum, err)
-		return true, nil // Stop reading but don't propagate error
+		// If we haven't read any data yet, propagate the error so retry logic can kick in.
+		// This handles the case where the first block fails (e.g., during card sliding).
+		// If we have some data, stop reading and try to parse what we have.
+		if len(state.data) == 0 {
+			return true, err
+		}
+		return true, nil
 	}
 
 	// Check if block is empty (all zeros)
@@ -874,7 +902,11 @@ func (t *NTAGTag) FastRead(ctx context.Context, startAddr, endAddr uint8) ([]byt
 // PwdAuth performs password authentication on the NTAG tag
 // password must be exactly 4 bytes (32-bit)
 // Returns the 2-byte PACK (Password ACKnowledge) on success
-func (t *NTAGTag) PwdAuth(password []byte) ([]byte, error) {
+func (t *NTAGTag) PwdAuth(ctx context.Context, password []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if len(password) != 4 {
 		return nil, fmt.Errorf("password must be 4 bytes, got %d", len(password))
 	}
@@ -884,7 +916,7 @@ func (t *NTAGTag) PwdAuth(password []byte) ([]byte, error) {
 	cmd[0] = ntagCmdPwdAuth
 	copy(cmd[1:], password)
 
-	data, err := t.device.SendDataExchange(context.Background(), cmd)
+	data, err := t.device.SendDataExchange(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("PWD_AUTH failed: %w", err)
 	}
@@ -899,12 +931,16 @@ func (t *NTAGTag) PwdAuth(password []byte) ([]byte, error) {
 
 // GetVersion retrieves version information from the NTAG tag using proper GET_VERSION command
 // This implementation uses SendRawCommand (like FastRead) for better compatibility across PN532 variants
-func (t *NTAGTag) GetVersion() (*NTAGVersion, error) {
+func (t *NTAGTag) GetVersion(ctx context.Context) (*NTAGVersion, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Try GET_VERSION command using SendRawCommand (0x60)
 	// This follows the same pattern as FastRead for better hardware compatibility
 	cmd := []byte{ntagCmdGetVersion}
 
-	data, err := t.device.SendRawCommand(context.Background(), cmd)
+	data, err := t.device.SendRawCommand(ctx, cmd)
 	if err != nil {
 		// If GET_VERSION fails (common with clone devices), fall back to default detection
 		// This maintains backward compatibility while enabling proper detection when possible
@@ -1082,6 +1118,12 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// NTAG21x tags have 7-byte UIDs (distinguishes from MIFARE Classic which has 4-byte UIDs)
 	// Note: Genuine NXP NTAGs start with 0x04, but clones/compatibles may use other prefixes
 	if len(t.uid) != 7 {
+		// Check if this looks like a failed UID parse (all zeros = default fallback from
+		// corrupt AutoPoll data during card slide). This is retryable.
+		if len(t.uid) == 4 && t.uid[0] == 0 && t.uid[1] == 0 && t.uid[2] == 0 && t.uid[3] == 0 {
+			return fmt.Errorf("%w: UID parse failed (got default 4-byte zero UID)", ErrTagDataCorrupt)
+		}
+		// Real 4-byte UID = MIFARE Classic, not an NTAG - not retryable
 		return fmt.Errorf("not an NTAG tag: UID must be 7 bytes, got %d bytes", len(t.uid))
 	}
 
@@ -1095,13 +1137,23 @@ func (t *NTAGTag) DetectType(ctx context.Context) error {
 	// Verify this looks like an NTAG capability container
 	// NTAG CC format: [E1] [Version] [Size] [Access]
 	if len(ccData) < 4 || ccData[0] != 0xE1 {
-		return errors.New("not an NTAG tag: invalid capability container")
+		// Non-NDEF tag (Amiibo, Lego Dimensions, blank tags, etc.)
+		// Fall back to probe-based detection using page boundaries
+		if len(ccData) >= 1 {
+			Debugf("NTAG CC magic byte 0x%02X != 0xE1, using probe-based detection", ccData[0])
+		} else {
+			Debugf("NTAG CC too short (%d bytes), using probe-based detection", len(ccData))
+		}
+		t.tagType = t.detectTypeByProbing(ctx)
+		t.hasNDEF = false // No valid NDEF CC - skip NDEF operations
+		return nil
 	}
 
 	// Use CC-based detection for all tags (genuine NXP and clones alike)
 	// This avoids GET_VERSION which uses InCommunicateThru and can cause
 	// target selection issues on marginal RF connections
 	t.tagType = t.detectTypeFromCapabilityContainer(ccData)
+	// hasNDEF remains true (set in constructor)
 
 	return nil
 }
@@ -1148,17 +1200,30 @@ func (*NTAGTag) detectTypeFromCapabilityContainer(ccData []byte) NTAGType {
 	}
 }
 
-// canAccessPageSafely tests if a specific page can be accessed (readable) with error handling
-// This method is more lenient to avoid disrupting normal operations
-func (t *NTAGTag) canAccessPageSafely(page uint8) bool {
-	// Try to access the page with minimal impact
-	data, err := t.device.SendDataExchange(context.Background(), []byte{ntagCmdRead, page})
-	if err != nil {
-		// If access fails, the page is likely beyond the boundary
-		return false
+// detectTypeByProbing determines NTAG type by probing page boundaries.
+// This is used for non-NDEF tags (Amiibo, Lego Dimensions, etc.) that don't have
+// the standard CC magic byte 0xE1 at page 3.
+func (t *NTAGTag) detectTypeByProbing(ctx context.Context) NTAGType {
+	// NTAG variants have fixed memory sizes:
+	// NTAG213: 45 pages (0-44), page 45+ inaccessible
+	// NTAG215: 135 pages (0-134), page 135+ inaccessible
+	// NTAG216: 231 pages (0-230), page 231+ inaccessible
+
+	// Test NTAG213 boundary - if page 45 is inaccessible, it's NTAG213
+	if !t.canAccessPage(ctx, ntag213TotalPages) {
+		Debugf("NTAG detected as NTAG213 by probing (page %d inaccessible)", ntag213TotalPages)
+		return NTAGType213
 	}
-	// Success if we got at least 4 bytes back
-	return len(data) >= 4
+
+	// Test NTAG215 boundary - if page 135 is inaccessible, it's NTAG215
+	if !t.canAccessPage(ctx, ntag215TotalPages) {
+		Debugf("NTAG detected as NTAG215 by probing (page %d inaccessible)", ntag215TotalPages)
+		return NTAGType215
+	}
+
+	// Can access page 135+, assume NTAG216
+	Debugf("NTAG detected as NTAG216 by probing (page %d accessible)", ntag215TotalPages)
+	return NTAGType216
 }
 
 // validateWriteBoundary validates that a write operation is within the actual memory bounds
@@ -1180,7 +1245,7 @@ func (t *NTAGTag) validateWriteBoundary(ctx context.Context, block uint8) error 
 		// do a quick boundary check to catch counterfeit tags
 		if block >= 45 { // Beyond NTAG213 total pages (0-44)
 			// Test if we can actually read this page first
-			if !t.canAccessPageSafely(block) {
+			if !t.canAccessPage(ctx, block) {
 				return fmt.Errorf("write to block %d failed: actual tag appears to be NTAG213 "+
 					"(only 45 pages), not %s as reported by GET_VERSION", block, t.getTagTypeName())
 			}
@@ -1212,14 +1277,14 @@ func (t *NTAGTag) ProbeActualMemorySize(ctx context.Context, claimedBytes int) (
 	}
 
 	// Quick check: if page 4 isn't readable, tag has no user memory
-	if !t.canAccessPageWithContext(ctx, low) {
+	if !t.canAccessPage(ctx, low) {
 		return 3, 0
 	}
 
 	// Binary search for the last readable page
 	for low < high {
 		mid := low + (high-low+1)/2
-		if t.canAccessPageWithContext(ctx, mid) {
+		if t.canAccessPage(ctx, mid) {
 			low = mid
 		} else {
 			high = mid - 1
@@ -1240,8 +1305,8 @@ func (t *NTAGTag) ProbeActualMemorySize(ctx context.Context, claimedBytes int) (
 	return lastPage, userMemory
 }
 
-// canAccessPageWithContext tests if a specific page can be read (with context support)
-func (t *NTAGTag) canAccessPageWithContext(ctx context.Context, page uint8) bool {
+// canAccessPage tests if a specific page can be read
+func (t *NTAGTag) canAccessPage(ctx context.Context, page uint8) bool {
 	if ctx.Err() != nil {
 		return false
 	}
@@ -1286,8 +1351,7 @@ func (t *NTAGTag) getTagTypeName() string {
 }
 
 func (t *NTAGTag) readBlockWithRetry(ctx context.Context, block uint8) ([]byte, error) {
-	const maxRetries = 3
-	for i := range maxRetries {
+	for i := range NTAGBlockReadRetries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -1309,12 +1373,12 @@ func (t *NTAGTag) readBlockWithRetry(ctx context.Context, block uint8) ([]byte, 
 		}
 
 		// Short response - retry
-		if i < maxRetries-1 {
+		if i < NTAGBlockReadRetries-1 {
 			continue
 		}
 	}
 
-	return nil, fmt.Errorf("%w (block %d after %d retries)", ErrTagReadFailed, block, maxRetries)
+	return nil, fmt.Errorf("%w (block %d after %d retries)", ErrTagReadFailed, block, NTAGBlockReadRetries)
 }
 
 // SetPasswordProtection enables password protection on the tag
@@ -1551,15 +1615,14 @@ func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]
 	// Try SendRawCommand with retry logic for clone device timeout issues
 	var data []byte
 	var err error
-	maxRetries := 3
 	successAttempt := 0
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for attempt := 1; attempt <= NTAGFallbackRetries; attempt++ {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
 
-		Debugf("NTAG InCommunicateThru attempt %d/%d for block %d", attempt, maxRetries, block)
+		Debugf("NTAG InCommunicateThru attempt %d/%d for block %d", attempt, NTAGFallbackRetries, block)
 		data, err = t.device.SendRawCommand(ctx, cmd)
 		if err == nil {
 			// Re-select target after SendRawCommand to restore PN532 internal state
@@ -1575,9 +1638,9 @@ func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]
 			strings.Contains(err.Error(), "timeout") ||
 			strings.Contains(err.Error(), "InCommunicateThru error") {
 			Debugf("NTAG InCommunicateThru timeout/error on attempt %d: %v", attempt, err)
-			if attempt < maxRetries {
+			if attempt < NTAGFallbackRetries {
 				// Brief pause before retry to let clone device stabilize
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(NTAGTimeoutRetryDelay)
 				continue
 			}
 			// On final attempt, try fallback to InDataExchange without target selection
@@ -1595,7 +1658,8 @@ func (t *NTAGTag) readBlockCommunicateThru(ctx context.Context, block uint8) ([]
 
 	// NTAG returns 16 bytes (4 blocks) on read
 	if len(data) < ntagBlockSize {
-		return nil, fmt.Errorf("invalid read response length: %d", len(data))
+		return nil, fmt.Errorf("%w: invalid response length %d (expected at least %d)",
+			ErrTagReadFailed, len(data), ntagBlockSize)
 	}
 
 	if successAttempt > 0 {
@@ -1626,7 +1690,8 @@ func (t *NTAGTag) readBlockDirectFallback(ctx context.Context, block uint8) ([]b
 
 	// NTAG returns 16 bytes (4 blocks) on read
 	if len(data) < ntagBlockSize {
-		return nil, fmt.Errorf("invalid read response length: %d", len(data))
+		return nil, fmt.Errorf("%w: invalid response length %d (expected at least %d)",
+			ErrTagReadFailed, len(data), ntagBlockSize)
 	}
 
 	Debugf("NTAG direct InDataExchange fallback succeeded for block %d", block)
@@ -1635,8 +1700,8 @@ func (t *NTAGTag) readBlockDirectFallback(ctx context.Context, block uint8) ([]b
 }
 
 // DebugInfo returns detailed debug information about the NTAG tag
-func (t *NTAGTag) DebugInfo() string {
-	return t.DebugInfoWithNDEF(t)
+func (t *NTAGTag) DebugInfo(ctx context.Context) string {
+	return t.DebugInfoWithNDEF(ctx, t)
 }
 
 // WriteText writes a simple text record to the NTAG tag

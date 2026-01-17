@@ -23,7 +23,7 @@ import (
 )
 
 // TestTransportContextInterface verifies that all transport implementations
-// support the new SendCommandWithContext method
+// support the new SendCommand method
 func TestTransportContextInterface(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -45,7 +45,7 @@ func TestTransportContextInterface(t *testing.T) {
 			args := []byte{}
 
 			// This should compile and not panic
-			_, err := tt.transport.SendCommandWithContext(ctx, cmd, args)
+			_, err := tt.transport.SendCommand(ctx, cmd, args)
 			if err != nil {
 				t.Logf("Expected error for unimplemented command: %v", err)
 			}
@@ -54,7 +54,7 @@ func TestTransportContextInterface(t *testing.T) {
 }
 
 // TestAllTransportTypesImplementContext ensures all concrete transport types
-// implement SendCommandWithContext method at compile time
+// implement SendCommand method at compile time
 func TestAllTransportTypesImplementContext(t *testing.T) {
 	t.Parallel()
 	// This test ensures all transport types implement the context interface at compile time
@@ -67,7 +67,7 @@ func TestAllTransportTypesImplementContext(t *testing.T) {
 			checkFunc: func() bool {
 				var transport Transport = NewMockTransport()
 				_, ok := transport.(interface {
-					SendCommandWithContext(context.Context, byte, []byte) ([]byte, error)
+					SendCommand(context.Context, byte, []byte) ([]byte, error)
 				})
 				return ok
 			},
@@ -78,7 +78,7 @@ func TestAllTransportTypesImplementContext(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if !tt.checkFunc() {
-				t.Errorf("%s failed: transport does not implement SendCommandWithContext", tt.name)
+				t.Errorf("%s failed: transport does not implement SendCommand", tt.name)
 			}
 		})
 	}
@@ -96,7 +96,7 @@ func TestMockTransportContextCancellation(t *testing.T) {
 	cmd := byte(0x02)
 	args := []byte{}
 
-	_, err := mock.SendCommandWithContext(ctx, cmd, args)
+	_, err := mock.SendCommand(ctx, cmd, args)
 	if err == nil {
 		t.Error("Expected context cancellation error, got nil")
 	}
@@ -122,7 +122,7 @@ func TestMockTransportContextTimeout(t *testing.T) {
 	args := []byte{}
 
 	start := time.Now()
-	_, err := mock.SendCommandWithContext(ctx, cmd, args)
+	_, err := mock.SendCommand(ctx, cmd, args)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -152,7 +152,7 @@ func TestUARTTransportContextInterface(t *testing.T) {
 		// This verifies the method signature exists at compile time
 		var transport Transport
 		if uartTransport, ok := any(transport).(interface {
-			SendCommandWithContext(context.Context, byte, []byte) ([]byte, error)
+			SendCommand(context.Context, byte, []byte) ([]byte, error)
 		}); ok {
 			_ = uartTransport // Method exists
 		}
@@ -259,7 +259,7 @@ func TestContextCancellationDuringOperationPhases(t *testing.T) {
 			args := []byte{}
 
 			start := time.Now()
-			_, err := mock.SendCommandWithContext(ctx, cmd, args)
+			_, err := mock.SendCommand(ctx, cmd, args)
 			elapsed := time.Since(start)
 
 			validateContextError(t, err, elapsed, tt)
@@ -354,7 +354,7 @@ func TestContextTimeoutVsTransportTimeoutInteraction(t *testing.T) {
 			args := []byte{}
 
 			start := time.Now()
-			_, err := mock.SendCommandWithContext(ctx, cmd, args)
+			_, err := mock.SendCommand(ctx, cmd, args)
 			elapsed := time.Since(start)
 
 			validateTimeoutInteraction(t, err, elapsed, tt)

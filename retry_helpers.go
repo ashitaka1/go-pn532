@@ -30,49 +30,43 @@ type WriteNDEFFunc func(ctx context.Context) error
 // IsRetryableFunc defines a function that determines if an error is retryable
 type IsRetryableFunc func(error) bool
 
-// readNDEFWithRetry implements the common retry logic for both NTAG and MIFARE tags
-// This addresses the "empty valid tag" problem where tags are detected but return no data
+// readNDEFWithRetry implements the common retry logic for both NTAG and MIFARE tags.
+// This addresses the "empty valid tag" problem where tags are detected but return no data,
+// and handles RF instability during card sliding into a reader slot.
+// Uses exponential backoff delays to allow RF field stabilization.
 func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagType string) (*NDEFMessage, error) {
-	const maxRetries = 3
-	const retryDelay = 10 * time.Millisecond
+	// Use 2x exponential backoff - gives time for RF to stabilize
+	// during card sliding scenarios where communication is initially unreliable
+	retryDelays := []time.Duration{
+		NDEFRetryDelay1,
+		NDEFRetryDelay2,
+		NDEFRetryDelay3,
+	}
 
-	for i := range maxRetries {
+	for i := range NDEFMaxRetries {
 		// Try to read NDEF data
 		msg, err := readFunc()
 		if err != nil {
 			// Hard error during read - check if we should retry
-			if i < maxRetries-1 && isRetryable(err) {
-				Debugf("%s NDEF read attempt %d failed (retrying): %v", tagType, i+1, err)
-				time.Sleep(retryDelay)
+			if i < NDEFMaxRetries-1 && isRetryable(err) {
+				delay := retryDelays[i]
+				Debugf("%s NDEF read attempt %d failed (retrying after %v): %v", tagType, i+1, delay, err)
+				time.Sleep(delay)
 				continue
 			}
 			return nil, err
 		}
 
-		// Check if we got valid, non-empty data
-		if msg != nil && len(msg.Records) > 0 {
-			// Success! We got valid data
+		// Success - we got a valid response (even if empty, that's a valid state)
+		// Empty NDEF (e.g., [03 00 FE] TLV) is legitimate - tag just has no records
+		if i > 0 {
 			Debugf("%s NDEF read successful on attempt %d", tagType, i+1)
-			return msg, nil
-		}
-
-		// We got a valid response but it's empty - this is the "empty valid tag" issue
-		if i < maxRetries-1 {
-			Debugf("%s NDEF read attempt %d returned empty data (retrying)", tagType, i+1)
-			time.Sleep(retryDelay)
-			continue
-		}
-
-		// All retries exhausted with empty data - this is the "empty valid tag" issue
-		Debugf("%s NDEF read exhausted retries with empty data", tagType)
-		if msg == nil || len(msg.Records) == 0 {
-			return nil, ErrTagEmptyData
 		}
 		return msg, nil
 	}
 
 	// This should never be reached, but just in case
-	return nil, fmt.Errorf("failed to read %s NDEF data after %d retries", tagType, maxRetries)
+	return nil, fmt.Errorf("failed to read %s NDEF data after %d retries", tagType, NDEFMaxRetries)
 }
 
 // WriteNDEFWithRetry wraps NDEF write operations with retry logic.
@@ -82,15 +76,15 @@ func readNDEFWithRetry(readFunc ReadNDEFFunc, isRetryable IsRetryableFunc, tagTy
 //nolint:gocognit,revive // Retry logic inherently requires multiple branches for proper error handling
 func WriteNDEFWithRetry(ctx context.Context, writeFunc WriteNDEFFunc, maxRetries int, tagType string) error {
 	if maxRetries <= 0 {
-		maxRetries = 3
+		maxRetries = NDEFMaxRetries
 	}
 
-	// Use exponential backoff with shorter initial delays for writes
+	// Use 2x exponential backoff - gives time for RF to stabilize
 	// since card placement is usually the issue
 	retryDelays := []time.Duration{
-		100 * time.Millisecond,
-		150 * time.Millisecond,
-		250 * time.Millisecond,
+		NDEFRetryDelay1,
+		NDEFRetryDelay2,
+		NDEFRetryDelay3,
 	}
 
 	var lastErr error

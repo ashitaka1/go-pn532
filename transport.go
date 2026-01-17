@@ -27,11 +27,8 @@ import (
 // Transport defines the interface for communication with PN532 devices.
 // This can be implemented by UART, I2C, or SPI backends.
 type Transport interface {
-	// SendCommand sends a command to the PN532 and waits for response
-	SendCommand(cmd byte, args []byte) ([]byte, error)
-
-	// SendCommandWithContext sends a command to the PN532 with context support
-	SendCommandWithContext(ctx context.Context, cmd byte, args []byte) ([]byte, error)
+	// SendCommand sends a command to the PN532 with context support
+	SendCommand(ctx context.Context, cmd byte, args []byte) ([]byte, error)
 
 	// Close closes the transport connection
 	Close() error
@@ -83,6 +80,15 @@ type TransportCapabilityChecker interface {
 	HasCapability(capability TransportCapability) bool
 }
 
+// Reconnecter is implemented by transports that support reconnecting without
+// recreating the transport instance. This is used for "nuclear" recovery when
+// the PN532 firmware enters a complete lockup state (no ACKs to any commands).
+type Reconnecter interface {
+	// Reconnect closes and reopens the underlying connection.
+	// This is a last-resort recovery mechanism for firmware lockups.
+	Reconnect() error
+}
+
 // PN532PowerMode represents the power mode state of the PN532
 type PN532PowerMode int
 
@@ -101,6 +107,7 @@ type MockTransport struct {
 	responseQueue  map[byte][][]byte // Queue of responses for sequential calls
 	callCount      map[byte]int
 	errorMap       map[byte]error
+	reconnectErr   error // Error to return from Reconnect() (nil = success)
 	timeout        time.Duration
 	delay          time.Duration
 	powerMode      PN532PowerMode
@@ -126,61 +133,8 @@ func NewMockTransport() *MockTransport {
 	}
 }
 
-// SendCommand implements Transport interface
-func (m *MockTransport) SendCommand(cmd byte, data []byte) ([]byte, error) {
-	m.mu.RLock()
-	connected := m.connected
-	delay := m.delay
-	m.mu.RUnlock()
-
-	if !connected {
-		return nil, errors.New("transport not connected")
-	}
-
-	// Validate PN532 state machine
-	if err := m.validateState(cmd); err != nil {
-		return nil, err
-	}
-
-	// Simulate hardware delay if configured
-	if delay > 0 {
-		time.Sleep(delay)
-	}
-
-	m.mu.Lock()
-	// Track call count
-	m.callCount[cmd]++
-
-	// Check for injected error
-	if err, exists := m.errorMap[cmd]; exists {
-		m.mu.Unlock()
-		return nil, err
-	}
-
-	// Update state based on command
-	m.updateState(cmd, data)
-
-	// Check queue first (for sequential different responses)
-	if queue, exists := m.responseQueue[cmd]; exists && len(queue) > 0 {
-		response := queue[0]
-		m.responseQueue[cmd] = queue[1:] // Pop from queue
-		m.mu.Unlock()
-		return response, nil
-	}
-
-	// Return configured response (fallback/default)
-	if response, exists := m.responses[cmd]; exists {
-		m.mu.Unlock()
-		return response, nil
-	}
-	m.mu.Unlock()
-
-	// Default response for unknown commands
-	return []byte{0xD5, cmd + 1, 0x00}, nil // Basic ACK response
-}
-
-// SendCommandWithContext implements Transport interface with context support
-func (m *MockTransport) SendCommandWithContext(ctx context.Context, cmd byte, data []byte) ([]byte, error) {
+// SendCommand implements Transport interface with context support
+func (m *MockTransport) SendCommand(ctx context.Context, cmd byte, data []byte) ([]byte, error) {
 	// Check context cancellation first
 	select {
 	case <-ctx.Done():
@@ -239,8 +193,22 @@ func (m *MockTransport) SendCommandWithContext(ctx context.Context, cmd byte, da
 	}
 	m.mu.Unlock()
 
-	// Default response for unknown commands
-	return []byte{0xD5, cmd + 1, 0x00}, nil // Basic ACK response
+	// Default responses for common commands that expect specific formats
+	return m.defaultResponse(cmd)
+}
+
+// defaultResponse returns the appropriate default response for common commands
+func (*MockTransport) defaultResponse(cmd byte) ([]byte, error) {
+	switch cmd {
+	case cmdInDeselect:
+		return []byte{0x45, 0x00}, nil // InDeselect success
+	case cmdInSelect:
+		return []byte{0x55, 0x00}, nil // InSelect success
+	case cmdInRelease:
+		return []byte{0x53, 0x00}, nil // InRelease success
+	default:
+		return []byte{0xD5, cmd + 1, 0x00}, nil // Generic ACK response
+	}
 }
 
 // Close implements Transport interface
@@ -362,7 +330,7 @@ func (m *MockTransport) validateState(cmd byte) error {
 		if !m.targetSelected {
 			return fmt.Errorf("no target selected, cannot execute command 0x%02X (call InListPassiveTarget first)", cmd)
 		}
-	case cmdInRelease, cmdInSelect:
+	case cmdInRelease, cmdInSelect, cmdInDeselect:
 		// These require a target to be selected
 		if !m.targetSelected {
 			return fmt.Errorf("no target selected, cannot execute command 0x%02X", cmd)
@@ -442,4 +410,35 @@ func (m *MockTransport) GetState() (powerMode PN532PowerMode, rfFieldOn, targetS
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.powerMode, m.rfFieldOn, m.targetSelected
+}
+
+// Reconnect implements the Reconnecter interface for testing HardReset
+func (m *MockTransport) Reconnect() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.reconnectErr != nil {
+		return m.reconnectErr
+	}
+
+	// Simulate reconnection by resetting state
+	m.connected = true
+	m.powerMode = PN532PowerModeNormal
+	m.rfFieldOn = false
+	m.targetSelected = false
+
+	return nil
+}
+
+// SetReconnectError configures an error to be returned by Reconnect()
+func (m *MockTransport) SetReconnectError(err error) {
+	m.mu.Lock()
+	m.reconnectErr = err
+	m.mu.Unlock()
+}
+
+// HasCapability implements TransportCapabilityChecker
+func (*MockTransport) HasCapability(capability TransportCapability) bool {
+	// Mock transport supports all capabilities by default for testing
+	return capability == CapabilityAutoPollNative
 }

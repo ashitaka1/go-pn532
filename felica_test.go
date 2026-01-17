@@ -975,7 +975,7 @@ func TestFeliCaTag_DebugInfo(t *testing.T) {
 	tag, err := NewFeliCaTag(device, targetData)
 	require.NoError(t, err)
 
-	info := tag.DebugInfo()
+	info := tag.DebugInfo(context.Background())
 	assert.NotEmpty(t, info)
 	assert.Contains(t, info, "FeliCa")
 }

@@ -43,20 +43,30 @@ func (t *TagOperations) WriteBlocks(ctx context.Context, startBlock byte, data [
 	return ErrUnsupportedTag
 }
 
-// WriteNDEF writes an NDEF message to the tag
+// WriteNDEF writes an NDEF message to the tag with retry logic for transient errors.
+// This provides consistent retry behavior with ReadNDEF, especially important for
+// card sliding scenarios where RF communication may be unstable.
 func (t *TagOperations) WriteNDEF(ctx context.Context, msg *pn532.NDEFMessage) error {
 	if t.tag == nil {
 		return ErrNoTag
 	}
 
+	const maxRetries = 3
+
 	switch t.tagType {
 	case pn532.TagTypeNTAG:
-		if err := t.ntagInstance.WriteNDEF(ctx, msg); err != nil {
+		err := pn532.WriteNDEFWithRetry(ctx, func(ctx context.Context) error {
+			return t.ntagInstance.WriteNDEF(ctx, msg)
+		}, maxRetries, "NTAG")
+		if err != nil {
 			return fmt.Errorf("failed to write NDEF to NTAG: %w", err)
 		}
 		return nil
 	case pn532.TagTypeMIFARE:
-		if err := t.mifareInstance.WriteNDEF(ctx, msg); err != nil {
+		err := pn532.WriteNDEFWithRetry(ctx, func(ctx context.Context) error {
+			return t.mifareInstance.WriteNDEF(ctx, msg)
+		}, maxRetries, "MIFARE")
+		if err != nil {
 			return fmt.Errorf("failed to write NDEF to MIFARE: %w", err)
 		}
 		return nil
@@ -67,7 +77,7 @@ func (t *TagOperations) WriteNDEF(ctx context.Context, msg *pn532.NDEFMessage) e
 }
 
 // writeNTAGBlocks writes blocks to NTAG
-func (t *TagOperations) writeNTAGBlocks(_ context.Context, startBlock byte, data []byte) error {
+func (t *TagOperations) writeNTAGBlocks(ctx context.Context, startBlock byte, data []byte) error {
 	// Convert block to page
 	startPage := startBlock
 
@@ -99,7 +109,7 @@ func (t *TagOperations) writeNTAGBlocks(_ context.Context, startBlock byte, data
 
 		// Write command: 0xA2 page data[4]
 		cmd := append([]byte{0xA2, page}, pageData...)
-		_, err := t.device.SendDataExchange(context.Background(), cmd)
+		_, err := t.device.SendDataExchange(ctx, cmd)
 		if err != nil {
 			return fmt.Errorf("failed to write page %d: %w", page, err)
 		}

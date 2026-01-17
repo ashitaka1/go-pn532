@@ -18,6 +18,7 @@ package pn532
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -537,4 +538,104 @@ func TestInAutoPoll_Validation(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.errorContains)
 		})
 	}
+}
+
+// Regression tests for HardReset - fixes firmware lockup recovery
+
+func TestDevice_HardReset_Success(t *testing.T) {
+	t.Parallel()
+
+	mock := NewMockTransport()
+	defer func() { _ = mock.Close() }()
+
+	// Set up initialization responses
+	mock.SetResponse(0x02, []byte{0x03, 0x32, 0x01, 0x06, 0x07}) // GetFirmwareVersion
+	mock.SetResponse(0x14, []byte{0x15})                         // SAMConfiguration
+	mock.SetResponse(0x32, []byte{0x33})                         // RFConfiguration
+
+	device, err := New(mock)
+	require.NoError(t, err)
+
+	// Record SAM call count before HardReset
+	samCountBefore := mock.GetCallCount(0x14)
+
+	// HardReset should succeed - mock implements Reconnecter
+	err = device.HardReset(context.Background())
+	require.NoError(t, err)
+
+	// Verify SAMConfiguration was called during recovery (at least once more)
+	samCountAfter := mock.GetCallCount(0x14)
+	assert.Greater(t, samCountAfter, samCountBefore,
+		"SAMConfiguration should be called during HardReset")
+}
+
+func TestDevice_HardReset_TransportNotReconnecter(t *testing.T) {
+	t.Parallel()
+
+	// Create a transport that doesn't implement Reconnecter by embedding
+	// MockTransport but not exposing Reconnect (embedding pointer won't work here)
+	// Instead, we create a minimal wrapper
+
+	mock := NewMockTransport()
+	mock.SetResponse(0x02, []byte{0x03, 0x32, 0x01, 0x06, 0x07})
+	mock.SetResponse(0x14, []byte{0x15})
+	mock.SetResponse(0x32, []byte{0x33})
+
+	// Wrap in a type that only exposes Transport interface, not Reconnecter
+	wrapper := &transportWrapper{Transport: mock}
+
+	device, err := New(wrapper)
+	require.NoError(t, err)
+
+	err = device.HardReset(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support reconnection")
+}
+
+// transportWrapper wraps a Transport to hide the Reconnecter interface
+type transportWrapper struct {
+	Transport
+}
+
+func TestDevice_HardReset_ReconnectFails(t *testing.T) {
+	t.Parallel()
+
+	mock := NewMockTransport()
+	defer func() { _ = mock.Close() }()
+
+	mock.SetResponse(0x02, []byte{0x03, 0x32, 0x01, 0x06, 0x07})
+	mock.SetResponse(0x14, []byte{0x15})
+	mock.SetResponse(0x32, []byte{0x33})
+
+	device, err := New(mock)
+	require.NoError(t, err)
+
+	// Configure mock to fail on Reconnect
+	mock.SetReconnectError(errors.New("USB device disconnected"))
+
+	err = device.HardReset(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reconnect failed")
+	assert.Contains(t, err.Error(), "USB device disconnected")
+}
+
+func TestDevice_HardReset_SAMConfigFails(t *testing.T) {
+	t.Parallel()
+
+	mock := NewMockTransport()
+	defer func() { _ = mock.Close() }()
+
+	mock.SetResponse(0x02, []byte{0x03, 0x32, 0x01, 0x06, 0x07})
+	mock.SetResponse(0x14, []byte{0x15}) // SAM success for initial device creation
+	mock.SetResponse(0x32, []byte{0x33})
+
+	device, err := New(mock)
+	require.NoError(t, err)
+
+	// Now configure SAMConfiguration to fail for the recovery attempt
+	mock.SetError(0x14, errors.New("SAM configuration timeout"))
+
+	err = device.HardReset(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SAMConfiguration failed")
 }

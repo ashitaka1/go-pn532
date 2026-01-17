@@ -158,7 +158,7 @@ func connectToDevice(ctx context.Context, cfg *config) (*pn532.Device, error) {
 	// Set reasonable timeout
 	connectOpts = append(connectOpts, pn532.WithConnectTimeout(5*time.Second))
 
-	device, err := pn532.ConnectDevice(cfg.devicePath, connectOpts...)
+	device, err := pn532.ConnectDevice(ctx, cfg.devicePath, connectOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to PN532 device: %w", err)
 	}
@@ -242,6 +242,10 @@ func handleTagDetected(ctx context.Context, ops *tagops.TagOperations, detectedT
 	ndefMsg, ndefErr := ops.ReadNDEF(ctx)
 	printNDEFMessage(ndefMsg, ndefErr)
 
+	// Return the error so the polling session can retry if needed
+	if ndefErr != nil {
+		return fmt.Errorf("NDEF read failed: %w", ndefErr)
+	}
 	return nil
 }
 
@@ -263,8 +267,10 @@ func runReadMode(ctx context.Context, device *pn532.Device, _ *config) error {
 	ops := tagops.New(device)
 
 	// Set up tag detection callback using the setter method
-	session.SetOnCardDetected(func(detectedTag *pn532.DetectedTag) error {
-		return handleTagDetected(ctx, ops, detectedTag)
+	// The callback receives a context with a timeout from the poll cycle,
+	// ensuring long-running operations (like MIFARE auth) can be cancelled
+	session.SetOnCardDetected(func(callbackCtx context.Context, detectedTag *pn532.DetectedTag) error {
+		return handleTagDetected(callbackCtx, ops, detectedTag)
 	})
 
 	// Set up tag removal callback using the setter method
@@ -490,6 +496,17 @@ func mainWithExitCode() int {
 	// Parse command-line flags
 	cfg := parseConfig()
 
+	// Initialize session log file (always, regardless of debug flag)
+	logPath, logErr := pn532.InitSessionLog()
+	if logErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Warning: could not create session log: %v\n", logErr)
+	}
+	defer func() {
+		if err := pn532.CloseSessionLog(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "Warning: could not close session log: %v\n", err)
+		}
+	}()
+
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -509,6 +526,10 @@ func mainWithExitCode() int {
 			return 0
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		// Show log path on error for debugging
+		if logPath != "" {
+			_, _ = fmt.Fprintf(os.Stderr, "Debug log: %s\n", logPath)
+		}
 		return 1
 	}
 	return 0

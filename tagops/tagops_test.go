@@ -3,7 +3,9 @@ package tagops
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/ZaparooProject/go-pn532"
 	"github.com/stretchr/testify/assert"
@@ -244,7 +246,6 @@ func TestTagOperations_GetTagType(t *testing.T) {
 	}
 
 	assert.Equal(t, pn532.TagTypeNTAG, ops.GetTagType())
-	assert.Equal(t, pn532.TagTypeNTAG, ops.TagType()) // Alias method
 }
 
 func TestNew(t *testing.T) {
@@ -337,6 +338,27 @@ func TestTagOperations_ReadNDEF_UnsupportedType(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported tag type")
 	assert.Nil(t, message)
+}
+
+func TestTagOperations_ReadNDEF_UnauthenticatedMIFARE(t *testing.T) {
+	// Unauthenticated MIFARE tags should return empty NDEF (not error)
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+
+	mifare := pn532.NewMIFARETag(device, []byte{0x01, 0x02, 0x03, 0x04}, 0x08)
+	// Don't call TryAuthenticate - tag is unauthenticated
+
+	ops := &TagOperations{
+		tag:            &pn532.DetectedTag{UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}},
+		tagType:        pn532.TagTypeMIFARE,
+		mifareInstance: mifare,
+	}
+
+	message, err := ops.ReadNDEF(context.Background())
+	require.NoError(t, err, "Unauthenticated MIFARE should not error")
+	require.NotNil(t, message, "Should return empty NDEF message")
+	assert.Empty(t, message.Records, "NDEF message should have no records")
 }
 
 // --- Writer Tests ---
@@ -548,30 +570,32 @@ func TestTryInitMIFARE_SucceedsWithValidAuth(t *testing.T) {
 	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType)
 }
 
-func TestDetectAndInitializeTag_NTAG_FallsBackToMIFARE(t *testing.T) {
-	// Test that when pre-detected as NTAG with invalid UID,
-	// the code falls back to MIFARE detection
+func TestDetectAndInitializeTag_UnknownFallsBackToMIFARE(t *testing.T) {
+	// Test that when type is Unknown and NTAG init fails,
+	// the code falls back to MIFARE and succeeds if MIFARE auth works.
+	// Note: Only Unknown/FeliCa types try both NTAG and MIFARE fallback.
+	// Pre-typed tags (NTAG, MIFARE) only try their specific init.
 
 	mockTransport := pn532.NewMockTransport()
 	device, err := pn532.New(mockTransport)
 	require.NoError(t, err)
 	mockTransport.SelectTarget()
 
-	// Mock successful MIFARE auth (NTAG will fail on 4-byte UID check)
+	// Mock returns success for MIFARE auth
 	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, make([]byte, 16)...))
 
 	ops := New(device)
 	ops.tag = &pn532.DetectedTag{
-		Type:     pn532.TagTypeNTAG,              // Pre-detected as NTAG
-		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}, // But 4-byte UID = invalid for NTAG
+		Type:     pn532.TagTypeUnknown,           // Unknown type triggers fallback
+		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}, // 4-byte UID
 		SAK:      0x08,
 	}
 
 	err = ops.detectAndInitializeTag(context.Background())
 
-	// Should succeed with MIFARE (fallback from NTAG)
+	// Should succeed via MIFARE fallback (NTAG fails, MIFARE succeeds)
 	require.NoError(t, err)
-	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType, "Should fall back to MIFARE when NTAG fails")
+	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType, "Should fall back to MIFARE")
 }
 
 // --- Reader Function Tests ---
@@ -692,4 +716,241 @@ func TestGetClaimedSizeFromCC(t *testing.T) {
 			assert.Equal(t, tc.expected, result)
 		})
 	}
+}
+
+// --- Stabilization and Retry Tests ---
+// These tests verify the robust initialization behavior added to handle
+// the "sliding card into slot" use case.
+
+func TestInitFromDetectedTag_NilTag(t *testing.T) {
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+
+	ops := New(device)
+
+	err = ops.InitFromDetectedTag(context.Background(), nil)
+
+	require.Error(t, err)
+	assert.Equal(t, ErrNoTag, err)
+}
+
+func TestInitFromDetectedTag_Success(t *testing.T) {
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// Mock valid CC read for NTAG
+	ccData := make([]byte, 16)
+	ccData[0] = 0xE1 // NDEF magic
+	ccData[1] = 0x10 // Version
+	ccData[2] = 0x12 // Size (NTAG213)
+	mockTransport.SetResponse(0x40, append([]byte{0x41, 0x00}, ccData...))
+
+	ops := New(device)
+	tag := &pn532.DetectedTag{
+		UID:      "04010203040506",
+		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+		Type:     pn532.TagTypeNTAG,
+	}
+
+	err = ops.InitFromDetectedTag(context.Background(), tag)
+
+	require.NoError(t, err)
+	assert.Equal(t, pn532.TagTypeNTAG, ops.tagType)
+}
+
+func TestIsDefinitivelyNotNTAG(t *testing.T) {
+	tests := []struct {
+		err      error
+		name     string
+		expected bool
+	}{
+		{
+			name:     "Nil_error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "Real_4byte_UID_error",
+			err:      errors.New("not an NTAG tag: UID must be 7 bytes, got 4 bytes"),
+			expected: true,
+		},
+		{
+			name:     "Zero_UID_parse_failed",
+			err:      errors.New("UID must be 7 bytes - parse failed"),
+			expected: false, // Contains "parse failed" so it's retryable
+		},
+		{
+			name:     "Other_error",
+			err:      errors.New("some other error"),
+			expected: false,
+		},
+		{
+			name:     "Invalid_CC_error",
+			err:      errors.New("not an NTAG tag: invalid capability container"),
+			expected: false, // This is retryable
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := isDefinitivelyNotNTAG(tc.err)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestTryInitNTAG_RetriesOnTransientErrors(t *testing.T) {
+	// Verify that tryInitNTAG retries when it gets transient errors
+	// This tests the "retry on any error" behavior
+
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// First read fails (transient), second succeeds
+	ccDataBad := []byte{0x41, 0x00, 0xFF, 0xFF, 0xFF, 0xFF} // Invalid CC (no 0xE1 magic)
+	ccDataGood := make([]byte, 16)
+	ccDataGood[0] = 0xE1 // NDEF magic
+	ccDataGood[1] = 0x10 // Version
+	ccDataGood[2] = 0x12 // Size (NTAG213)
+
+	mockTransport.QueueResponses(0x40,
+		ccDataBad, // First attempt: garbage CC
+		append([]byte{0x41, 0x00}, ccDataGood...), // Second attempt: valid CC
+	)
+
+	ops := New(device)
+	ops.tag = &pn532.DetectedTag{
+		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+	}
+
+	result := ops.tryInitNTAG(context.Background())
+
+	assert.True(t, result, "tryInitNTAG should succeed after retry")
+	assert.Equal(t, pn532.TagTypeNTAG, ops.tagType)
+}
+
+func TestTryInitNTAG_StopsOnDefinitiveFailure(t *testing.T) {
+	// Verify that tryInitNTAG stops immediately for definitive failures
+	// (like a real 4-byte UID which indicates MIFARE, not NTAG)
+
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	ops := New(device)
+	ops.tag = &pn532.DetectedTag{
+		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04}, // Real 4-byte UID = MIFARE
+	}
+
+	// No mock responses needed - should fail on UID check before any I/O
+
+	result := ops.tryInitNTAG(context.Background())
+
+	assert.False(t, result, "tryInitNTAG should fail immediately for 4-byte UID")
+	// Verify no device I/O happened (call count should be 0)
+	assert.Equal(t, 0, mockTransport.GetCallCount(0x40))
+}
+
+func TestTryInitMIFARE_RetriesOnTransientErrors(t *testing.T) {
+	// Verify that tryInitMIFARE attempts multiple retries on auth failure
+	// Even when all auth attempts fail, MIFARE init succeeds (tag is usable for UID)
+	// but the MIFARE instance will be marked as unauthenticated
+
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// Make all auth attempts fail - we just want to verify retry count
+	mockTransport.SetResponse(0x40, []byte{0x41, 0x01}) // Timeout error
+
+	ops := New(device)
+	ops.tag = &pn532.DetectedTag{
+		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04},
+		SAK:      0x08,
+	}
+
+	result := ops.tryInitMIFARE(context.Background())
+
+	// MIFARE init now succeeds even without auth (tag is usable for UID-only)
+	assert.True(t, result, "tryInitMIFARE should succeed (unauthenticated)")
+	assert.NotNil(t, ops.mifareInstance, "MIFARE instance should be set")
+	assert.False(t, ops.mifareInstance.IsAuthenticated(), "MIFARE should be unauthenticated")
+	// Verify multiple attempts were made
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x40), 2,
+		"Should make multiple retry attempts")
+}
+
+func TestDetectAndInitializeTag_TriesFallbackOnNTAGFailure(t *testing.T) {
+	t.Parallel()
+
+	// Verify that when NTAG init fails, MIFARE fallback is attempted
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// Make all init attempts fail
+	mockTransport.SetResponse(0x40, []byte{0x41, 0x01}) // Timeout error
+
+	ops := New(device)
+	ops.tag = &pn532.DetectedTag{
+		Type:     pn532.TagTypeNTAG,
+		UIDBytes: []byte{0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+		SAK:      0x00,
+	}
+
+	// Should fail after trying both NTAG and MIFARE
+	err = ops.detectAndInitializeTag(context.Background())
+	require.Error(t, err)
+	assert.Equal(t, ErrUnsupportedTag, err)
+
+	// Verify commands were sent (NTAG read and MIFARE auth attempts via InDataExchange)
+	assert.Positive(t, mockTransport.GetCallCount(0x40), "Should have sent commands")
+}
+
+func TestDetectAndInitializeTag_MIFARESucceedsWithoutAuth(t *testing.T) {
+	t.Parallel()
+
+	// Verify that MIFARE init succeeds even when auth fails (unauthenticated mode)
+	mockTransport := pn532.NewMockTransport()
+	device, err := pn532.New(mockTransport)
+	require.NoError(t, err)
+	mockTransport.SelectTarget()
+
+	// Make all auth attempts fail
+	mockTransport.SetResponse(0x40, []byte{0x41, 0x14}) // Auth error
+
+	ops := New(device)
+	ops.tag = &pn532.DetectedTag{
+		Type:     pn532.TagTypeMIFARE,
+		UIDBytes: []byte{0x01, 0x02, 0x03, 0x04},
+		SAK:      0x08,
+	}
+
+	// Should succeed - MIFARE tags are valid even without auth (UID-only mode)
+	err = ops.detectAndInitializeTag(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, pn532.TagTypeMIFARE, ops.tagType)
+	assert.NotNil(t, ops.mifareInstance)
+	assert.False(t, ops.mifareInstance.IsAuthenticated(), "Should be unauthenticated")
+
+	// Verify auth commands were attempted
+	assert.Positive(t, mockTransport.GetCallCount(0x40), "Should have sent auth commands")
+}
+
+// --- Retry Constants Tests ---
+
+func TestRetryConstants(t *testing.T) {
+	// Verify the retry constants are set to expected values
+	assert.Equal(t, 5, initMaxRetries,
+		"initMaxRetries should be 5")
+	assert.Equal(t, 50*time.Millisecond, initRetryDelay,
+		"initRetryDelay should be 50ms")
 }

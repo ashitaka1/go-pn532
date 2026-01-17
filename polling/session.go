@@ -26,6 +26,10 @@ import (
 	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 )
 
+// pollCycleTimeout limits how long a single poll cycle can take.
+// Prevents PN532 from hanging indefinitely after bad auth attempts.
+const pollCycleTimeout = 10 * time.Second
+
 // Session handles continuous card monitoring with state machine
 type Session struct {
 	lastPollTime         time.Time
@@ -37,8 +41,8 @@ type Session struct {
 	resumeChan           chan struct{}
 	ackChan              chan struct{}
 	config               *Config
-	OnCardChanged        func(tag *pn532.DetectedTag) error
-	OnCardDetected       func(tag *pn532.DetectedTag) error
+	OnCardChanged        func(ctx context.Context, tag *pn532.DetectedTag) error
+	OnCardDetected       func(ctx context.Context, tag *pn532.DetectedTag) error
 	OnCardRemoved        func()
 	state                CardState
 	stateMutex           syncutil.RWMutex
@@ -99,7 +103,10 @@ func (s *Session) GetDevice() *pn532.Device {
 }
 
 // SetOnCardDetected sets the callback for when a card is detected.
-func (s *Session) SetOnCardDetected(callback func(*pn532.DetectedTag) error) {
+// The callback receives a context that is tied to the poll cycle timeout,
+// allowing long-running operations (like MIFARE authentication) to be cancelled
+// if the tag is removed or the operation takes too long.
+func (s *Session) SetOnCardDetected(callback func(context.Context, *pn532.DetectedTag) error) {
 	s.stateMutex.Lock()
 	defer s.stateMutex.Unlock()
 	s.OnCardDetected = callback
@@ -113,7 +120,9 @@ func (s *Session) SetOnCardRemoved(callback func()) {
 }
 
 // SetOnCardChanged sets the callback for when the card changes.
-func (s *Session) SetOnCardChanged(callback func(*pn532.DetectedTag) error) {
+// The callback receives a context that is tied to the poll cycle timeout,
+// allowing long-running operations to be cancelled if needed.
+func (s *Session) SetOnCardChanged(callback func(context.Context, *pn532.DetectedTag) error) {
 	s.stateMutex.Lock()
 	defer s.stateMutex.Unlock()
 	s.OnCardChanged = callback
@@ -331,7 +340,7 @@ func (s *Session) WriteToTag(
 	s.writeMutex.Lock()
 	defer s.writeMutex.Unlock()
 
-	// Enhanced pause with acknowledgment - now requires context
+	// Pause with ACK handshake to ensure clean state before stopping
 	if err := s.pauseWithAck(sessionCtx); err != nil {
 		return fmt.Errorf("failed to pause polling: %w", err)
 	}
@@ -393,8 +402,15 @@ func (s *Session) continuousPolling(ctx context.Context) error {
 func (s *Session) runPollingLoop(ctx context.Context, cycleFunc func(context.Context) error) error {
 	// Configure PN532 hardware polling retries to reduce host-side polling frequency
 	// This tells the PN532 to retry detection internally before returning to the host
-	if err := s.device.SetPollingRetries(s.config.HardwareTimeoutRetries); err != nil {
+	if err := s.device.SetPollingRetries(ctx, s.config.HardwareTimeoutRetries); err != nil {
 		return fmt.Errorf("failed to configure hardware polling retries: %w", err)
+	}
+
+	// Set device timeout to match hardware retries plus buffer
+	// Each retry is ~150ms, plus 1s buffer for host/driver overhead
+	hwTimeout := time.Duration(s.config.HardwareTimeoutRetries)*150*time.Millisecond + time.Second
+	if err := s.device.SetTimeout(hwTimeout); err != nil {
+		return fmt.Errorf("failed to set device timeout: %w", err)
 	}
 
 	ticker := time.NewTicker(s.config.PollInterval)
@@ -422,21 +438,68 @@ func (s *Session) executeSinglePollingCycle(ctx context.Context) error {
 		return err // Recovery failed - exit polling loop
 	}
 
-	detectedTag, err := s.performSinglePoll(ctx)
+	// Add timeout to detection phase to prevent PN532 from hanging indefinitely
+	// Note: This timeout only applies to detection (performSinglePoll), not callbacks.
+	// Callbacks receive the parent context so they can do long operations like writes.
+	pollCtx, cancel := context.WithTimeout(ctx, pollCycleTimeout)
+	defer cancel()
+
+	detectedTag, err := s.performSinglePoll(pollCtx)
 	if err != nil {
-		if !errors.Is(err, ErrNoTagInPoll) {
-			s.handlePollingError(err)
-			if pn532.IsFatal(err) {
-				return err // Fatal error - exit polling loop
-			}
-		}
-		return nil // Transient error or no tag - continue polling
+		return s.handlePollError(ctx, err)
 	}
 
-	if err := s.processPollingResults(detectedTag); err != nil {
+	// Pass parent ctx (not pollCtx) to callbacks - they may need more time for writes
+	if err := s.processPollingResults(ctx, detectedTag); err != nil {
 		return fmt.Errorf("callback error during polling: %w", err)
 	}
 	return nil
+}
+
+// handlePollError processes errors from performSinglePoll, including NoACK recovery.
+// Returns nil to continue polling, or a non-nil error to exit the polling loop.
+func (s *Session) handlePollError(ctx context.Context, err error) error {
+	// No tag detected is not an error - continue polling
+	if errors.Is(err, ErrNoTagInPoll) {
+		return nil
+	}
+
+	// Check for NoACK error which indicates PN532 firmware lockup
+	if errors.Is(err, pn532.ErrNoACK) && s.attemptHardReset(ctx) {
+		return nil // Recovery succeeded, continue polling
+	}
+
+	// Handle other errors normally
+	s.handlePollingError(err)
+	if pn532.IsFatal(err) {
+		return err // Fatal error - exit polling loop
+	}
+	return nil // Transient error - continue polling
+}
+
+// attemptHardReset attempts nuclear recovery when PN532 enters firmware lockup.
+// Returns true if recovery succeeded and polling can continue, false otherwise.
+func (s *Session) attemptHardReset(ctx context.Context) bool {
+	pn532.Debugln("PN532 lockup detected (no ACK), attempting hard reset")
+
+	device := s.GetDevice()
+	if device == nil {
+		pn532.Debugln("attemptHardReset: device is nil")
+		return false
+	}
+
+	if err := device.HardReset(ctx); err != nil {
+		pn532.Debugf("attemptHardReset: failed: %v", err)
+		return false
+	}
+
+	// Clear card state after recovery - tag may have moved during lockup
+	s.stateMutex.Lock()
+	s.state.TransitionToIdle()
+	s.stateMutex.Unlock()
+
+	pn532.Debugln("attemptHardReset: recovery successful, resuming polling")
+	return true
 }
 
 // checkSleepAndRecover detects time discontinuity (system sleep) and attempts recovery
@@ -601,9 +664,11 @@ func (s *Session) handleCardRemoval() {
 	// This handles the edge case where timer.Stop() returned false (callback already spawned)
 	// but the callback runs after TransitionToReading() released the lock
 	if s.state.DetectionState == StateReading {
+		pn532.Debugf("handleCardRemoval: in reading state, bailing out")
 		s.stateMutex.Unlock()
 		return
 	}
+	pn532.Debugf("handleCardRemoval: state=%v, present=%v", s.state.DetectionState, s.state.Present)
 	wasPresent := s.state.Present
 	if wasPresent {
 		s.state.TransitionToIdle()
@@ -613,17 +678,15 @@ func (s *Session) handleCardRemoval() {
 
 	// Call callback outside the lock to avoid potential deadlocks
 	if wasPresent && onRemoved != nil {
+		pn532.Debugf("handleCardRemoval: calling OnCardRemoved callback")
 		onRemoved()
 	}
 }
 
-// maxStableFailuresBeforeError is how many times a callback can fail with stable RF
-// before we consider it a "real" error worth reporting. This prevents error spam
-// during card slide-in when RF is marginal.
-const maxStableFailuresBeforeError = 3
-
 // processPollingResults processes the detected tag and returns any callback errors.
-func (s *Session) processPollingResults(detectedTag *pn532.DetectedTag) error {
+// The context is passed to callbacks, allowing them to be cancelled if the poll cycle
+// timeout is exceeded (e.g., when a tag is removed during MIFARE authentication).
+func (s *Session) processPollingResults(ctx context.Context, detectedTag *pn532.DetectedTag) error {
 	if detectedTag == nil {
 		// No tag detected - removal handled by timer, nothing to do here
 		return nil
@@ -632,7 +695,7 @@ func (s *Session) processPollingResults(detectedTag *pn532.DetectedTag) error {
 	// LAYER 1: Verify RF stability before processing
 	// This catches marginal RF connections (e.g., card sliding in from the side)
 	// before we run callbacks that might fail and leave the card in a stuck state.
-	if !s.verifyTagStable() {
+	if !s.verifyTagStable(ctx) {
 		// RF unstable - skip this cycle silently, reset failure counter
 		// The card will be re-detected on the next poll if still present
 		s.stateMutex.Lock()
@@ -650,26 +713,10 @@ func (s *Session) processPollingResults(detectedTag *pn532.DetectedTag) error {
 	s.stateMutex.Unlock()
 
 	// Card present - handle state transitions (calls OnCardDetected/OnCardChanged)
-	cardChanged, err := s.updateCardState(detectedTag)
-	// LAYER 2: Handle callback failure without killing polling loop
-	// If callback fails, don't mark as tested and allow retry on next poll
+	cardChanged, err := s.updateCardState(ctx, detectedTag)
+	// Handle callback failure without killing polling loop
 	if err != nil {
-		s.stateMutex.Lock()
-		s.state.ConsecutiveStableFailures++
-		failures := s.state.ConsecutiveStableFailures
-		s.stateMutex.Unlock()
-
-		// LAYER 3: Only report error after multiple stable failures
-		// This prevents error spam when RF just stabilized but reads still fail
-		if failures >= maxStableFailuresBeforeError {
-			// This is a "real" error - RF is stable but callback keeps failing
-			return fmt.Errorf("callback failed %d times with stable RF: %w", failures, err)
-		}
-
-		// Not enough failures yet - skip silently, will retry next poll
-		pn532.Debugf("Callback failed (attempt %d/%d, will retry): %v",
-			failures, maxStableFailuresBeforeError, err)
-		return nil // Don't exit polling, don't set TestedUID
+		return s.handleCallbackFailure(ctx, err)
 	}
 
 	// Callback succeeded - reset failure counter
@@ -692,18 +739,53 @@ func (s *Session) processPollingResults(detectedTag *pn532.DetectedTag) error {
 	return nil
 }
 
+// handleCallbackFailure handles callback failures or RF errors during callback execution.
+// Returns nil to continue polling - the per-cycle timeout handles giving up on stuck cards.
+func (s *Session) handleCallbackFailure(ctx context.Context, failureErr error) error {
+	s.stateMutex.Lock()
+	s.state.ConsecutiveStableFailures++
+	s.state.Present = false // Reset so callback runs again on next poll
+	failures := s.state.ConsecutiveStableFailures
+	s.stateMutex.Unlock()
+
+	pn532.Debugf("Callback failed (attempt %d, will retry): %v", failures, failureErr)
+
+	// Check if error contains NoACK - indicates PN532 firmware lockup
+	// This can happen during MIFARE auth retries when the PN532 enters a bad state
+	if errors.Is(failureErr, pn532.ErrNoACK) {
+		pn532.Debugln("NoACK error in callback - attempting hard reset")
+		if s.attemptHardReset(ctx) {
+			return nil // Recovery succeeded, continue polling
+		}
+		// Hard reset failed - fall through to RF cycle as last resort
+	}
+
+	// After first callback failure, cycle RF field to clear stuck state
+	// This prevents PN532 from hanging on subsequent InListPassiveTarget calls
+	// Note: Threshold is 1 (not 3) because hangs occur immediately after auth failures
+	if failures >= 1 {
+		pn532.Debugf("Cycling RF field to clear stuck state")
+		if err := s.device.CycleRFField(ctx); errors.Is(err, pn532.ErrNoACK) {
+			pn532.Debugln("NoACK during CycleRFField - attempting hard reset")
+			s.attemptHardReset(ctx)
+		}
+	}
+
+	return nil
+}
+
 // verifyTagStable confirms the detected tag has stable RF contact by attempting
 // an InSelect command. This catches marginal RF connections before we run
 // callbacks that might fail and leave the card in a "stuck" state.
 //
 // Returns true if tag responds to InSelect, false if RF appears unstable.
-func (s *Session) verifyTagStable() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+func (s *Session) verifyTagStable(ctx context.Context) bool {
+	selectCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 
 	// InSelect verifies the target is still valid and responsive
 	// If RF is marginal (e.g., card sliding in), this will fail
-	err := s.device.InSelect(ctx)
+	err := s.device.InSelect(selectCtx)
 	if err != nil {
 		pn532.Debugf("RF unstable (InSelect failed): %v", err)
 		return false
@@ -711,9 +793,11 @@ func (s *Session) verifyTagStable() bool {
 	return true
 }
 
-// safeCallCallback executes a callback with panic recovery
+// safeCallCallback executes a callback with panic recovery.
+// The context is passed to the callback, allowing it to be cancelled if needed.
 func (*Session) safeCallCallback(
-	callback func(*pn532.DetectedTag) error,
+	ctx context.Context,
+	callback func(context.Context, *pn532.DetectedTag) error,
 	tag *pn532.DetectedTag,
 	callbackName string,
 ) error {
@@ -724,7 +808,7 @@ func (*Session) safeCallCallback(
 				callbackErr = fmt.Errorf("%s callback panicked: %v", callbackName, r)
 			}
 		}()
-		callbackErr = callback(tag)
+		callbackErr = callback(ctx, tag)
 	}()
 	if callbackErr != nil {
 		return fmt.Errorf("%s callback failed: %w", callbackName, callbackErr)
@@ -732,8 +816,9 @@ func (*Session) safeCallCallback(
 	return nil
 }
 
-// updateCardState updates the card state and returns whether the card changed and any callback error
-func (s *Session) updateCardState(detectedTag *pn532.DetectedTag) (bool, error) {
+// updateCardState updates the card state and returns whether the card changed and any callback error.
+// The context is passed to callbacks, allowing long-running operations to be cancelled.
+func (s *Session) updateCardState(ctx context.Context, detectedTag *pn532.DetectedTag) (bool, error) {
 	currentUID := detectedTag.UID
 	cardType := string(detectedTag.Type)
 
@@ -747,11 +832,11 @@ func (s *Session) updateCardState(detectedTag *pn532.DetectedTag) (bool, error) 
 
 	// Call callbacks outside of lock with panic recovery
 	if !wasPresent && onDetected != nil {
-		if err := s.safeCallCallback(onDetected, detectedTag, "OnCardDetected"); err != nil {
+		if err := s.safeCallCallback(ctx, onDetected, detectedTag, "OnCardDetected"); err != nil {
 			return false, err
 		}
 	} else if wasChanged && onChanged != nil {
-		if err := s.safeCallCallback(onChanged, detectedTag, "OnCardChanged"); err != nil {
+		if err := s.safeCallCallback(ctx, onChanged, detectedTag, "OnCardChanged"); err != nil {
 			return false, err
 		}
 	}

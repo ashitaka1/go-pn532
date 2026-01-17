@@ -81,7 +81,7 @@ func TestDevice_DetectTag(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 
-			err = device.InitContext(ctx)
+			err = device.Init(ctx)
 			require.NoError(t, err)
 
 			// Test tag detection
@@ -154,7 +154,7 @@ func TestDevice_WaitForTag(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 
-			err = device.InitContext(ctx)
+			err = device.Init(ctx)
 			require.NoError(t, err)
 
 			// Test waiting for tag with timeout context
@@ -243,7 +243,7 @@ func TestDevice_SimplePoll(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 
-			err = device.InitContext(ctx)
+			err = device.Init(ctx)
 			require.NoError(t, err)
 
 			// Test simple polling with timeout context
@@ -296,8 +296,8 @@ func TestHandleDetectionError(t *testing.T) {
 	})
 }
 
-// TestPauseWithContext tests the pauseWithContext function
-func TestPauseWithContext(t *testing.T) {
+// TestPause tests the pause function
+func TestPause(t *testing.T) {
 	t.Parallel()
 
 	device := &Device{}
@@ -306,7 +306,7 @@ func TestPauseWithContext(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
 		start := time.Now()
-		err := device.pauseWithContext(ctx, 50*time.Millisecond)
+		err := device.pause(ctx, 50*time.Millisecond)
 		elapsed := time.Since(start)
 
 		require.NoError(t, err)
@@ -318,7 +318,7 @@ func TestPauseWithContext(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // Cancel immediately
 
-		err := device.pauseWithContext(ctx, 1*time.Second)
+		err := device.pause(ctx, 1*time.Second)
 		assert.ErrorIs(t, err, context.Canceled)
 	})
 }
@@ -490,9 +490,7 @@ func TestIdentifyTagType(t *testing.T) {
 	}
 }
 
-// TestCreateTag tests tag creation for different tag types
-//
-
+// TestCreateTag tests tag creation for different tag types.
 func TestCreateTag(t *testing.T) {
 	t.Parallel()
 

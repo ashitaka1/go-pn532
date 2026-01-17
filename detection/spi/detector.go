@@ -299,7 +299,7 @@ func deduplicateConfigs(configs []Config) []Config {
 }
 
 // probeSPIDevice attempts to verify an SPI device is a PN532
-func probeSPIDevice(_ context.Context, config Config, _ detection.Mode) bool {
+func probeSPIDevice(ctx context.Context, config Config, _ detection.Mode) bool {
 	// Create SPI transport
 	transport, err := spi.New(config.Device)
 	if err != nil {
@@ -314,6 +314,6 @@ func probeSPIDevice(_ context.Context, config Config, _ detection.Mode) bool {
 	}
 
 	// Try to get firmware version
-	_, err = device.GetFirmwareVersion(context.Background())
+	_, err = device.GetFirmwareVersion(ctx)
 	return err == nil
 }

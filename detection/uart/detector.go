@@ -308,7 +308,7 @@ func isLikelyPN532(port *serialPort) bool {
 //
 // Connection retries are handled at the device level for known PN532 paths,
 // not during the auto-detection phase.
-func probeDevice(_ context.Context, path string, mode detection.Mode) bool {
+func probeDevice(ctx context.Context, path string, mode detection.Mode) bool {
 	// Try to open the port (single attempt only)
 	transport, err := uart.New(path)
 	if err != nil {
@@ -329,12 +329,12 @@ func probeDevice(_ context.Context, path string, mode detection.Mode) bool {
 
 	case detection.Safe:
 		// Just try to get firmware version
-		_, err := device.GetFirmwareVersion(context.Background())
+		_, err := device.GetFirmwareVersion(ctx)
 		return err == nil
 
 	case detection.Full:
 		// Try full initialization (SAM configuration)
-		err := device.Init()
+		err := device.Init(ctx)
 		return err == nil
 
 	default:

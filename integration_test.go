@@ -99,7 +99,7 @@ func TestBasicTagDetection(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 
-			err = device.InitContext(ctx)
+			err = device.Init(ctx)
 			require.NoError(t, err)
 
 			// Test tag detection
@@ -112,7 +112,7 @@ func TestBasicTagDetection(t *testing.T) {
 			assert.Equal(t, tt.uid, tag.UIDBytes)
 
 			// Verify mock was called correctly
-			// InitContext calls firmware version twice: once for validation, once for setup
+			// Init calls firmware version twice: once for validation, once for setup
 			assert.Equal(t, 2, mock.GetCallCount(testutil.CmdGetFirmwareVersion))
 			assert.Equal(t, 1, mock.GetCallCount(testutil.CmdSAMConfiguration))
 			assert.Equal(t, 1, mock.GetCallCount(testutil.CmdInListPassiveTarget))
@@ -143,7 +143,7 @@ func TestTagNotFound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	err = device.InitContext(ctx)
+	err = device.Init(ctx)
 	require.NoError(t, err)
 
 	// Test tag detection - should find no tags
@@ -205,7 +205,7 @@ func TestTransportErrorHandling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	err = device.InitContext(ctx)
+	err = device.Init(ctx)
 	require.NoError(t, err)
 
 	// Test tag detection with error
@@ -236,7 +236,7 @@ func TestTransportTimeout(t *testing.T) {
 	initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
 	defer initCancel()
 
-	err = device.InitContext(initCtx)
+	err = device.Init(initCtx)
 	require.NoError(t, err)
 
 	// Test with sufficient timeout - should succeed even with delay
@@ -295,7 +295,7 @@ func BenchmarkTagDetection(b *testing.B) {
 	ctx := context.Background()
 
 	// Initialize device
-	err = device.InitContext(ctx)
+	err = device.Init(ctx)
 	require.NoError(b, err)
 
 	b.ResetTimer()
@@ -515,7 +515,7 @@ func TestNTAG_ReadNDEF_FudanClone_SkipsFastRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err = device.InitContext(ctx)
+	err = device.Init(ctx)
 	require.NoError(t, err)
 
 	// Detect the clone tag
@@ -571,7 +571,7 @@ func TestNTAG_ReadNDEF_GenuineNXP_UsesFastRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err = device.InitContext(ctx)
+	err = device.Init(ctx)
 	require.NoError(t, err)
 
 	// Detect the NXP tag
@@ -633,7 +633,7 @@ func TestNTAG_ReadNDEF_CloneTag_RegressionTest(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			err = device.InitContext(ctx)
+			err = device.Init(ctx)
 			require.NoError(t, err)
 
 			// Detect tag

@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -158,7 +159,7 @@ func getMIFAREReadBlockTestCases() []struct {
 			},
 			block:         4,
 			expectError:   true,
-			errorContains: "invalid read response length",
+			errorContains: "invalid response length",
 		},
 	}
 }
@@ -362,10 +363,6 @@ func getMIFAREWriteBlockErrorCases() []struct {
 	}
 }
 
-// Removed - test cases consolidated into getMIFAREWriteBlockTestCases
-
-// Removed - test cases consolidated into getMIFAREWriteBlockTestCases
-
 func TestMIFARETag_Authenticate(t *testing.T) {
 	t.Parallel()
 
@@ -553,7 +550,7 @@ func TestMIFARETag_ReadBlockDirect(t *testing.T) {
 			},
 			block:         4,
 			expectError:   true,
-			errorContains: "invalid read response length",
+			errorContains: "invalid response length",
 		},
 	}
 
@@ -720,6 +717,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 		name          string
 		errorContains string
 		expectError   bool
+		expectEmpty   bool // When true, verify message has empty Records
 	}{
 		{
 			name: "Authentication_Failure",
@@ -727,8 +725,8 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				// Setup authentication failure for sector 1
 				mt.SetError(0x40, errors.New("authentication failed"))
 			},
-			expectError:   true,
-			errorContains: "tag read failed",
+			expectError: false, // Auth failure = not NDEF formatted = empty NDEF, not error
+			expectEmpty: true,  // Regression: auth failure should return empty NDEF, not nil
 		},
 		{
 			name: "Empty_NDEF_Data",
@@ -737,7 +735,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				authData := []byte{0x41, 0x00}
 				mt.SetResponse(0x40, authData)
 
-				// Setup empty response for reads - this will trigger TLV parsing error
+				// Setup empty response for reads - no NDEF TLV present
 				emptyResponse := make([]byte, 18)
 				emptyResponse[0] = 0x41
 				emptyResponse[1] = 0x00
@@ -745,20 +743,7 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				mt.SetResponse(0x40, emptyResponse)
 			},
 			expectError:   true,
-			errorContains: "invalid NDEF message", // Updated to match actual error
-		},
-		{
-			name: "Communication_Error_During_Read",
-			setupMock: func(mt *MockTransport) {
-				// Setup authentication success first
-				authData := []byte{0x41, 0x00}
-				mt.SetResponse(0x40, authData)
-
-				// Then setup error for subsequent read operations
-				mt.SetError(0x40, errors.New("communication error"))
-			},
-			expectError:   true,
-			errorContains: "communication error",
+			errorContains: "no NDEF", // No NDEF TLV found in empty data
 		},
 	}
 
@@ -787,7 +772,11 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 				assert.Nil(t, message)
 			} else {
 				require.NoError(t, err)
-				assert.NotNil(t, message)
+				require.NotNil(t, message, "NDEF message should not be nil")
+				if tt.expectEmpty {
+					assert.Empty(t, message.Records,
+						"Auth failure should return empty NDEF message, not records")
+				}
 			}
 		})
 	}
@@ -798,6 +787,8 @@ func TestMIFARETag_ReadNDEF(t *testing.T) {
 func setupMIFARETagTest(t *testing.T, setupMock func(*MockTransport)) (*MIFARETag, *MockTransport) {
 	t.Helper()
 	mt := NewMockTransport()
+	// Select target by default - tag operations require a target to be selected
+	mt.SelectTarget()
 	setupMock(mt)
 	device := &Device{transport: mt}
 	uid := []byte{0x04, 0x56, 0x78, 0x9A}
@@ -937,17 +928,15 @@ func TestMIFARETag_ResetAuthState(t *testing.T) {
 	}{
 		{
 			name: "Successful_Reset",
-			setupMock: func(mt *MockTransport) {
-				// Setup successful InListPassiveTarget response
-				resetData := []byte{0xD5, 0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04, 0x56, 0x78, 0x9A}
-				mt.SetResponse(0x4A, resetData) // InListPassiveTarget
+			setupMock: func(_ *MockTransport) {
+				// Default responses from mock are sufficient
 			},
 		},
 		{
 			name: "Reset_Communication_Error",
 			setupMock: func(mt *MockTransport) {
-				// Setup communication error
-				mt.SetError(0x4A, errors.New("communication error"))
+				// InDeselect succeeds but InSelect fails with communication error
+				mt.SetError(0x54, errors.New("communication error"))
 			},
 			expectError:   true,
 			errorContains: "communication error",
@@ -960,6 +949,8 @@ func TestMIFARETag_ResetAuthState(t *testing.T) {
 
 			// Create mock transport and device
 			mt := NewMockTransport()
+			// Select target by default - tag operations require a target to be selected
+			mt.SelectTarget()
 			tt.setupMock(mt)
 
 			device := &Device{transport: mt}
@@ -1017,7 +1008,7 @@ func TestMIFARETag_WriteText(t *testing.T) {
 				writeSuccess := []byte{0x41, 0x00}
 
 				// Queue writeSuccess responses for:
-				// - 1 auth (authenticateForNDEF with NDEF key succeeds)
+				// - 1 auth (authenticateWithKeyFallback with NDEF key succeeds)
 				// - 2 writes (blocks 4, 5)
 				// - 57 clearRemainingBlocks ops: block 6 + sectors 2-15 (1 + 14*4)
 				// - 1 verification auth
@@ -1288,7 +1279,7 @@ func TestMIFARETag_WriteBlockAutoAlternative(t *testing.T) {
 	}
 }
 
-func TestMIFARETag_authenticateForNDEFAlternative(t *testing.T) {
+func TestMIFARETag_authenticateWithKeyFallbackAlt(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1318,14 +1309,14 @@ func TestMIFARETag_authenticateForNDEFAlternative(t *testing.T) {
 
 			tag, _ := setupMIFARETagTest(t, tt.setupMock)
 
-			result, err := tag.authenticateForNDEFAlternative(context.Background())
+			result, err := tag.authenticateWithKeyFallbackAlt(context.Background())
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectedNDEFFormatted, result.isNDEFFormatted)
 		})
 	}
 }
 
-func TestMIFARETag_authenticateNDEFAlternative(t *testing.T) {
+func TestMIFARETag_authenticateWithNDEFKeyAlt(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1382,7 +1373,7 @@ func TestMIFARETag_authenticateNDEFAlternative(t *testing.T) {
 			tag, _ := setupMIFARETagTest(t, tt.setupMock)
 			tag.SetConfig(testMIFAREConfig())
 
-			err := tag.authenticateNDEFAlternative(context.Background(), tt.sector, tt.keyType)
+			err := tag.authenticateWithNDEFKeyAlt(context.Background(), tt.sector, tt.keyType)
 			checkMIFARETagError(t, err, tt.expectError, tt.errorContains)
 		})
 	}
@@ -1392,7 +1383,7 @@ func TestMIFARETag_authenticateNDEFAlternative(t *testing.T) {
 //
 // These tests verify the fix for MIFARE key fallback.
 // When the first key fails, the code should:
-// 1. Call InListPassiveTarget to re-select the tag (failed auth puts tag in HALT)
+// 1. Call InDeselect + InSelect to re-select the tag (failed auth puts tag in HALT)
 // 2. Try the alternative key
 // 3. Proceed with the read/write operation
 
@@ -1409,8 +1400,7 @@ func TestMIFARETag_ReadBlockAuto_KeyFallbackSucceeds(t *testing.T) {
 			[]byte{0x41, 0x00}, // Key B auth succeeds
 			append([]byte{0x41, 0x00}, make([]byte, 16)...), // Read returns 16 bytes
 		)
-		// InListPassiveTarget response for re-select
-		mt.SetResponse(0x4A, []byte{0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04})
+		// Default mock responses for InDeselect (0x44) and InSelect (0x54) are sufficient
 	})
 	tag.SetConfig(testMIFAREConfig())
 
@@ -1420,8 +1410,10 @@ func TestMIFARETag_ReadBlockAuto_KeyFallbackSucceeds(t *testing.T) {
 	assert.Len(t, data, 16)
 	// The fact that this succeeds proves the re-select is working
 	// (without re-select, Key B auth would fail due to HALT state)
-	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x4A), 1,
-		"InListPassiveTarget should be called for re-select")
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x44), 1,
+		"InDeselect should be called for re-select")
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x54), 1,
+		"InSelect should be called for re-select")
 }
 
 func TestMIFARETag_WriteBlockAuto_KeyFallbackSucceeds(t *testing.T) {
@@ -1436,14 +1428,84 @@ func TestMIFARETag_WriteBlockAuto_KeyFallbackSucceeds(t *testing.T) {
 			[]byte{0x41, 0x00}, // Key A auth succeeds
 			[]byte{0x41, 0x00}, // Write succeeds
 		)
-		// InListPassiveTarget response for re-select
-		mt.SetResponse(0x4A, []byte{0x4B, 0x01, 0x01, 0x00, 0x04, 0x08, 0x04})
+		// Default mock responses for InDeselect (0x44) and InSelect (0x54) are sufficient
 	})
 	tag.SetConfig(testMIFAREConfig())
 
 	err := tag.WriteBlockAuto(context.Background(), 4, make([]byte, 16))
 
 	require.NoError(t, err, "WriteBlockAuto should succeed with Key A fallback")
-	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x4A), 1,
-		"InListPassiveTarget should be called for re-select")
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x44), 1,
+		"InDeselect should be called for re-select")
+	assert.GreaterOrEqual(t, mockTransport.GetCallCount(0x54), 1,
+		"InSelect should be called for re-select")
+}
+
+// Regression test: TryAuthenticate sets authenticated field
+
+func TestMIFARETag_TryAuthenticate_SetsAuthenticatedField(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success_SetsAuthenticated", func(t *testing.T) {
+		t.Parallel()
+
+		tag, _ := setupMIFARETagTest(t, func(mt *MockTransport) {
+			// Authentication succeeds
+			mt.SetResponse(0x40, []byte{0x41, 0x00})
+		})
+		tag.SetConfig(testMIFAREConfig())
+
+		// Initially not authenticated
+		assert.False(t, tag.IsAuthenticated(), "tag should not be authenticated before TryAuthenticate")
+
+		err := tag.TryAuthenticate(context.Background())
+
+		require.NoError(t, err)
+		assert.True(t, tag.IsAuthenticated(),
+			"tag.authenticated should be true after successful TryAuthenticate")
+	})
+
+	t.Run("Failure_LeavesUnauthenticated", func(t *testing.T) {
+		t.Parallel()
+
+		tag, _ := setupMIFARETagTest(t, func(mt *MockTransport) {
+			// All authentication attempts fail
+			mt.SetError(0x40, errors.New("authentication failed"))
+		})
+		tag.SetConfig(testMIFAREConfig())
+
+		// Initially not authenticated
+		assert.False(t, tag.IsAuthenticated())
+
+		err := tag.TryAuthenticate(context.Background())
+
+		require.Error(t, err)
+		assert.False(t, tag.IsAuthenticated(),
+			"tag.authenticated should remain false after failed TryAuthenticate")
+	})
+}
+
+// Regression test: DefaultMIFAREConfig has correct defaults
+
+func TestMIFAREConfig_DefaultMaxAttempts(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultMIFAREConfig()
+
+	require.NotNil(t, config, "DefaultMIFAREConfig should not return nil")
+	require.NotNil(t, config.RetryConfig, "RetryConfig should not be nil")
+
+	// Verify MaxAttempts is 3 (default for production)
+	assert.Equal(t, 3, config.RetryConfig.MaxAttempts,
+		"DefaultMIFAREConfig.RetryConfig.MaxAttempts should be 3")
+
+	// Also verify other retry config defaults are sensible
+	assert.Greater(t, config.RetryConfig.InitialBackoff, time.Duration(0),
+		"InitialBackoff should be positive")
+	assert.Greater(t, config.RetryConfig.MaxBackoff, config.RetryConfig.InitialBackoff,
+		"MaxBackoff should be greater than InitialBackoff")
+	assert.Greater(t, config.RetryConfig.BackoffMultiplier, float64(1),
+		"BackoffMultiplier should be greater than 1")
+	assert.Greater(t, config.HardwareDelay, time.Duration(0),
+		"HardwareDelay should be positive")
 }

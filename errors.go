@@ -176,6 +176,24 @@ func (e *PN532Error) IsTimeoutError() bool {
 	return e.ErrorCode == 0x01
 }
 
+// IsRFError returns true if the error is RF communication related.
+// These errors are typically transient and worth retrying, especially during
+// card sliding where RF communication may be unstable until the card settles.
+func (e *PN532Error) IsRFError() bool {
+	switch e.ErrorCode {
+	case 0x02, // CRC error - RF data corruption
+		0x03, // Parity error - RF data corruption
+		0x05, // Framing error during MIFARE operation
+		0x0A, // RF field not activated in time
+		0x0B, // RF protocol error
+		0x29, // Target released by initiator - card movement
+		0x2B: // Card disappeared - card movement during slide
+		return true
+	default:
+		return false
+	}
+}
+
 // IsRetryable returns true if the error is potentially retryable
 func IsRetryable(err error) bool {
 	if err == nil {
@@ -190,9 +208,10 @@ func IsRetryable(err error) bool {
 	// Check for PN532 errors
 	var pe *PN532Error
 	if errors.As(err, &pe) {
-		// Timeouts and authentication errors are retryable
+		// Timeouts, authentication errors, and RF errors are retryable
+		// RF errors (CRC, parity, framing, etc.) are transient and common during card sliding
 		// Command not supported errors are not retryable
-		return pe.IsTimeoutError() || pe.IsAuthenticationError()
+		return pe.IsTimeoutError() || pe.IsAuthenticationError() || pe.IsRFError()
 	}
 
 	// Check for known retryable errors
@@ -201,9 +220,10 @@ func IsRetryable(err error) bool {
 		errors.Is(err, ErrTransportRead),
 		errors.Is(err, ErrTransportWrite),
 		errors.Is(err, ErrCommunicationFailed),
-		errors.Is(err, ErrNoACK),
 		errors.Is(err, ErrFrameCorrupted),
-		errors.Is(err, ErrChecksumMismatch):
+		errors.Is(err, ErrChecksumMismatch),
+		errors.Is(err, ErrTagReadFailed),
+		errors.Is(err, ErrTagDataCorrupt):
 		return true
 	default:
 		return false
@@ -302,6 +322,16 @@ func IsPN532TimeoutError(err error) bool {
 	var pe *PN532Error
 	if errors.As(err, &pe) {
 		return pe.IsTimeoutError()
+	}
+	return false
+}
+
+// IsPN532RFError checks if an error is a PN532 RF communication error.
+// These errors are transient and common during card sliding.
+func IsPN532RFError(err error) bool {
+	var pe *PN532Error
+	if errors.As(err, &pe) {
+		return pe.IsRFError()
 	}
 	return false
 }

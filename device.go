@@ -107,7 +107,7 @@ type ConnectOption func(*connectConfig) error
 type connectConfig struct {
 	transportFactory       TransportFactory
 	transportDeviceFactory TransportFromDeviceFactory
-	deviceDetector         func(*detection.Options) ([]detection.DeviceInfo, error)
+	deviceDetector         func(context.Context, *detection.Options) ([]detection.DeviceInfo, error)
 	deviceOptions          []Option
 	timeout                time.Duration
 	autoDetect             bool
@@ -166,7 +166,9 @@ func WithConnectionRetries(maxAttempts int) ConnectOption {
 }
 
 // WithDeviceDetector sets a custom device detector function for auto-detection
-func WithDeviceDetector(detector func(*detection.Options) ([]detection.DeviceInfo, error)) ConnectOption {
+func WithDeviceDetector(
+	detector func(context.Context, *detection.Options) ([]detection.DeviceInfo, error),
+) ConnectOption {
 	return func(c *connectConfig) error {
 		c.deviceDetector = detector
 		return nil
@@ -192,7 +194,7 @@ func applyConnectOptions(opts []ConnectOption) (*connectConfig, error) {
 		timeout:                30 * time.Second,
 		transportFactory:       nil,
 		transportDeviceFactory: nil,
-		connectionRetries:      3, // Default to 3 attempts for manual connections
+		connectionRetries:      DefaultConnectionRetries,
 	}
 
 	for _, opt := range opts {
@@ -204,14 +206,14 @@ func applyConnectOptions(opts []ConnectOption) (*connectConfig, error) {
 	return config, nil
 }
 
-func createTransport(path string, config *connectConfig) (Transport, error) {
+func createTransport(ctx context.Context, path string, config *connectConfig) (Transport, error) {
 	if config.autoDetect || path == "" {
-		return createAutoDetectedTransport(config.transportDeviceFactory, config.deviceDetector)
+		return createAutoDetectedTransport(ctx, config.transportDeviceFactory, config.deviceDetector)
 	}
 	return createManualTransport(path, config.transportFactory)
 }
 
-func setupDevice(transport Transport, config *connectConfig) (*Device, error) {
+func setupDevice(ctx context.Context, transport Transport, config *connectConfig) (*Device, error) {
 	device, err := New(transport, config.deviceOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device: %w", err)
@@ -223,7 +225,7 @@ func setupDevice(transport Transport, config *connectConfig) (*Device, error) {
 		}
 	}
 
-	if err := device.Init(); err != nil {
+	if err := device.Init(ctx); err != nil {
 		return nil, fmt.Errorf("failed to initialize device: %w", err)
 	}
 
@@ -231,26 +233,26 @@ func setupDevice(transport Transport, config *connectConfig) (*Device, error) {
 }
 
 // setupDeviceWithRetry wraps setupDevice with retry logic for connection attempts
-func setupDeviceWithRetry(transport Transport, config *connectConfig) (*Device, error) {
+func setupDeviceWithRetry(ctx context.Context, transport Transport, config *connectConfig) (*Device, error) {
 	// Auto-detection should bypass retry logic (single attempt only)
 	if config.autoDetect {
-		return setupDevice(transport, config)
+		return setupDevice(ctx, transport, config)
 	}
 
 	// Manual connections use retry logic
 	retryConfig := &RetryConfig{
 		MaxAttempts:       config.connectionRetries,
-		InitialBackoff:    50 * time.Millisecond,
-		MaxBackoff:        500 * time.Millisecond,
-		BackoffMultiplier: 2.0,
-		Jitter:            0.1,
-		RetryTimeout:      10 * time.Second,
+		InitialBackoff:    ConnectionInitialBackoff,
+		MaxBackoff:        ConnectionMaxBackoff,
+		BackoffMultiplier: ConnectionBackoffMultiplier,
+		Jitter:            ConnectionJitter,
+		RetryTimeout:      ConnectionRetryTimeout,
 	}
 
 	var device *Device
-	err := RetryWithConfig(context.Background(), retryConfig, func() error {
+	err := RetryWithConfig(ctx, retryConfig, func() error {
 		var err error
-		device, err = setupDevice(transport, config)
+		device, err = setupDevice(ctx, transport, config)
 		return err
 	})
 	if err != nil {
@@ -263,18 +265,18 @@ func setupDeviceWithRetry(transport Transport, config *connectConfig) (*Device, 
 	return device, nil
 }
 
-func ConnectDevice(path string, opts ...ConnectOption) (*Device, error) {
+func ConnectDevice(ctx context.Context, path string, opts ...ConnectOption) (*Device, error) {
 	config, err := applyConnectOptions(opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to apply connect options: %w", err)
 	}
 
-	transport, err := createTransport(path, config)
+	transport, err := createTransport(ctx, path, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	device, err := setupDeviceWithRetry(transport, config)
+	device, err := setupDeviceWithRetry(ctx, transport, config)
 	if err != nil {
 		_ = transport.Close()
 		return nil, err
@@ -299,8 +301,9 @@ func createManualTransport(path string, factory TransportFactory) (Transport, er
 
 // createAutoDetectedTransport handles auto-detection of devices
 func createAutoDetectedTransport(
+	ctx context.Context,
 	factory TransportFromDeviceFactory,
-	detector func(*detection.Options) ([]detection.DeviceInfo, error),
+	detector func(context.Context, *detection.Options) ([]detection.DeviceInfo, error),
 ) (Transport, error) {
 	opts := detection.DefaultOptions()
 	opts.Mode = detection.Safe
@@ -309,9 +312,9 @@ func createAutoDetectedTransport(
 	var err error
 
 	if detector != nil {
-		devices, err = detector(&opts)
+		devices, err = detector(ctx, &opts)
 	} else {
-		devices, err = detection.DetectAll(&opts)
+		devices, err = detection.DetectAll(ctx, &opts)
 	}
 
 	if err != nil {
@@ -333,11 +336,6 @@ func createAutoDetectedTransport(
 // Transport returns the underlying transport
 func (d *Device) Transport() Transport {
 	return d.transport
-}
-
-// Init initializes the PN532 device
-func (d *Device) Init() error {
-	return d.InitContext(context.Background())
 }
 
 // SetTimeout sets the default timeout for operations
@@ -362,7 +360,7 @@ func (d *Device) IsAutoPollSupported() bool {
 // SetPassiveActivationRetries configures the maximum number of retries for passive activation
 // to prevent infinite waiting that can cause the PN532 to lock up. A finite number like 10 (0x0A)
 // is recommended instead of 0xFF (infinite) to avoid stuck states requiring power cycling.
-func (d *Device) SetPassiveActivationRetries(maxRetries byte) error {
+func (d *Device) SetPassiveActivationRetries(ctx context.Context, maxRetries byte) error {
 	// RF Configuration item 0x05 - MaxRetries
 	// Payload: [MxRtyATR, MxRtyPSL, MxRtyPassiveActivation]
 	configPayload := []byte{
@@ -372,7 +370,7 @@ func (d *Device) SetPassiveActivationRetries(maxRetries byte) error {
 		maxRetries, // MxRtyPassiveActivation
 	}
 
-	_, err := d.transport.SendCommand(cmdRFConfiguration, configPayload)
+	_, err := d.transport.SendCommand(ctx, cmdRFConfiguration, configPayload)
 	if err != nil {
 		return fmt.Errorf("failed to set passive activation retries: %w", err)
 	}
@@ -392,7 +390,7 @@ func (d *Device) SetPassiveActivationRetries(maxRetries byte) error {
 //   - 0x10: ~2.4 seconds (16 retries)
 //   - 0x20: ~4.8 seconds (32 retries)
 //   - 0xFF: Infinite retries (use with caution)
-func (d *Device) SetPollingRetries(mxRtyATR byte) error {
+func (d *Device) SetPollingRetries(ctx context.Context, mxRtyATR byte) error {
 	// RF Configuration item 0x05 - MaxRetries
 	// Payload: [MxRtyATR, MxRtyPSL, MxRtyPassiveActivation]
 	configPayload := []byte{
@@ -402,9 +400,47 @@ func (d *Device) SetPollingRetries(mxRtyATR byte) error {
 		0xFF,     // MxRtyPassiveActivation (infinite)
 	}
 
-	_, err := d.transport.SendCommand(cmdRFConfiguration, configPayload)
+	_, err := d.transport.SendCommand(ctx, cmdRFConfiguration, configPayload)
 	if err != nil {
 		return fmt.Errorf("failed to set polling retries: %w", err)
+	}
+
+	return nil
+}
+
+// CycleRFField turns the RF field off and back on to reset PN532 state.
+// This clears stuck conditions after authentication failures.
+// Timing: 50ms off, 50ms on, 50ms settle (per docs/hardware-mifare-clone-research.md)
+func (d *Device) CycleRFField(ctx context.Context) error {
+	// Turn RF field OFF
+	_, err := d.transport.SendCommand(ctx, cmdRFConfiguration, []byte{0x01, 0x00})
+	if err != nil {
+		return fmt.Errorf("failed to turn RF field off: %w", err)
+	}
+
+	select {
+	case <-time.After(50 * time.Millisecond):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	// Turn RF field ON
+	_, err = d.transport.SendCommand(ctx, cmdRFConfiguration, []byte{0x01, 0x01})
+	if err != nil {
+		return fmt.Errorf("failed to turn RF field on: %w", err)
+	}
+
+	select {
+	case <-time.After(50 * time.Millisecond):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	// Settle time
+	select {
+	case <-time.After(50 * time.Millisecond):
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 
 	return nil

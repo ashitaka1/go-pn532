@@ -59,8 +59,15 @@ func NewSimulatorTransport(sim *VirtualPN532) *SimulatorTransport {
 }
 
 // SendCommand sends a command to the simulated PN532 and returns the response.
-// It handles frame encoding/decoding internally.
-func (t *SimulatorTransport) SendCommand(cmd byte, args []byte) ([]byte, error) {
+// It handles frame encoding/decoding internally with context support.
+func (t *SimulatorTransport) SendCommand(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
+	// Check context
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	// Log the command for test verification
 	t.CommandLog = append(t.CommandLog, CommandLogEntry{
 		Cmd:       cmd,
@@ -77,6 +84,13 @@ func (t *SimulatorTransport) SendCommand(cmd byte, args []byte) ([]byte, error) 
 		return nil, fmt.Errorf("write failed: %w", err)
 	}
 
+	// Check context after write
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	// Read ACK
 	ackBuf := make([]byte, 6)
 	bytesRead, err := t.sim.Read(ackBuf)
@@ -85,6 +99,13 @@ func (t *SimulatorTransport) SendCommand(cmd byte, args []byte) ([]byte, error) 
 	}
 	if bytesRead < 6 || !bytes.Equal(ackBuf[:6], ACKFrame) {
 		return nil, errors.New("expected ACK frame")
+	}
+
+	// Check context after ACK
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
 	}
 
 	// Read response frame
@@ -96,18 +117,6 @@ func (t *SimulatorTransport) SendCommand(cmd byte, args []byte) ([]byte, error) 
 
 	// Parse response frame
 	return t.parseFrame(respBuf[:respLen])
-}
-
-// SendCommandWithContext sends a command with context support
-func (t *SimulatorTransport) SendCommandWithContext(ctx context.Context, cmd byte, args []byte) ([]byte, error) {
-	// Check context
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	return t.SendCommand(cmd, args)
 }
 
 // Close closes the transport

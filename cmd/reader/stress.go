@@ -163,9 +163,10 @@ func runStressTestMode(ctx context.Context, device *pn532.Device, _ *config) err
 
 	// Use single-tag mode - multi-tag has MIFARE auth issues
 	// See docs/investigation-multitag-mifare-issue.md
-	session.OnCardDetected = func(tag *pn532.DetectedTag) error {
+	// The callback receives a context with poll cycle timeout for cancellation
+	session.OnCardDetected = func(callbackCtx context.Context, tag *pn532.DetectedTag) error {
 		printTagHeader(1, tag)
-		result := runStressTestForTag(ctx, device, tag)
+		result := runStressTestForTag(callbackCtx, device, tag)
 		resultsMu.Lock()
 		results = append(results, result)
 		resultsMu.Unlock()

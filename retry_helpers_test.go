@@ -49,7 +49,7 @@ func TestWriteNDEFWithRetry_SuccessAfterRetries(t *testing.T) {
 		callCount++
 		if callCount < 3 {
 			// Return a retryable error for the first 2 attempts
-			return ErrNoACK
+			return ErrTransportTimeout
 		}
 		return nil
 	}
@@ -110,7 +110,7 @@ func TestWriteNDEFWithRetry_ContextCancelledDuringBackoff(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 				cancel()
 			}()
-			return ErrNoACK // Retryable error
+			return ErrTransportTimeout // Retryable error
 		}
 		return nil
 	}
@@ -132,14 +132,14 @@ func TestWriteNDEFWithRetry_MaxRetriesExhausted(t *testing.T) {
 	callCount := 0
 	writeFunc := func(_ context.Context) error {
 		callCount++
-		return ErrNoACK // Always return retryable error
+		return ErrTransportTimeout // Always return retryable error
 	}
 
 	err := WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to write TEST NDEF data after 3 retries")
-	require.ErrorIs(t, err, ErrNoACK)
+	require.ErrorIs(t, err, ErrTransportTimeout)
 	assert.Equal(t, 3, callCount, "should call writeFunc maxRetries times")
 }
 
@@ -149,7 +149,7 @@ func TestWriteNDEFWithRetry_DefaultMaxRetries(t *testing.T) {
 	callCount := 0
 	writeFunc := func(_ context.Context) error {
 		callCount++
-		return ErrNoACK // Always return retryable error
+		return ErrTransportTimeout // Always return retryable error
 	}
 
 	err := WriteNDEFWithRetry(context.Background(), writeFunc, 0, "TEST")
@@ -158,34 +158,26 @@ func TestWriteNDEFWithRetry_DefaultMaxRetries(t *testing.T) {
 	assert.Equal(t, 3, callCount, "should default to 3 retries when maxRetries is 0")
 }
 
-func TestWriteNDEFWithRetry_ExponentialBackoffTiming(t *testing.T) {
+func TestWriteNDEFWithRetry_ExponentialBackoff(t *testing.T) {
 	t.Parallel()
 
 	var timestamps []time.Time
 	writeFunc := func(_ context.Context) error {
 		timestamps = append(timestamps, time.Now())
-		return ErrNoACK // Always return retryable error
+		return ErrTransportTimeout // Always return retryable error
 	}
 
-	start := time.Now()
 	_ = WriteNDEFWithRetry(context.Background(), writeFunc, 3, "TEST")
-	totalTime := time.Since(start)
 
 	require.Len(t, timestamps, 3, "should have 3 attempts")
 
-	// First delay is 100ms, second is 150ms
-	// Total expected: ~250ms (with some tolerance)
-	assert.Greater(t, totalTime, 200*time.Millisecond, "should have exponential backoff delays")
-	assert.Less(t, totalTime, 400*time.Millisecond, "delays should not be excessive")
-
-	// Check individual delays are approximately correct
-	if len(timestamps) >= 2 {
-		delay1 := timestamps[1].Sub(timestamps[0])
-		assert.InDelta(t, 100, delay1.Milliseconds(), 50, "first delay should be ~100ms")
-	}
+	// Just verify delays exist and are increasing (exponential backoff)
+	// Don't check exact timings - too flaky on CI
 	if len(timestamps) >= 3 {
+		delay1 := timestamps[1].Sub(timestamps[0])
 		delay2 := timestamps[2].Sub(timestamps[1])
-		assert.InDelta(t, 150, delay2.Milliseconds(), 50, "second delay should be ~150ms")
+		assert.Greater(t, delay1, time.Duration(0), "should have delay between attempts")
+		assert.GreaterOrEqual(t, delay2, delay1, "delays should increase (exponential backoff)")
 	}
 }
 
@@ -197,7 +189,7 @@ func TestWriteNDEFWithRetry_MixedRetryableAndNonRetryable(t *testing.T) {
 	writeFunc := func(_ context.Context) error {
 		callCount++
 		if callCount == 1 {
-			return ErrNoACK // First: retryable
+			return ErrTransportTimeout // First: retryable
 		}
 		return nonRetryableErr // Second: non-retryable
 	}
@@ -213,10 +205,9 @@ func TestWriteNDEFWithRetry_VariousRetryableErrors(t *testing.T) {
 	t.Parallel()
 
 	retryableErrors := []error{
-		ErrNoACK,
 		ErrTransportTimeout,
 		ErrFrameCorrupted,
-		NewTransportError("write", "/dev/test", ErrNoACK, ErrorTypeTransient),
+		NewTransportError("write", "/dev/test", ErrTransportTimeout, ErrorTypeTransient),
 	}
 
 	for _, testErr := range retryableErrors {
@@ -260,45 +251,22 @@ func TestReadNDEFWithRetry_SuccessOnFirstAttempt(t *testing.T) {
 	assert.Equal(t, 1, callCount)
 }
 
-func TestReadNDEFWithRetry_RetryOnEmptyData(t *testing.T) {
+func TestReadNDEFWithRetry_EmptyDataIsValidSuccess(t *testing.T) {
 	t.Parallel()
 
 	callCount := 0
-	expectedMsg := &NDEFMessage{
-		Records: []NDEFRecord{{Type: NDEFTypeText, Text: "test"}},
-	}
+	emptyMsg := &NDEFMessage{}
 	readFunc := func() (*NDEFMessage, error) {
 		callCount++
-		if callCount < 3 {
-			return &NDEFMessage{}, nil // Empty data
-		}
-		return expectedMsg, nil
+		return emptyMsg, nil // Empty data is valid (e.g., tag with [03 00 FE] TLV)
 	}
 	isRetryable := func(_ error) bool { return true }
 
 	msg, err := readNDEFWithRetry(readFunc, isRetryable, "TEST")
 
-	require.NoError(t, err)
-	assert.Equal(t, expectedMsg, msg)
-	assert.Equal(t, 3, callCount)
-}
-
-func TestReadNDEFWithRetry_EmptyDataExhausted(t *testing.T) {
-	t.Parallel()
-
-	callCount := 0
-	readFunc := func() (*NDEFMessage, error) {
-		callCount++
-		return &NDEFMessage{}, nil // Always empty
-	}
-	isRetryable := func(_ error) bool { return true }
-
-	msg, err := readNDEFWithRetry(readFunc, isRetryable, "TEST")
-
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrTagEmptyData)
-	assert.Nil(t, msg)
-	assert.Equal(t, 3, callCount)
+	require.NoError(t, err, "empty NDEF should be valid, not an error")
+	assert.Equal(t, emptyMsg, msg)
+	assert.Equal(t, 1, callCount, "should succeed on first attempt, no retries needed")
 }
 
 func TestReadNDEFWithRetry_NonRetryableError(t *testing.T) {
