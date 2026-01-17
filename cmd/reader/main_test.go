@@ -59,6 +59,9 @@ func TestRunWriteMode_SimplifiedErrorHandling(t *testing.T) {
 	// 1. Read CC page 3 for NTAG detection (returns valid NTAG CC)
 	ccResponse := []byte{0x41, 0x00, 0xE1, 0x10, 0x06, 0x00} // Valid NTAG213 CC
 	mockTransport.QueueResponse(0x40, ccResponse)
+	// 2. Read page 4 for user data caching (used for Amiibo detection)
+	page4Response := []byte{0x41, 0x00, 0x00, 0x00, 0x00, 0x00} // Empty user data
+	mockTransport.QueueResponse(0x40, page4Response)
 
 	// Setup 0x42 (InCommunicateThru) for GetVersion command
 	// GetVersion response (NTAG213)

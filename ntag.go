@@ -1216,34 +1216,6 @@ func (*NTAGTag) detectTypeFromCapabilityContainer(ccData []byte) NTAGType {
 	}
 }
 
-// detectTypeByProbing determines NTAG type by probing page boundaries.
-// This is used for non-NDEF tags (Amiibo, Lego Dimensions, etc.) that don't have
-// the standard CC magic byte 0xE1 at page 3.
-func (t *NTAGTag) detectTypeByProbing(ctx context.Context) NTAGType {
-	// NTAG variants have fixed memory sizes:
-	// NTAG213: 45 pages (0-44), page 45+ inaccessible
-	// NTAG215: 135 pages (0-134), page 135+ inaccessible
-	// NTAG216: 231 pages (0-230), page 231+ inaccessible
-
-	var detectedType NTAGType
-
-	// Test NTAG213 boundary - if page 45 is inaccessible, it's NTAG213
-	if !t.canAccessPage(ctx, ntag213TotalPages) {
-		Debugf("NTAG detected as NTAG213 by probing (page %d inaccessible)", ntag213TotalPages)
-		detectedType = NTAGType213
-	} else if !t.canAccessPage(ctx, ntag215TotalPages) {
-		// Test NTAG215 boundary - if page 135 is inaccessible, it's NTAG215
-		Debugf("NTAG detected as NTAG215 by probing (page %d inaccessible)", ntag215TotalPages)
-		detectedType = NTAGType215
-	} else {
-		// Can access page 135+, assume NTAG216
-		Debugf("NTAG detected as NTAG216 by probing (page %d accessible)", ntag215TotalPages)
-		detectedType = NTAGType216
-	}
-
-	return detectedType
-}
-
 // validateWriteBoundary validates that a write operation is within the actual memory bounds
 // This catches counterfeit tags that report larger size than actual memory
 func (t *NTAGTag) validateWriteBoundary(ctx context.Context, block uint8) error {
