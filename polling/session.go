@@ -30,6 +30,13 @@ import (
 // Prevents PN532 from hanging indefinitely after bad auth attempts.
 const pollCycleTimeout = 10 * time.Second
 
+// writeStabilizationDelay is the time to wait after tag detection before
+// attempting a write. This allows the card to settle in position when the
+// user may still be positioning the card as the write is triggered.
+// This prevents error 0x27 ("wrong context") which occurs when the RF field
+// becomes unstable due to card movement, causing target selection to be lost.
+const writeStabilizationDelay = 75 * time.Millisecond
+
 // Session handles continuous card monitoring with state machine
 type Session struct {
 	lastPollTime         time.Time
@@ -254,12 +261,24 @@ func (s *Session) pauseWithAck(ctx context.Context) error {
 }
 
 // executeWriteToTag creates a tag from detected tag and executes the write function.
+// Includes a stabilization delay to let the card settle before writing, which prevents
+// error 0x27 ("wrong context") when the RF field is disrupted by card movement.
 // Clears transport state on write error for recovery.
 func (s *Session) executeWriteToTag(
 	writeCtx context.Context,
 	detectedTag *pn532.DetectedTag,
 	writeFn func(context.Context, pn532.Tag) error,
 ) error {
+	// Stabilization delay - let the card settle in position before writing.
+	// This prevents error 0x27 ("wrong context") which occurs when the user is
+	// still positioning the card as the write triggers. The RF field becomes
+	// unstable during movement, causing the PN532 to lose target selection.
+	select {
+	case <-writeCtx.Done():
+		return writeCtx.Err()
+	case <-time.After(writeStabilizationDelay):
+	}
+
 	// Use GetDevice() to get the current device reference (may be updated after recovery)
 	device := s.GetDevice()
 	if device == nil {

@@ -351,6 +351,36 @@ func TestSession_WriteToTag(t *testing.T) {
 		assert.True(t, writeCalled)
 		assert.False(t, session.isPaused.Load()) // Should be resumed after cancelled write
 	})
+
+	t.Run("ContextCancelledDuringStabilizationDelay", func(t *testing.T) {
+		t.Parallel()
+		device, _ := createMockDeviceWithTransport(t)
+		session := NewSession(device, nil)
+
+		// Create a context that will be cancelled before the stabilization delay completes
+		writeCtx, cancelWrite := context.WithCancel(context.Background())
+
+		detectedTag := createTestDetectedTag()
+		writeCalled := false
+
+		// Cancel the context immediately in a goroutine
+		go func() {
+			time.Sleep(10 * time.Millisecond) // Cancel during the 75ms stabilization delay
+			cancelWrite()
+		}()
+
+		err := session.WriteToTag(
+			context.Background(), writeCtx, detectedTag,
+			func(_ context.Context, _ pn532.Tag) error {
+				writeCalled = true
+				return nil
+			})
+
+		require.ErrorIs(t, err, context.Canceled)
+		// Write function should not be called when context is cancelled during stabilization
+		assert.False(t, writeCalled)
+		assert.False(t, session.isPaused.Load()) // Should be resumed after cancelled write
+	})
 }
 
 func TestSession_PauseAcknowledgment(t *testing.T) {

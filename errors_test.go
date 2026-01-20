@@ -757,6 +757,14 @@ func TestPN532Error_ErrorTypeChecks(t *testing.T) {
 			wantIsRFError:             true,
 		},
 		{
+			name:                      "wrong context - target selection lost",
+			errorCode:                 0x27,
+			wantIsCommandNotSupported: false,
+			wantIsAuthenticationError: false,
+			wantIsTimeoutError:        false,
+			wantIsRFError:             true,
+		},
+		{
 			name:                      "target released by initiator",
 			errorCode:                 0x29,
 			wantIsCommandNotSupported: false,
