@@ -186,6 +186,7 @@ func (e *PN532Error) IsRFError() bool {
 		0x05, // Framing error during MIFARE operation
 		0x0A, // RF field not activated in time
 		0x0B, // RF protocol error
+		0x27, // Wrong context - target selection lost due to RF instability
 		0x29, // Target released by initiator - card movement
 		0x2B: // Card disappeared - card movement during slide
 		return true
