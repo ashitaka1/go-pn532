@@ -484,8 +484,17 @@ func (s *Session) handlePollError(ctx context.Context, err error) error {
 	}
 
 	// Check for NoACK error which indicates PN532 firmware lockup
-	if errors.Is(err, pn532.ErrNoACK) && s.attemptHardReset(ctx) {
-		return nil // Recovery succeeded, continue polling
+	if errors.Is(err, pn532.ErrNoACK) {
+		if s.attemptHardReset(ctx) {
+			return nil // Recovery succeeded, continue polling
+		}
+		// Hard reset failed - check if the device is actually gone.
+		// This prevents a wasted poll cycle by detecting disconnection
+		// immediately rather than waiting for the next I/O failure.
+		if devErr := s.checkDeviceHealth(); devErr != nil {
+			s.handlePollingError(devErr)
+			return devErr
+		}
 	}
 
 	// Handle other errors normally
@@ -494,6 +503,23 @@ func (s *Session) handlePollError(ctx context.Context, err error) error {
 		return err // Fatal error - exit polling loop
 	}
 	return nil // Transient error - continue polling
+}
+
+// checkDeviceHealth checks if the transport's underlying device is still present.
+// Uses the DeviceHealthChecker interface if available on the transport.
+func (s *Session) checkDeviceHealth() error {
+	device := s.GetDevice()
+	if device == nil {
+		return nil
+	}
+	checker, ok := device.Transport().(pn532.DeviceHealthChecker)
+	if !ok {
+		return nil
+	}
+	if err := checker.CheckHealth(); err != nil {
+		return fmt.Errorf("device health check failed: %w", err)
+	}
+	return nil
 }
 
 // attemptHardReset attempts nuclear recovery when PN532 enters firmware lockup.

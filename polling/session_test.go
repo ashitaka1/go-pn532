@@ -2018,3 +2018,116 @@ func TestSession_PollCycleTimeoutProtection(t *testing.T) {
 	assert.Less(t, elapsed, 200*time.Millisecond,
 		"Poll cycle should respect timeout, not hang indefinitely")
 }
+
+// --- Bug 3 Tests: Device check after hard reset failure ---
+
+func TestSession_HandlePollError_NoACK_HardResetFails_DeviceGone(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Make Reconnect fail (simulating device gone)
+	mockTransport.SetReconnectError(errors.New("reconnect failed: device gone"))
+
+	// Make CheckHealth return a fatal error (device gone)
+	deviceGoneErr := &pn532.TransportError{
+		Op: "checkHealth", Port: "/dev/ttyUSB0",
+		Err: pn532.ErrDeviceNotFound, Type: pn532.ErrorTypePermanent,
+	}
+	mockTransport.SetHealthError(deviceGoneErr)
+
+	// Track OnDeviceDisconnected callback
+	var disconnectedErr error
+	var disconnectedCalled bool
+	session.SetOnDeviceDisconnected(func(err error) {
+		disconnectedCalled = true
+		disconnectedErr = err
+	})
+
+	// Create a NoACK error (what happens when device disconnects mid-write)
+	noACKErr := pn532.NewNoACKError("sendFrame", "/dev/ttyUSB0")
+
+	ctx := context.Background()
+	err := session.handlePollError(ctx, noACKErr)
+
+	// Should return the fatal error immediately instead of continuing
+	require.Error(t, err)
+	assert.True(t, pn532.IsFatal(err), "Error should be fatal")
+	assert.True(t, disconnectedCalled, "OnDeviceDisconnected should be called")
+	assert.ErrorIs(t, disconnectedErr, pn532.ErrDeviceNotFound)
+}
+
+func TestSession_HandlePollError_NoACK_HardResetFails_DeviceStillPresent(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Make Reconnect fail but device is still present (CheckHealth returns nil)
+	mockTransport.SetReconnectError(errors.New("reconnect failed: other reason"))
+	mockTransport.SetHealthError(nil) // Device is healthy
+
+	noACKErr := pn532.NewNoACKError("sendFrame", "/dev/ttyUSB0")
+
+	ctx := context.Background()
+	err := session.handlePollError(ctx, noACKErr)
+
+	// Should continue polling (return nil) since device is still there
+	assert.NoError(t, err, "Should continue polling when device is still present")
+}
+
+func TestSession_CheckDeviceHealth_NoHealthChecker(t *testing.T) {
+	t.Parallel()
+
+	// Create a minimal transport that doesn't implement DeviceHealthChecker
+	minimalTransport := &minimalMockTransport{connected: true}
+	device, err := pn532.New(minimalTransport)
+	require.NoError(t, err)
+
+	session := NewSession(device, nil)
+
+	// Should return nil when transport doesn't implement DeviceHealthChecker
+	healthErr := session.checkDeviceHealth()
+	assert.NoError(t, healthErr)
+}
+
+func TestSession_CheckDeviceHealth_NilDevice(t *testing.T) {
+	t.Parallel()
+
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Set device to nil to test nil guard
+	session.stateMutex.Lock()
+	session.device = nil
+	session.stateMutex.Unlock()
+
+	healthErr := session.checkDeviceHealth()
+	assert.NoError(t, healthErr, "Should return nil when device is nil")
+}
+
+// minimalMockTransport implements only the Transport interface (no DeviceHealthChecker)
+type minimalMockTransport struct {
+	mu        syncutil.Mutex
+	connected bool
+}
+
+func (*minimalMockTransport) SendCommand(_ context.Context, cmd byte, _ []byte) ([]byte, error) {
+	return []byte{0xD5, cmd + 1, 0x00}, nil
+}
+
+func (m *minimalMockTransport) Close() error {
+	m.mu.Lock()
+	m.connected = false
+	m.mu.Unlock()
+	return nil
+}
+
+func (*minimalMockTransport) SetTimeout(_ time.Duration) error { return nil }
+
+func (m *minimalMockTransport) IsConnected() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.connected
+}
+
+func (*minimalMockTransport) Type() pn532.TransportType { return pn532.TransportMock }

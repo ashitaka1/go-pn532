@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2006,4 +2007,142 @@ func TestUART_HandleWriteError_DeviceGone(t *testing.T) {
 
 	// IsFatal should return true
 	require.True(t, pn532.IsFatal(err), "Device gone errors should be fatal")
+
+	// Should also set disconnected flag
+	assert.True(t, transport.disconnected, "Should mark transport as disconnected")
+}
+
+// TestUART_HandleWriteError_DeviceGoneError tests that OS-level device-gone
+// errors (e.g. EIO from unplugged USB) are detected before checking the file
+func TestUART_HandleWriteError_DeviceGoneError(t *testing.T) {
+	transport := &Transport{
+		portName:       "mock://test",
+		currentTimeout: 100 * time.Millisecond,
+	}
+
+	// Pass a syscall error that indicates device disconnection
+	err := transport.handleWriteError("testOp", syscall.EIO)
+
+	require.Error(t, err)
+
+	var transportErr *pn532.TransportError
+	require.ErrorAs(t, err, &transportErr)
+	require.ErrorIs(t, transportErr.Err, pn532.ErrDeviceNotFound)
+	require.Equal(t, pn532.ErrorTypePermanent, transportErr.Type)
+	assert.True(t, transport.disconnected, "Should mark transport as disconnected")
+}
+
+// TestUART_WrapReadError_TransientError tests wrapping of non-device-gone read errors
+func TestUART_WrapReadError_TransientError(t *testing.T) {
+	transport := &Transport{
+		portName:       "mock://test",
+		currentTimeout: 100 * time.Millisecond,
+	}
+
+	err := transport.wrapReadError("readInitialData", errors.New("timeout"))
+
+	require.Error(t, err)
+
+	var transportErr *pn532.TransportError
+	require.ErrorAs(t, err, &transportErr)
+	assert.Equal(t, pn532.ErrorTypeTransient, transportErr.Type)
+	assert.Equal(t, "readInitialData", transportErr.Op)
+	assert.False(t, transport.disconnected, "Should not mark as disconnected for transient errors")
+}
+
+// TestUART_WrapReadError_DeviceGoneError tests wrapping of OS device-gone read errors
+func TestUART_WrapReadError_DeviceGoneError(t *testing.T) {
+	transport := &Transport{
+		portName:       "mock://test",
+		currentTimeout: 100 * time.Millisecond,
+	}
+
+	err := transport.wrapReadError("readInitialData", syscall.EIO)
+
+	require.Error(t, err)
+
+	var transportErr *pn532.TransportError
+	require.ErrorAs(t, err, &transportErr)
+	assert.Equal(t, pn532.ErrorTypePermanent, transportErr.Type)
+	require.ErrorIs(t, transportErr.Err, pn532.ErrDeviceNotFound)
+	assert.True(t, transport.disconnected, "Should mark transport as disconnected")
+	assert.True(t, pn532.IsFatal(err), "Device gone read errors should be fatal")
+}
+
+// TestUART_IsConnected_DisconnectedFlag tests that IsConnected respects the disconnected flag
+func TestUART_IsConnected_DisconnectedFlag(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	transport := newTestTransport(sim)
+
+	// Initially connected
+	assert.True(t, transport.IsConnected())
+
+	// Mark as disconnected
+	transport.mu.Lock()
+	transport.disconnected = true
+	transport.mu.Unlock()
+
+	// Should now report as not connected even though port is non-nil
+	assert.False(t, transport.IsConnected(), "Should return false when disconnected flag is set")
+}
+
+// TestUART_CheckDeviceExists_SetsDisconnectedFlag tests that checkDeviceExists
+// sets the disconnected flag when the device file is gone
+func TestUART_CheckDeviceExists_SetsDisconnectedFlag(t *testing.T) {
+	transport := &Transport{portName: "/dev/ttyUSB_nonexistent_test_device"}
+
+	assert.False(t, transport.disconnected, "Should start as not disconnected")
+
+	err := transport.checkDeviceExists()
+	require.Error(t, err)
+	assert.True(t, transport.disconnected, "Should set disconnected flag when device is gone")
+}
+
+// TestUART_CheckHealth tests the CheckHealth method
+func TestUART_CheckHealth(t *testing.T) {
+	t.Run("HealthyDevice", func(t *testing.T) {
+		sim := virt.NewVirtualPN532()
+		transport := newTestTransport(sim)
+
+		// Mock paths skip device existence check, so this returns nil
+		err := transport.CheckHealth()
+		assert.NoError(t, err)
+	})
+
+	t.Run("AlreadyDisconnected", func(t *testing.T) {
+		transport := &Transport{
+			portName:     "mock://test",
+			disconnected: true,
+		}
+
+		err := transport.CheckHealth()
+		require.Error(t, err)
+
+		var transportErr *pn532.TransportError
+		require.ErrorAs(t, err, &transportErr)
+		assert.Equal(t, pn532.ErrorTypePermanent, transportErr.Type)
+		require.ErrorIs(t, transportErr.Err, pn532.ErrDeviceNotFound)
+	})
+
+	t.Run("DeviceFileGone", func(t *testing.T) {
+		transport := &Transport{
+			portName: "/dev/ttyUSB_nonexistent_check_health_test",
+		}
+
+		err := transport.CheckHealth()
+		require.Error(t, err)
+
+		var transportErr *pn532.TransportError
+		require.ErrorAs(t, err, &transportErr)
+		assert.Equal(t, pn532.ErrorTypePermanent, transportErr.Type)
+	})
+}
+
+// TestUART_MarkDisconnected tests the markDisconnected helper
+func TestUART_MarkDisconnected(t *testing.T) {
+	transport := &Transport{portName: "mock://test"}
+
+	assert.False(t, transport.disconnected)
+	transport.markDisconnected()
+	assert.True(t, transport.disconnected)
 }

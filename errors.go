@@ -246,7 +246,7 @@ func IsFatal(err error) bool {
 	}
 
 	// Check for OS-level errors that indicate device is gone
-	if isDeviceGoneError(err) {
+	if IsDeviceGoneError(err) {
 		return true
 	}
 
@@ -271,9 +271,9 @@ const (
 	errNoSuchDevice syscall.Errno = 433 // ERROR_NO_SUCH_DEVICE
 )
 
-// isDeviceGoneError checks for OS-level errors indicating device disconnection.
+// IsDeviceGoneError checks for OS-level errors indicating device disconnection.
 // These errors occur when a USB device is unplugged during I/O operations.
-func isDeviceGoneError(err error) bool {
+func IsDeviceGoneError(err error) bool {
 	if err == nil {
 		return false
 	}

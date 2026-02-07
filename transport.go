@@ -89,6 +89,16 @@ type Reconnecter interface {
 	Reconnect() error
 }
 
+// DeviceHealthChecker is optionally implemented by transports that can verify
+// the underlying device is still physically present. Used by the polling layer
+// to quickly detect disconnection after a failed recovery attempt, without
+// waiting for the next I/O cycle.
+type DeviceHealthChecker interface {
+	// CheckHealth returns nil if the device appears present, or an error
+	// (typically with ErrorTypePermanent) if the device is gone.
+	CheckHealth() error
+}
+
 // PN532PowerMode represents the power mode state of the PN532
 type PN532PowerMode int
 
@@ -108,6 +118,7 @@ type MockTransport struct {
 	callCount      map[byte]int
 	errorMap       map[byte]error
 	reconnectErr   error // Error to return from Reconnect() (nil = success)
+	healthErr      error // Error to return from CheckHealth() (nil = healthy)
 	timeout        time.Duration
 	delay          time.Duration
 	powerMode      PN532PowerMode
@@ -441,4 +452,18 @@ func (m *MockTransport) SetReconnectError(err error) {
 func (*MockTransport) HasCapability(capability TransportCapability) bool {
 	// Mock transport supports all capabilities by default for testing
 	return capability == CapabilityAutoPollNative
+}
+
+// CheckHealth implements DeviceHealthChecker for testing
+func (m *MockTransport) CheckHealth() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.healthErr
+}
+
+// SetHealthError configures an error to be returned by CheckHealth()
+func (m *MockTransport) SetHealthError(err error) {
+	m.mu.Lock()
+	m.healthErr = err
+	m.mu.Unlock()
 }
