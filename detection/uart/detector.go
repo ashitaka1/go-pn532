@@ -186,7 +186,7 @@ func (d *detector) processPort(ctx context.Context, port *serialPort,
 		probeSuccess := d.probePortWithTimeout(ctx, port.Path, opts.Mode)
 		if probeSuccess {
 			device.Confidence = detection.High
-		} else if opts.Mode == detection.Safe && !isLikelyPN532(port) {
+		} else if opts.Mode == detection.Safe {
 			// In safe mode, skip unlikely devices that don't respond
 			return detection.DeviceInfo{}, false
 		}
@@ -253,7 +253,7 @@ func (*detector) probePortWithTimeout(ctx context.Context, path string, mode det
 	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
-	return probeDevice(probeCtx, path, mode)
+	return probeDeviceFn(probeCtx, path, mode)
 }
 
 // serialPort represents a serial port with metadata
@@ -297,7 +297,11 @@ func isLikelyPN532(port *serialPort) bool {
 	return false
 }
 
-// probeDevice attempts to communicate with a device to verify it's a PN532.
+// probeDeviceFn is the function used to probe devices during detection.
+// Defaults to probeDeviceImpl; overridden in tests.
+var probeDeviceFn = probeDeviceImpl
+
+// probeDeviceImpl attempts to communicate with a device to verify it's a PN532.
 //
 // NO RETRY POLICY: This function intentionally performs only a single attempt
 // to communicate with each device. Retrying failed connections during auto-detection
@@ -308,7 +312,7 @@ func isLikelyPN532(port *serialPort) bool {
 //
 // Connection retries are handled at the device level for known PN532 paths,
 // not during the auto-detection phase.
-func probeDevice(ctx context.Context, path string, mode detection.Mode) bool {
+func probeDeviceImpl(ctx context.Context, path string, mode detection.Mode) bool {
 	// Try to open the port (single attempt only)
 	transport, err := uart.New(path)
 	if err != nil {
