@@ -60,6 +60,7 @@ type Transport struct {
 	currentTimeout        time.Duration  // Current timeout for deadline calculations
 	lastCommand           byte
 	connectionEstablished bool
+	disconnected          bool // Set when device-gone is detected during I/O
 }
 
 // isWindows returns true if running on Windows
@@ -253,6 +254,7 @@ func (t *Transport) checkDeviceExists() error {
 	}
 
 	if _, err := os.Stat(t.portName); os.IsNotExist(err) {
+		t.markDisconnected()
 		return &pn532.TransportError{
 			Op:   "checkDevice",
 			Port: t.portName,
@@ -318,11 +320,13 @@ func (t *Transport) Close() error {
 	return nil
 }
 
-// IsConnected returns true if the transport is connected
+// IsConnected returns true if the transport is connected.
+// Returns false if the port has been closed or if the device was detected
+// as gone during I/O operations (e.g., USB unplug).
 func (t *Transport) IsConnected() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.port != nil
+	return t.port != nil && !t.disconnected
 }
 
 // Reconnect closes and reopens the serial port connection.
@@ -362,6 +366,7 @@ func (t *Transport) Reconnect() error {
 	t.port = port
 	t.currentTimeout = timeout
 	t.connectionEstablished = false // Will be set true on first successful command
+	t.disconnected = false          // Clear disconnect flag on successful reconnect
 
 	return nil
 }
@@ -500,10 +505,41 @@ func (t *Transport) singleWakeUpAttempt(ctx context.Context) error {
 	return t.drainWithRetry(ctx, "wake up")
 }
 
+// markDisconnected sets the disconnected flag, indicating the device is gone.
+// Safe to call from within locked sections (does not acquire mu).
+func (t *Transport) markDisconnected() {
+	t.disconnected = true
+}
+
+// wrapReadError wraps port read errors as TransportError with appropriate type.
+// Device-gone errors are classified as permanent; others as transient.
+func (t *Transport) wrapReadError(op string, err error) error {
+	if pn532.IsDeviceGoneError(err) {
+		t.markDisconnected()
+		return &pn532.TransportError{
+			Op: op, Port: t.portName,
+			Err: pn532.ErrDeviceNotFound, Type: pn532.ErrorTypePermanent,
+		}
+	}
+	return &pn532.TransportError{
+		Op: op, Port: t.portName,
+		Err: fmt.Errorf("read failed: %w", err), Type: pn532.ErrorTypeTransient,
+	}
+}
+
 // handleWriteError wraps write errors, checking if device is gone
 func (t *Transport) handleWriteError(op string, err error) error {
-	// Check if device is gone first - this gives a clearer error
+	// Check for OS-level device-gone errors first
+	if pn532.IsDeviceGoneError(err) {
+		t.markDisconnected()
+		return &pn532.TransportError{
+			Op: op, Port: t.portName,
+			Err: pn532.ErrDeviceNotFound, Type: pn532.ErrorTypePermanent,
+		}
+	}
+	// Check if device file is gone
 	if devErr := t.checkDeviceExists(); devErr != nil {
+		t.markDisconnected()
 		return devErr
 	}
 	// Device exists but write failed - still likely a fatal condition
@@ -618,7 +654,7 @@ func (t *Transport) waitAck(ctx context.Context) ([]byte, error) {
 		n, err := t.port.Read(bufs.readBuf)
 		if err != nil {
 			pn532.Debugf("waitAck: read error at try %d: %v", tries, err)
-			return bufs.preAck, fmt.Errorf("UART ACK read failed: %w", err)
+			return bufs.preAck, t.wrapReadError("waitAck", err)
 		}
 		if n == 0 {
 			tries++
@@ -793,6 +829,12 @@ func (t *Transport) receiveFrame(ctx context.Context, pre []byte) ([]byte, error
 
 	// All retries exhausted - check if this is InListPassiveTarget and create synthetic response
 	if t.lastCommand == 0x4A {
+		// Before returning synthetic response, verify the device is still present.
+		// Without this check, a USB disconnect during the retry window gets masked
+		// as "no tags detected", delaying disconnect detection by one poll cycle.
+		if err := t.checkDeviceExists(); err != nil {
+			return nil, err
+		}
 		// Create synthetic "no tags detected" response
 		// Some PN532 firmware doesn't send a response when no tags are detected
 		return []byte{0x4B, 0x00}, nil
@@ -960,7 +1002,7 @@ func (t *Transport) readInitialData(ctx context.Context, buf []byte) (int, error
 
 		bytesRead, err := t.port.Read(buf[totalRead:])
 		if err != nil {
-			return 0, fmt.Errorf("UART initial data read failed: %w", err)
+			return 0, t.wrapReadError("readInitialData", err)
 		}
 		totalRead += bytesRead
 
@@ -1009,7 +1051,7 @@ func (t *Transport) retryInitialRead(ctx context.Context, buf []byte, deadline t
 
 	bytesRead, err := t.port.Read(buf)
 	if err != nil {
-		return 0, fmt.Errorf("UART initial data retry read failed: %w", err)
+		return 0, t.wrapReadError("readInitialData", err)
 	}
 
 	// If still no data after retry, check device existence
@@ -1101,7 +1143,7 @@ func (t *Transport) readRemainingData(ctx context.Context, buf []byte, totalLen,
 
 		n2, err := t.port.Read(buf[totalLen:expectedLen])
 		if err != nil {
-			return 0, fmt.Errorf("UART remaining data read failed: %w", err)
+			return 0, t.wrapReadError("readRemainingData", err)
 		}
 		if n2 > 0 {
 			totalLen += n2
@@ -1200,8 +1242,23 @@ func (*Transport) HasCapability(capability pn532.TransportCapability) bool {
 	}
 }
 
-// Ensure Transport implements pn532.Transport and pn532.Reconnecter
+// CheckHealth verifies the underlying device is still physically present.
+// Returns nil if healthy, or a permanent error if the device is gone.
+func (t *Transport) CheckHealth() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.disconnected {
+		return &pn532.TransportError{
+			Op: "checkHealth", Port: t.portName,
+			Err: pn532.ErrDeviceNotFound, Type: pn532.ErrorTypePermanent,
+		}
+	}
+	return t.checkDeviceExists()
+}
+
+// Ensure Transport implements pn532.Transport, pn532.Reconnecter, and pn532.DeviceHealthChecker
 var (
-	_ pn532.Transport   = (*Transport)(nil)
-	_ pn532.Reconnecter = (*Transport)(nil)
+	_ pn532.Transport           = (*Transport)(nil)
+	_ pn532.Reconnecter         = (*Transport)(nil)
+	_ pn532.DeviceHealthChecker = (*Transport)(nil)
 )

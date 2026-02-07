@@ -432,3 +432,138 @@ func TestClearDetectionCacheForTransport(t *testing.T) {
 	_, found = getCached("i2c", time.Minute)
 	assert.True(t, found)
 }
+
+// --- Bug 1 Tests: Cache filtering and stale invalidation ---
+
+// ConfigurableMockDetector allows configuring detection results per call.
+type ConfigurableMockDetector struct {
+	err       error
+	transport string
+	devices   []DeviceInfo
+}
+
+func (m *ConfigurableMockDetector) Detect(_ context.Context, _ *Options) ([]DeviceInfo, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if len(m.devices) == 0 {
+		return nil, ErrNoDevicesFound
+	}
+	return m.devices, nil
+}
+
+func (m *ConfigurableMockDetector) Transport() string {
+	return m.transport
+}
+
+func TestRunSingleDetector_ClearsStaleCache(t *testing.T) {
+	clearCache()
+	defer clearCache()
+
+	// Pre-populate cache with a device
+	setCached("uart", []DeviceInfo{
+		{Transport: "uart", Path: "/dev/ttyUSB0", Confidence: High},
+	})
+
+	// Detector returns no devices (simulating device disconnection)
+	detector := &ConfigurableMockDetector{
+		transport: "uart",
+		devices:   nil,
+		err:       ErrNoDevicesFound,
+	}
+
+	opts := DefaultOptions()
+	opts.EnableCache = true
+	opts.CacheTTL = time.Minute // Long TTL so cache would normally be valid
+
+	// First call should hit cache
+	result := runSingleDetector(context.Background(), detector, &opts)
+	assert.Len(t, result.devices, 1, "First call should return cached device")
+
+	// Expire the cache by clearing it manually (simulating TTL expiry)
+	clearCacheForTransport("uart")
+
+	// Second call should detect no devices and clear stale cache
+	result = runSingleDetector(context.Background(), detector, &opts)
+	assert.Empty(t, result.devices, "Should return no devices after disconnect")
+	require.NoError(t, result.err)
+
+	// Verify cache was cleared
+	_, found := getCached("uart", time.Minute)
+	assert.False(t, found, "Stale cache should be cleared when detection finds no devices")
+}
+
+func TestRunSingleDetector_FiltersCachedResults_IgnorePaths(t *testing.T) {
+	clearCache()
+	defer clearCache()
+
+	// Pre-populate cache with two devices
+	setCached("uart", []DeviceInfo{
+		{Transport: "uart", Path: "/dev/ttyUSB0", Confidence: High},
+		{Transport: "uart", Path: "/dev/ttyUSB1", Confidence: High},
+	})
+
+	detector := &ConfigurableMockDetector{transport: "uart"}
+
+	opts := DefaultOptions()
+	opts.EnableCache = true
+	opts.CacheTTL = time.Minute
+	opts.IgnorePaths = []string{"/dev/ttyUSB0"} // Ignore one device
+
+	result := runSingleDetector(context.Background(), detector, &opts)
+	assert.Len(t, result.devices, 1, "Should filter out ignored path from cache")
+	assert.Equal(t, "/dev/ttyUSB1", result.devices[0].Path)
+}
+
+func TestRunSingleDetector_FiltersCachedResults_Blocklist(t *testing.T) {
+	clearCache()
+	defer clearCache()
+
+	// Pre-populate cache with devices, one having a blocked VID:PID
+	setCached("uart", []DeviceInfo{
+		{
+			Transport: "uart", Path: "/dev/ttyUSB0", Confidence: High,
+			Metadata: map[string]string{"vidpid": "1234:5678"},
+		},
+		{
+			Transport: "uart", Path: "/dev/ttyUSB1", Confidence: High,
+			Metadata: map[string]string{"vidpid": "ABCD:EF01"},
+		},
+	})
+
+	detector := &ConfigurableMockDetector{transport: "uart"}
+
+	opts := DefaultOptions()
+	opts.EnableCache = true
+	opts.CacheTTL = time.Minute
+	opts.Blocklist = []string{"1234:5678"} // Block one device
+
+	result := runSingleDetector(context.Background(), detector, &opts)
+	assert.Len(t, result.devices, 1, "Should filter out blocklisted device from cache")
+	assert.Equal(t, "/dev/ttyUSB1", result.devices[0].Path)
+}
+
+func TestFilterDevices_NoFilters(t *testing.T) {
+	devices := []DeviceInfo{
+		{Path: "/dev/ttyUSB0"},
+		{Path: "/dev/ttyUSB1"},
+	}
+	opts := &Options{}
+	result := filterDevices(devices, opts)
+	assert.Len(t, result, 2)
+}
+
+func TestFilterDevices_IgnorePathsAndBlocklist(t *testing.T) {
+	devices := []DeviceInfo{
+		{Path: "/dev/ttyUSB0", Metadata: map[string]string{"vidpid": "1234:5678"}},
+		{Path: "/dev/ttyUSB1", Metadata: map[string]string{"vidpid": "AAAA:BBBB"}},
+		{Path: "/dev/ttyUSB2"},
+	}
+	opts := &Options{
+		IgnorePaths: []string{"/dev/ttyUSB2"},
+		Blocklist:   []string{"1234:5678"},
+	}
+	result := filterDevices(devices, opts)
+	require.Len(t, result, 1)
+	assert.Equal(t, "/dev/ttyUSB1", result[0].Path)
+}

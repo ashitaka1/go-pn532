@@ -1334,3 +1334,33 @@ func TestIsPN532RFError_NilError(t *testing.T) {
 		t.Error("IsPN532RFError should return false for nil error")
 	}
 }
+
+// --- IsDeviceGoneError Tests ---
+
+func TestIsDeviceGoneError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{name: "nil error", err: nil, want: false},
+		{name: "EIO", err: syscall.EIO, want: true},
+		{name: "ENXIO", err: syscall.ENXIO, want: true},
+		{name: "ENODEV", err: syscall.ENODEV, want: true},
+		{name: "EPERM (not device gone)", err: syscall.EPERM, want: false},
+		{name: "wrapped EIO", err: fmt.Errorf("read failed: %w", syscall.EIO), want: true},
+		{name: "regular error", err: errors.New("something broke"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsDeviceGoneError(tt.err)
+			if got != tt.want {
+				t.Errorf("IsDeviceGoneError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

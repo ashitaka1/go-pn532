@@ -178,7 +178,11 @@ func runSingleDetector(ctx context.Context, detector Detector, opts *Options) de
 	// Check cache if enabled
 	if opts.EnableCache {
 		if cached, found := getCached(detector.Transport(), opts.CacheTTL); found {
-			return detectionResult{devices: cached}
+			// Filter cached results through IgnorePaths and Blocklist,
+			// since the original Detect() call applied these but cached
+			// results bypass Detect() entirely.
+			filtered := filterDevices(cached, opts)
+			return detectionResult{devices: filtered}
 		}
 	}
 
@@ -189,8 +193,16 @@ func runSingleDetector(ctx context.Context, detector Detector, opts *Options) de
 	}
 
 	// Cache results if enabled
-	if opts.EnableCache && len(devices) > 0 {
-		setCached(detector.Transport(), devices)
+	if opts.EnableCache {
+		if len(devices) > 0 {
+			setCached(detector.Transport(), devices)
+		} else {
+			// Clear stale cache when no devices found. Without this,
+			// a cached result for a now-disconnected device persists
+			// until TTL expiry, causing consumers to attempt connections
+			// to dead paths.
+			clearCacheForTransport(detector.Transport())
+		}
 	}
 
 	return detectionResult{devices: devices}
@@ -234,6 +246,26 @@ func processDetectionResults(allDevices []DeviceInfo, errs []error) ([]DeviceInf
 	}
 
 	return nil, ErrNoDevicesFound
+}
+
+// filterDevices applies IgnorePaths and Blocklist filtering to a device list.
+// This ensures cached results respect the same filtering as fresh detection.
+func filterDevices(devices []DeviceInfo, opts *Options) []DeviceInfo {
+	if len(opts.IgnorePaths) == 0 && len(opts.Blocklist) == 0 {
+		return devices
+	}
+
+	var filtered []DeviceInfo
+	for _, device := range devices {
+		if IsPathIgnored(device.Path, opts.IgnorePaths) {
+			continue
+		}
+		if vidpid, ok := device.Metadata["vidpid"]; ok && IsBlocked(vidpid, opts.Blocklist) {
+			continue
+		}
+		filtered = append(filtered, device)
+	}
+	return filtered
 }
 
 // ClearDetectionCache removes all cached detection results
