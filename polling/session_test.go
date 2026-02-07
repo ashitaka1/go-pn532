@@ -2090,6 +2090,21 @@ func TestSession_CheckDeviceHealth_NoHealthChecker(t *testing.T) {
 	assert.NoError(t, healthErr)
 }
 
+func TestSession_CheckDeviceHealth_NilDevice(t *testing.T) {
+	t.Parallel()
+
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Set device to nil to test nil guard
+	session.stateMutex.Lock()
+	session.device = nil
+	session.stateMutex.Unlock()
+
+	healthErr := session.checkDeviceHealth()
+	assert.NoError(t, healthErr, "Should return nil when device is nil")
+}
+
 // minimalMockTransport implements only the Transport interface (no DeviceHealthChecker)
 type minimalMockTransport struct {
 	mu        syncutil.Mutex
