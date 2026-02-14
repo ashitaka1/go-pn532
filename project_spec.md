@@ -111,6 +111,12 @@ Identified via code review. Ordered by severity.
 
 ### Critical
 
+#### Bug 0: I2C transport uses 8-bit address with periph.io (expects 7-bit)
+- **File:** `transport/i2c/i2c.go:34-37, 96`
+- **Issue:** Constants `pn532WriteAddr = 0x48` and `pn532ReadAddr = 0x49` are 8-bit I2C addresses. `periph.io`'s `i2c.Dev.Addr` field expects a 7-bit address (passed directly to Linux `I2C_SLAVE` ioctl). The correct 7-bit address for PN532 is `0x24` (`0x48 >> 1`). With `Addr: 0x48`, the kernel puts `0x90`/`0x91` on the wire — an address nothing responds to.
+- **Impact:** I2C transport is completely non-functional. All commands fail with `sysfs-i2c: remote I/O error` (NACK). Confirmed on Raspberry Pi 5 with PN532 on `/dev/i2c-1` — Python (using `0x24`) communicates fine; Go library (using `0x48`) gets NACK on every frame.
+- **Fix:** Replace both constants with `pn532Addr = 0x24`. Remove unused `pn532ReadAddr` — periph.io handles the R/W bit automatically. Update line 96: `dev := &i2c.Dev{Addr: pn532Addr, Bus: bus}`.
+
 #### Bug 1: `skipTLV` does not handle long-format TLV lengths
 - **File:** `ndef_validation.go:92-99`
 - **Issue:** Only handles single-byte lengths. If the first length byte is `0xFF` (long-format marker), it reads 255 as the length instead of reading the subsequent 2-byte big-endian length. Inconsistent with `parseTLVLength` in the same file which handles both formats correctly.
