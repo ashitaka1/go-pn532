@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	pn532 "github.com/ZaparooProject/go-pn532"
@@ -32,9 +33,10 @@ import (
 )
 
 const (
-	// PN532 I2C address.
-	pn532WriteAddr = 0x48 // Write operation
-	pn532ReadAddr  = 0x49 // Read operation
+	// PN532 7-bit I2C address (datasheet says 0x48, which is the 8-bit write
+	// address including the R/W bit; periph.io and the Linux kernel expect the
+	// 7-bit form: 0x48 >> 1 = 0x24).
+	pn532Addr = 0x24
 
 	// Protocol constants.
 	hostToPn532 = 0xD4
@@ -79,6 +81,13 @@ func (t *Transport) traceTimeout(note string) {
 	}
 }
 
+// parseI2CPath extracts the bus path from a composite detection path.
+// Accepts "/dev/i2c-1:0x24" (detection format) or "/dev/i2c-1" (bare bus).
+func parseI2CPath(path string) string {
+	bus, _, _ := strings.Cut(path, ":")
+	return bus
+}
+
 // New creates a new I2C transport
 func New(busName string) (*Transport, error) {
 	// Initialize host
@@ -86,14 +95,14 @@ func New(busName string) (*Transport, error) {
 		return nil, fmt.Errorf("failed to initialize periph host: %w", err)
 	}
 
-	// Open I2C bus
-	bus, err := i2creg.Open(busName)
+	// Open I2C bus (strip address suffix from detection paths)
+	bus, err := i2creg.Open(parseI2CPath(busName))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open I2C bus %s: %w", busName, err)
 	}
 
-	// Create device with PN532 address and max frequency
-	dev := &i2c.Dev{Addr: pn532WriteAddr, Bus: bus}
+	// Create device with PN532 7-bit address and max frequency
+	dev := &i2c.Dev{Addr: pn532Addr, Bus: bus}
 
 	// Set maximum frequency
 	_ = bus.SetSpeed(maxClockFreq) // Ignore error, continue with default speed
