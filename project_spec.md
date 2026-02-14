@@ -111,11 +111,14 @@ Identified via code review. Ordered by severity.
 
 ### Critical
 
-#### Bug 0: I2C transport uses 8-bit address with periph.io (expects 7-bit)
-- **File:** `transport/i2c/i2c.go:34-37, 96`
-- **Issue:** Constants `pn532WriteAddr = 0x48` and `pn532ReadAddr = 0x49` are 8-bit I2C addresses. `periph.io`'s `i2c.Dev.Addr` field expects a 7-bit address (passed directly to Linux `I2C_SLAVE` ioctl). The correct 7-bit address for PN532 is `0x24` (`0x48 >> 1`). With `Addr: 0x48`, the kernel puts `0x90`/`0x91` on the wire — an address nothing responds to.
-- **Impact:** I2C transport is completely non-functional. All commands fail with `sysfs-i2c: remote I/O error` (NACK). Confirmed on Raspberry Pi 5 with PN532 on `/dev/i2c-1` — Python (using `0x24`) communicates fine; Go library (using `0x48`) gets NACK on every frame.
-- **Fix:** Replace both constants with `pn532Addr = 0x24`. Remove unused `pn532ReadAddr` — periph.io handles the R/W bit automatically. Update line 96: `dev := &i2c.Dev{Addr: pn532Addr, Bus: bus}`.
+#### Bug 0: ~~I2C transport uses 8-bit address with periph.io (expects 7-bit)~~ FIXED
+- **Fixed in:** `fix/address-bug` branch, merged to main.
+
+#### Bug 0a: I2C transport ignores status byte on read transactions
+- **File:** `transport/i2c/i2c.go` (readFrameData, waitAck)
+- **Issue:** The PN532 prepends a status/ready byte (0x01) to every I2C read transaction (datasheet section 6.2.4). The transport did not account for this — ACK reads got `[0x01 0x00 0x00 0xFF 0x00 0xFF]` instead of the expected `[0x00 0x00 0xFF 0x00 0xFF 0x00]`, and frame data was shifted by 1 byte. The test mock (`MockI2CBus`) also did not prepend the status byte, so tests passed while real hardware failed.
+- **Impact:** I2C transport non-functional despite correct address. All commands fail with "no ACK received." Confirmed on Raspberry Pi 5.
+- **Fix:** Added `readI2C()` helper that reads n+1 bytes, verifies the status byte, and strips it. Updated mock to prepend 0x01 to multi-byte reads.
 
 #### Bug 1: `skipTLV` does not handle long-format TLV lengths
 - **File:** `ndef_validation.go:92-99`
@@ -166,6 +169,14 @@ Identified via code review. Ordered by severity.
 - **Issue:** No mutex on `currentTrace` or `timeout`, unlike the UART transport which has `mu` and `closeMu`.
 - **Impact:** Data races if SPI transport accessed concurrently.
 - **Fix:** Add a mutex matching UART's pattern, or document that no transport provides thread safety.
+
+### Low Priority
+
+#### Bug 10: I2C transport uses two transactions where the datasheet specifies one
+- **File:** `transport/i2c/i2c.go` (waitAck, readFrameData, checkReady)
+- **Issue:** The PN532 datasheet (section 6.2.4) specifies that the status byte and frame data should be read in a single I2C transaction: START → read status → if ready, continue reading frame → STOP. The current implementation uses a separate `checkReady()` transaction followed by a `readI2C()` transaction. The PN532 tolerates this (it prepends a fresh status byte to each transaction), but it doubles the bus traffic and deviates from the documented protocol.
+- **Impact:** Functional — no correctness issue. Slightly higher I2C bus utilization.
+- **Fix:** Combine ready check and data read into a single `Tx()` call per read path. Remove `checkReady()` from frame read paths.
 
 #### Bug 9: `WaitForTag` returns (nil, nil) on transient errors
 - **File:** `detection.go:46-65`
