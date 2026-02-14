@@ -259,6 +259,25 @@ func (t *Transport) checkReady() error {
 	return pn532.NewTransportNotReadyError("checkReady", t.busName)
 }
 
+// readI2C reads from the PN532, stripping the status byte that the hardware
+// prepends to every I2C read transaction (see datasheet section 6.2.4).
+func (t *Transport) readI2C(buf []byte) error {
+	tmpSize := 1 + len(buf)
+	tmpBuf := frame.GetSmallBuffer(tmpSize)
+	defer frame.PutBuffer(tmpBuf)
+
+	if err := t.dev.Tx(nil, tmpBuf); err != nil {
+		return fmt.Errorf("I2C read failed: %w", err)
+	}
+
+	if tmpBuf[0] != pn532Ready {
+		return pn532.NewTransportNotReadyError("readI2C", t.busName)
+	}
+
+	copy(buf, tmpBuf[1:])
+	return nil
+}
+
 // sendFrame sends a frame to the PN532 via I2C
 func (t *Transport) sendFrame(cmd byte, args []byte) error {
 	// Use buffer pool for frame construction - major optimization
@@ -328,8 +347,8 @@ func (t *Transport) waitAck(ctx context.Context) error {
 			continue
 		}
 
-		// Read ACK frame into pooled buffer
-		if err := t.dev.Tx(nil, ackBuf); err != nil {
+		// Read ACK frame, stripping I2C status byte
+		if err := t.readI2C(ackBuf); err != nil {
 			return fmt.Errorf("I2C ACK read failed: %w", err)
 		}
 
@@ -467,7 +486,7 @@ func (t *Transport) readFrameData() (buf []byte, actualLen int, err error) {
 	headerSize := 32 // Read enough to get header + some data
 	headerBuf := frame.GetSmallBuffer(headerSize)
 
-	if err := t.dev.Tx(nil, headerBuf); err != nil {
+	if err := t.readI2C(headerBuf); err != nil {
 		frame.PutBuffer(headerBuf)
 		return nil, 0, fmt.Errorf("I2C frame header read failed: %w", err)
 	}
@@ -528,7 +547,7 @@ func (t *Transport) readFrameData() (buf []byte, actualLen int, err error) {
 	remainingBuf := frame.GetSmallBuffer(remainingSize)
 	defer frame.PutBuffer(remainingBuf)
 
-	if err := t.dev.Tx(nil, remainingBuf); err != nil {
+	if err := t.readI2C(remainingBuf); err != nil {
 		frame.PutBuffer(buf)
 		return nil, 0, fmt.Errorf("I2C remaining frame data read failed: %w", err)
 	}

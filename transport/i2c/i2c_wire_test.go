@@ -64,13 +64,14 @@ func (m *MockI2CBus) Tx(_ uint16, w, r []byte) error {
 	}
 
 	// Handle read operation (receiving frame from PN532)
+	// Real hardware prepends a status byte (0x01 = ready) to every read.
 	if len(w) == 0 && len(r) > 0 {
-		n, err := m.sim.Read(r)
+		r[0] = pn532Ready
+		n, err := m.sim.Read(r[1:])
 		if err != nil {
 			return fmt.Errorf("mock i2c read: %w", err)
 		}
-		// Clear remaining bytes if we read less
-		for i := n; i < len(r); i++ {
+		for i := n + 1; i < len(r); i++ {
 			r[i] = 0x00
 		}
 		return nil
@@ -446,19 +447,20 @@ func (m *JitteryMockI2CBus) Tx(_ uint16, w, r []byte) error {
 	}
 
 	// Handle read operation with jittery behavior
+	// Real hardware prepends a status byte (0x01 = ready) to every read.
 	if len(w) == 0 && len(r) > 0 {
-		totalRead := 0
+		r[0] = pn532Ready
+		totalRead := 1
 		for totalRead < len(r) {
 			n, err := m.jittery.Read(r[totalRead:])
 			if err != nil {
 				return fmt.Errorf("jittery i2c read: %w", err)
 			}
 			if n == 0 {
-				break // No more data
+				break
 			}
 			totalRead += n
 		}
-		// Clear remaining bytes
 		for i := totalRead; i < len(r); i++ {
 			r[i] = 0x00
 		}
