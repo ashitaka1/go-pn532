@@ -30,7 +30,7 @@ type BufferPool struct {
 	mediumPool sync.Pool
 	// Large buffers for extended frames (256-512 bytes)
 	largePool sync.Pool
-	// Frame buffers for complete frame operations (up to 262 bytes + overhead)
+	// Frame buffers for complete frame operations (up to 263 bytes + 8 overhead = 271)
 	framePool sync.Pool
 }
 
@@ -39,7 +39,7 @@ const (
 	SmallBufferSize  = 16  // ACK processing, small responses
 	MediumBufferSize = 255 // Standard PN532 frame data
 	LargeBufferSize  = 512 // Extended frames with overhead
-	FrameBufferSize  = 270 // Complete frame with all overhead (262 + 8)
+	FrameBufferSize  = 271 // Complete frame with all overhead (263 data + 8 framing)
 )
 
 // Global buffer pool instance
@@ -155,12 +155,9 @@ func (p *BufferPool) GetFrameBuffer() []byte {
 	return p.GetBuffer(FrameBufferSize)
 }
 
-// GetSmallBuffer is a convenience function for getting small buffers
-// Used for ACK processing and small command responses
+// GetSmallBuffer is a convenience function for getting small buffers.
+// Used for ACK processing and small command responses.
 func (p *BufferPool) GetSmallBuffer(size int) []byte {
-	if size > SmallBufferSize {
-		return p.GetBuffer(size)
-	}
 	return p.GetBuffer(size)
 }
 

@@ -222,6 +222,39 @@ func (t *Transport) Close() error {
 	return nil
 }
 
+// Reconnect closes and reopens the I2C bus connection. This is used for
+// "nuclear" recovery when the PN532 enters a lockup state (no ACKs to any
+// command). The PN532 I2C wakeup is implicit: the device recognises its
+// address on the next START condition and uses clock-stretching to
+// synchronise, so no special wakeup byte sequence is required (unlike UART).
+//
+// Note: if the PN532 is physically stuck mid-transaction (e.g. holding SDA
+// low), a software reconnect alone may not recover it. In that case a
+// hardware reset via a GPIO RST line, or a power-cycle, is required.
+func (t *Transport) Reconnect() error {
+	if t.bus != nil {
+		_ = t.bus.Close()
+		t.bus = nil
+		t.dev = nil
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	if _, err := host.Init(); err != nil {
+		return fmt.Errorf("reconnect: failed to initialize periph host: %w", err)
+	}
+
+	bus, err := i2creg.Open(parseI2CPath(t.busName))
+	if err != nil {
+		return fmt.Errorf("reconnect: failed to open I2C bus %s: %w", t.busName, err)
+	}
+
+	_ = bus.SetSpeed(maxClockFreq)
+	t.bus = bus
+	t.dev = &i2c.Dev{Addr: pn532Addr, Bus: bus}
+	return nil
+}
+
 // IsConnected returns true if the transport is connected
 func (t *Transport) IsConnected() bool {
 	return t.dev != nil
@@ -342,31 +375,36 @@ func (t *Transport) sendFrame(cmd byte, args []byte) error {
 	return nil
 }
 
-// waitAck waits for an ACK frame from the PN532
+// waitAck waits for an ACK frame from the PN532.
+// A deadline-bounded context is created so that checkReady's internal retry
+// loop cannot overshoot the transport timeout.
 func (t *Transport) waitAck(ctx context.Context) error {
-	deadline := time.Now().Add(t.timeout)
+	ackCtx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
 
-	// Use buffer pool for ACK frame reading
 	ackBuf := frame.GetSmallBuffer(6)
 	defer frame.PutBuffer(ackBuf)
 
-	for time.Now().Before(deadline) {
-		// Check context
+	for {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-ackCtx.Done():
+			t.traceTimeout("No ACK received")
+			return pn532.NewNoACKError("waitAck", t.busName)
 		default:
 		}
 
-		// Check if PN532 is ready
-		if err := t.checkReady(ctx); err != nil {
-			if err := sleepCtx(ctx, time.Millisecond); err != nil {
-				return err
+		if err := t.checkReady(ackCtx); err != nil {
+			if ackCtx.Err() != nil {
+				t.traceTimeout("No ACK received")
+				return pn532.NewNoACKError("waitAck", t.busName)
+			}
+			if sleepErr := sleepCtx(ackCtx, time.Millisecond); sleepErr != nil {
+				t.traceTimeout("No ACK received")
+				return pn532.NewNoACKError("waitAck", t.busName)
 			}
 			continue
 		}
 
-		// Read ACK frame, stripping I2C status byte
 		if err := t.readI2C(ackBuf); err != nil {
 			return fmt.Errorf("I2C ACK read failed: %w", err)
 		}
@@ -376,13 +414,17 @@ func (t *Transport) waitAck(ctx context.Context) error {
 			return nil
 		}
 
-		if err := sleepCtx(ctx, time.Millisecond); err != nil {
-			return err
+		// PN532 sent NACK: it wants the command retransmitted.
+		if bytes.Equal(ackBuf, nackFrame) {
+			t.traceRX(nackFrame, "NACK")
+			return pn532.NewNACKReceivedError("waitAck", t.busName)
+		}
+
+		if sleepErr := sleepCtx(ackCtx, time.Millisecond); sleepErr != nil {
+			t.traceTimeout("No ACK received")
+			return pn532.NewNoACKError("waitAck", t.busName)
 		}
 	}
-
-	t.traceTimeout("No ACK received")
-	return pn532.NewNoACKError("waitAck", t.busName)
 }
 
 // sendAck sends an ACK frame to the PN532
@@ -403,29 +445,29 @@ func (t *Transport) sendNack() error {
 	return nil
 }
 
-// receiveFrame reads a response frame from the PN532
+// receiveFrame reads a response frame from the PN532.
+// A deadline-bounded context is created so that checkReady's internal retry
+// loop cannot overshoot the transport timeout.
 func (t *Transport) receiveFrame(ctx context.Context) ([]byte, error) {
-	deadline := time.Now().Add(t.timeout)
+	frameCtx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
+
 	const maxTries = 3
 
 	for range maxTries {
-		// Check context
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		if time.Now().After(deadline) {
+		case <-frameCtx.Done():
+			t.traceTimeout("receiveFrame deadline exceeded")
 			return nil, &pn532.TransportError{
 				Op: "receiveFrame", Port: t.busName,
 				Err:       pn532.ErrTransportTimeout,
 				Type:      pn532.ErrorTypeTimeout,
 				Retryable: true,
 			}
+		default:
 		}
 
-		data, shouldRetry, err := t.receiveFrameAttempt(ctx)
+		data, shouldRetry, err := t.receiveFrameAttempt(frameCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -448,43 +490,47 @@ func (t *Transport) receiveFrame(ctx context.Context) ([]byte, error) {
 	}
 }
 
-// receiveFrameAttempt performs a single frame receive attempt
+// receiveFrameAttempt performs a single frame receive attempt.
+// ctx should be deadline-bounded (created by receiveFrame) so that the
+// checkReady polling loop cannot overshoot the outer timeout.
 func (t *Transport) receiveFrameAttempt(ctx context.Context) (data []byte, shouldRetry bool, err error) {
-	// Check context
 	select {
 	case <-ctx.Done():
 		return nil, false, ctx.Err()
 	default:
 	}
 
-	// Check if PN532 is ready
+	// Poll readiness with a 1-byte transaction (efficient: avoids reading the
+	// full 271-byte response on every poll while the PN532 is still processing).
 	if readyErr := t.checkReady(ctx); readyErr != nil {
+		if ctx.Err() != nil {
+			return nil, false, ctx.Err()
+		}
 		if sleepErr := sleepCtx(ctx, time.Millisecond); sleepErr != nil {
 			return nil, false, sleepErr
 		}
-		// Device not ready, retry without error
 		return nil, true, nil
 	}
 
-	buf, actualLen, err := t.readFrameData()
+	// Read the complete frame in one I2C transaction. off is the index of the
+	// LEN byte; the PN532 restart-from-zero behaviour makes a second transaction
+	// impossible to use correctly for the remaining bytes.
+	buf, off, err := t.readFrameData()
 	if err != nil {
 		return nil, false, err
 	}
-	defer frame.PutBuffer(buf) // Ensure buffer is returned to pool
+	defer frame.PutBuffer(buf)
 
-	// Trace the raw response frame
-	if actualLen > 0 {
-		t.traceRX(buf[:actualLen], "Response")
-	}
+	frameLen := int(buf[off])
+	lcs := int(buf[off+1])
+	totalFrameSize := off + 2 + frameLen + 2
 
-	off, err := t.findI2CFrameStart(buf, actualLen)
-	if err != nil {
-		return nil, false, err
-	}
+	t.traceRX(buf[:totalFrameSize], "Response")
 
-	frameLen, shouldRetry, err := t.validateI2CFrameLength(buf, off, actualLen)
-	if err != nil || shouldRetry {
-		return nil, shouldRetry, err
+	// LCS is a transient bus-noise failure: trigger NACK+retry rather than
+	// returning a hard error so the PN532 gets a chance to retransmit.
+	if (frameLen+lcs)&0xFF != 0 {
+		return nil, true, nil
 	}
 
 	shouldRetry, err = t.validateI2CFrameChecksum(buf, off, frameLen)
@@ -505,9 +551,13 @@ func (t *Transport) receiveFrameAttempt(ctx context.Context) (data []byte, shoul
 //
 // By reading the maximum possible frame size (frame.MaxFrameDataLength + framing overhead)
 // in one transaction, we get the complete frame correctly and avoid a second transaction.
-func (t *Transport) readFrameData() (buf []byte, actualLen int, err error) {
+//
+// Returns (buf, off, err) where off is the index of the LEN byte within buf (i.e. the
+// two bytes at buf[off] and buf[off+1] are LEN and LCS). The caller is responsible for
+// returning buf to the pool via frame.PutBuffer.
+func (t *Transport) readFrameData() (buf []byte, off int, err error) {
 	// frame.MaxFrameDataLength = 263; add framing bytes (preamble, start code,
-	// LEN, LCS, DCS, postamble) for the largest buffer we may need.
+	// LEN, LCS, DCS, postamble) for the largest buffer we may need. = 271
 	const maxBufSize = frame.MaxFrameDataLength + 8
 
 	buf = frame.GetBuffer(maxBufSize)
@@ -517,16 +567,16 @@ func (t *Transport) readFrameData() (buf []byte, actualLen int, err error) {
 		return nil, 0, fmt.Errorf("I2C frame read failed: %w", err)
 	}
 
-	// Locate frame start (0x00 0xFF) to determine actual frame length.
-	frameStart := -1
+	// Locate the start code (0x00 0xFF) to find the LEN byte.
+	off = -1
 	for i := range maxBufSize - 1 {
 		if buf[i] == 0x00 && buf[i+1] == 0xFF {
-			frameStart = i + 2 // index of LEN byte
+			off = i + 2 // index of LEN byte
 			break
 		}
 	}
 
-	if frameStart == -1 || frameStart+1 >= maxBufSize {
+	if off < 0 || off+1 >= maxBufSize {
 		frame.PutBuffer(buf)
 		return nil, 0, &pn532.TransportError{
 			Op:        "readFrameData",
@@ -537,22 +587,10 @@ func (t *Transport) readFrameData() (buf []byte, actualLen int, err error) {
 		}
 	}
 
-	frameLen := int(buf[frameStart])
-	lcs := int(buf[frameStart+1])
-
-	if (frameLen+lcs)&0xFF != 0 {
-		frame.PutBuffer(buf)
-		return nil, 0, &pn532.TransportError{
-			Op:        "readFrameData",
-			Port:      t.busName,
-			Err:       pn532.ErrFrameCorrupted,
-			Type:      pn532.ErrorTypeTransient,
-			Retryable: true,
-		}
-	}
-
-	// Total: bytes up to and including LCS, plus LEN data bytes, plus DCS + postamble
-	totalFrameSize := frameStart + 2 + frameLen + 2
+	// Validate that the declared frame fits within the buffer we read.
+	// LCS validation (transient) is left to the caller for proper retry semantics.
+	frameLen := int(buf[off])
+	totalFrameSize := off + 2 + frameLen + 2
 	if totalFrameSize > maxBufSize {
 		frame.PutBuffer(buf)
 		return nil, 0, &pn532.TransportError{
@@ -564,41 +602,7 @@ func (t *Transport) readFrameData() (buf []byte, actualLen int, err error) {
 		}
 	}
 
-	return buf, totalFrameSize, nil
-}
-
-// findI2CFrameStart locates the frame start marker (0x00 0xFF)
-// CRITICAL FIX: Now accepts actualLen to only search through actual received data
-// This prevents false positives from searching uninitialized buffer space
-func (t *Transport) findI2CFrameStart(buf []byte, actualLen int) (int, error) {
-	// Only search through actual data received, not entire buffer
-	searchLen := actualLen
-	if searchLen > len(buf) {
-		searchLen = len(buf)
-	}
-
-	for off := range searchLen - 1 {
-		if buf[off] == 0x00 && buf[off+1] == 0xFF {
-			return off + 2, nil // Skip to length byte
-		}
-	}
-
-	return 0, &pn532.TransportError{
-		Op: "receiveFrame", Port: t.busName,
-		Err:       pn532.ErrFrameCorrupted,
-		Type:      pn532.ErrorTypeTransient,
-		Retryable: true,
-	}
-}
-
-// validateI2CFrameLength validates the frame length and its checksum
-// CRITICAL FIX: Now uses actualLen instead of len(buf) to avoid reading beyond actual data
-func (t *Transport) validateI2CFrameLength(buf []byte, off, actualLen int) (frameLen int, shouldRetry bool, err error) {
-	frameLen, shouldRetry, err = frame.ValidateFrameLength(buf, off-1, actualLen, "receiveFrame", t.busName)
-	if err != nil {
-		return frameLen, shouldRetry, fmt.Errorf("I2C frame length validation failed: %w", err)
-	}
-	return frameLen, shouldRetry, nil
+	return buf, off, nil
 }
 
 // validateI2CFrameChecksum validates the frame data checksum
@@ -631,5 +635,8 @@ func (t *Transport) extractI2CFrameData(buf []byte, off, frameLen int) (data []b
 	return data, false, nil
 }
 
-// Ensure Transport implements pn532.Transport
-var _ pn532.Transport = (*Transport)(nil)
+// Ensure Transport implements pn532.Transport and pn532.Reconnecter
+var (
+	_ pn532.Transport   = (*Transport)(nil)
+	_ pn532.Reconnecter = (*Transport)(nil)
+)
