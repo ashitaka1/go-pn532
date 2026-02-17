@@ -450,12 +450,9 @@ func runDiagnostics(ctx context.Context, device *pn532.Device) {
 
 	diagnoseFirmware(ctx, device)
 	diagnoseRTT(ctx, device)
-	// Skip hardware self-tests (ROM/RAM/Antenna) — these corrupt the I2C bus
-	// on real hardware, causing all subsequent commands to fail with
-	// "sysfs-i2c: connection timed out". Investigating root cause.
-	// diagnoseTest(ctx, device, pn532.DiagnoseROMTest, "ROM test")
-	// diagnoseTest(ctx, device, pn532.DiagnoseRAMTest, "RAM test")
-	// diagnoseTest(ctx, device, pn532.DiagnoseSelfAntennaTest, "Antenna test")
+	diagnoseTest(ctx, device, pn532.DiagnoseROMTest, "ROM test")
+	diagnoseTest(ctx, device, pn532.DiagnoseRAMTest, "RAM test")
+	diagnoseTest(ctx, device, pn532.DiagnoseSelfAntennaTest, "Antenna test")
 	diagnoseRFField(ctx, device)
 	diagnoseTagDetection(ctx, device)
 
