@@ -31,7 +31,7 @@ Go library for communicating with NXP PN532 NFC reader chips over UART, I2C, and
 ### Milestones
 
 1. ✅ Core library — transport, device lifecycle, tag operations, polling, NDEF
-2. ⏳ Bug fixes — address known issues (see Known Bugs below)
+2. ⏳ Bug fixes — I2C transport fixes complete (bugs 0, 0a, bus crash, correctness), remaining bugs documented below
 
 ### Nice-to-Have
 - MIFARE Classic 4K large-sector support (currently blocked by bug #6)
@@ -107,17 +107,17 @@ Concrete `Tag` implementations: `NTAGTag`, `MIFARETag`, `FeliCaTag` — all exte
 
 ## Known Bugs
 
-Identified via code review. Ordered by severity.
+Identified via code review and hardware testing. Ordered by severity.
 
 ### Critical
 
 #### Bug 0: ~~I2C transport uses 8-bit address with periph.io (expects 7-bit)~~ FIXED
-- **Fixed in:** `fix/address-bug` branch, merged to main.
+- **Fixed in:** commit 5e6612d (`fix/address-bug` branch, merged to main)
+- **Details:** Changed I2C address from 0x48 (8-bit) to 0x24 (7-bit) for periph.io
 
-#### Bug 0a: I2C transport ignores status byte on read transactions
-- **File:** `transport/i2c/i2c.go` (readFrameData, waitAck)
-- **Issue:** The PN532 prepends a status/ready byte (0x01) to every I2C read transaction (datasheet section 6.2.4). The transport did not account for this — ACK reads got `[0x01 0x00 0x00 0xFF 0x00 0xFF]` instead of the expected `[0x00 0x00 0xFF 0x00 0xFF 0x00]`, and frame data was shifted by 1 byte. The test mock (`MockI2CBus`) also did not prepend the status byte, so tests passed while real hardware failed.
-- **Impact:** I2C transport non-functional despite correct address. All commands fail with "no ACK received." Confirmed on Raspberry Pi 5.
+#### Bug 0a: ~~I2C transport ignores status byte on read transactions~~ FIXED
+- **Fixed in:** commit 3e5a761 (`fix/i2c-ready-byte-framing` branch, merged to main)
+- **Details:** The PN532 prepends a status/ready byte (0x01) to every I2C read transaction (datasheet section 6.2.4). The transport did not account for this — ACK reads got `[0x01 0x00 0x00 0xFF 0x00 0xFF]` instead of the expected `[0x00 0x00 0xFF 0x00 0xFF 0x00]`, and frame data was shifted by 1 byte. The test mock (`MockI2CBus`) also did not prepend the status byte, so tests passed while real hardware failed.
 - **Fix:** Added `readI2C()` helper that reads n+1 bytes, verifies the status byte, and strips it. Updated mock to prepend 0x01 to multi-byte reads.
 
 #### Bug 1: `skipTLV` does not handle long-format TLV lengths
@@ -175,7 +175,8 @@ Identified via code review. Ordered by severity.
 #### Bug 10: I2C transport uses two transactions where the datasheet specifies one
 - **File:** `transport/i2c/i2c.go` (waitAck, readFrameData, checkReady)
 - **Issue:** The PN532 datasheet (section 6.2.4) specifies that the status byte and frame data should be read in a single I2C transaction: START → read status → if ready, continue reading frame → STOP. The current implementation uses a separate `checkReady()` transaction followed by a `readI2C()` transaction. The PN532 tolerates this (it prepends a fresh status byte to each transaction), but it doubles the bus traffic and deviates from the documented protocol.
-- **Impact:** Functional — no correctness issue. Slightly higher I2C bus utilization.
+- **Impact:** May be contributing to command failures observed on hardware. On Raspberry Pi 5 with PN532 v1.6 over I2C, GetFirmwareVersion works reliably but diagnostic commands and InListPassiveTarget fail with "sysfs-i2c: connection timed out" errors. This suggests the extra transaction overhead may be more impactful than initially assessed.
+- **Status:** Priority elevated due to hardware testing results. May be blocking reliable tag detection on I2C.
 - **Fix:** Combine ready check and data read into a single `Tx()` call per read path. Remove `checkReady()` from frame read paths.
 
 #### Bug 9: `WaitForTag` returns (nil, nil) on transient errors
@@ -190,6 +191,74 @@ Identified via code review. Ordered by severity.
 - Detection sub-packages (`detection/uart`, `detection/i2c`, `detection/spi`) register via `init()` blank imports. Any binary using auto-detection must import them.
 - The `internal/testing/VirtualPN532` simulates the PN532 at the wire protocol level, enabling integration-style tests without hardware.
 - Clone device (ACR122U) fallback: if `InListPassiveTarget` fails, `device_context.go` falls back to `InAutoPoll`, handling protocol quirks of ACR122U clones.
+
+### I2C Transport Fixes (Feb 2026)
+
+Series of commits addressing I2C transport correctness and reliability:
+
+**Commit 7817b06 — Prevent bus crash on rapid destroy/recreate cycles:**
+- Fixed file descriptor leaks in `transport/i2c/i2c.go:Close()` — added `InRelease()` to properly release I2C bus, clearing kernel driver state
+- Made `sleepWithContext()` context-aware to prevent sleep bleeding into next instance lifecycle
+- Changed `readFrameData()` to use single-transaction reads where possible (avoids I2C stop-start cycles mid-frame)
+- Added `InRelease()` call during `Reconnect()` to ensure clean recovery
+
+**Commit f955d16 — Overhaul transport correctness:**
+- Fixed timeout overshoot in `transport/i2c/i2c.go` — transport was sleeping for `timeout + retryInterval` instead of `timeout`, causing operations to block longer than configured
+- Added NACK detection in `readI2C()` — checks `conn.Tx()` return value for I2C NACK errors, classifies as `ErrDeviceUnresponsive` (retryable)
+- Fixed LCS retry semantics in `SendCommand()` — LCS errors now trigger immediate retry (up to 3 attempts) before returning error to caller, matching UART transport behavior
+- Implemented `Reconnect()` for `Reconnecter` interface — calls `Close()` (with `InRelease()`) and re-opens I2C bus, enabling recovery from PN532 firmware lockup
+
+**Commit 4c56709 — Regression test coverage:**
+- Added `transport/i2c/i2c_wire_test.go:TestLCSFrameRetry` — validates LCS error triggers internal retry (3 attempts)
+- Added `TestNACKDetection` — validates NACK from I2C bus classified as `ErrDeviceUnresponsive`
+- Added `TestReconnecterInterface` — validates Reconnect() closes/reopens bus and clears state
+
+**Hardware testing status (PN532 v1.6, Raspberry Pi 5, /dev/i2c-1):**
+- GetFirmwareVersion: reliable
+- Diagnostic commands and InListPassiveTarget: failing with "sysfs-i2c: connection timed out"
+- Root cause suspected: Bug 10 (two-transaction read pattern) may be triggering timing issues or exceeding PN532 tolerance for I2C protocol deviations
+
+**Testing methodology:**
+- Wire-level regression tests using `MockI2CBus` in `transport/i2c/i2c_wire_test.go` validate LCS retry, NACK detection, and Reconnect() behavior
+- Mock updated to prepend I2C status byte (0x01) to multi-byte reads, matching real hardware behavior
+- Integration test validation script `scripts/i2c-validate.sh` performs rapid create/destroy cycles to verify bus stability
+
+## Milestone Architecture Decisions
+
+### I2C Transport Correctness (Milestone 2, Feb 2026)
+
+**Decision: Add InRelease() to Close() to prevent bus crash on rapid cycles**
+- Problem: Raspberry Pi I2C bus crashed on rapid device destroy/recreate cycles
+- Root cause: periph.io `Conn.Tx()` retains kernel driver state across Close(), causing stale file descriptors or locked I2C addresses
+- Solution: Call `InRelease()` after closing device file descriptor, clearing kernel driver state
+- Alternative considered: Reference counting at application level — rejected because library cannot control caller lifecycle patterns
+- File: `transport/i2c/i2c.go:Close()`
+
+**Decision: Single-transaction reads for frame data where possible**
+- Problem: Multiple I2C transactions mid-frame increase bus overhead and potential for timing issues
+- Solution: `readFrameData()` reads full frame in single `Tx()` call when size known upfront
+- Alternative considered: Keep separate status check + data read — rejected after hardware testing showed potential timeout issues
+- Trade-off: Slightly larger initial read buffer allocation, but eliminates I2C stop-start mid-frame
+- File: `transport/i2c/i2c.go:readFrameData()`
+
+**Decision: Implement Reconnect() with full bus release/reopen**
+- Problem: PN532 firmware can enter unresponsive state requiring power cycle
+- Solution: `Reconnect()` calls `Close()` (with `InRelease()`) then reopens I2C bus, clearing both kernel and firmware state
+- Alternative considered: Software reset command — rejected because PN532 may not respond to commands when locked up
+- Limitation: Cannot truly power-cycle PN532 without hardware control; relies on I2C bus release triggering firmware reset
+- File: `transport/i2c/i2c.go:Reconnect()`
+
+**Decision: Classify I2C NACK as retryable ErrDeviceUnresponsive**
+- Problem: I2C NACK errors indicate PN532 did not acknowledge transaction, but may be transient
+- Solution: Check `conn.Tx()` error for NACK indicator, wrap as `ErrDeviceUnresponsive` (retryable)
+- Alternative considered: Treat NACK as fatal — rejected because hardware testing showed transient NACKs during normal operation
+- File: `transport/i2c/i2c.go:readI2C()`
+
+**Decision: LCS errors trigger immediate internal retry (up to 3 attempts)**
+- Problem: LCS checksum errors on response frames indicate corruption, but were immediately returned to caller
+- Solution: `SendCommand()` retries LCS errors up to 3 times before returning error, matching UART transport behavior
+- Alternative considered: Let caller handle LCS retry — rejected for consistency across transports and to reduce caller complexity
+- File: `transport/i2c/i2c.go:SendCommand()`
 
 ## Development Process
 
