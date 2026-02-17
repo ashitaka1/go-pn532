@@ -427,9 +427,12 @@ func (m *JitteryMockI2CBus) Tx(_ uint16, w, r []byte) error {
 		return errBusClosed
 	}
 
-	// Handle ready status check (read-only with single byte)
+	// Handle ready status check (read-only with single byte).
+	// Data may be pending in the sim's txBuffer OR already drained into the
+	// jittery connection's internal read buffer (e.g. response bytes read
+	// ahead during a previous ACK read). Both indicate "ready".
 	if len(w) == 0 && len(r) == 1 {
-		if m.sim.HasPendingResponse() {
+		if m.sim.HasPendingResponse() || m.jittery.HasBufferedData() {
 			r[0] = pn532Ready
 		} else {
 			r[0] = 0x00
@@ -688,4 +691,103 @@ func TestI2C_Jittery_AggressiveFragmentation(t *testing.T) {
 	resp, err = transport.SendCommand(context.Background(), 0x40, []byte{0x01, 0x30, 0x04})
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[1])
+}
+
+// --- Regression Tests ---
+// Each test targets a specific bug present in the original I2C transport.
+
+// callbackI2CBus is a minimal i2c.Bus that lets individual regression tests
+// inject precisely-crafted byte sequences without the full VirtualPN532 simulator.
+type callbackI2CBus struct {
+	onTx func(w, r []byte) error
+}
+
+func (c *callbackI2CBus) Tx(_ uint16, w, r []byte) error  { return c.onTx(w, r) }
+func (*callbackI2CBus) SetSpeed(_ physic.Frequency) error { return nil }
+func (*callbackI2CBus) Close() error                      { return nil }
+func (*callbackI2CBus) String() string                    { return "mock://callback-i2c" }
+
+var _ i2c.Bus = (*callbackI2CBus)(nil)
+
+func newCallbackTransport(onTx func(w, r []byte) error) *Transport {
+	return &Transport{
+		dev:     &i2c.Dev{Addr: pn532Addr, Bus: &callbackI2CBus{onTx: onTx}},
+		busName: "mock://callback-i2c",
+		timeout: 100 * time.Millisecond,
+	}
+}
+
+// TestI2C_CorruptedLCS_ShouldRetryNotError verifies that a corrupted length
+// checksum (LCS) triggers a NACK+retry (shouldRetry=true, err=nil) instead of
+// a hard ErrFrameCorrupted.
+//
+// Before the fix, readFrameData() performed the LCS check and returned
+// ErrFrameCorrupted on failure, bypassing the retry path entirely. The correct
+// behaviour per the PN532 spec is to treat a bad LCS as a transient bus-noise
+// event: send NACK and ask the device to retransmit.
+func TestI2C_CorruptedLCS_ShouldRetryNotError(t *testing.T) {
+	// LEN=0x02, LCS=0xFF: sum = 0x02+0xFF = 0x101, &0xFF = 0x01 ≠ 0 → bad LCS.
+	// (correct LCS for LEN=0x02 is 0xFE so that 0x02+0xFE = 0x00)
+	badLCSFrame := []byte{
+		0x00, 0x00, 0xFF, // preamble + start code
+		0x02, 0xFF, // LEN=2, LCS=0xFF (corrupted)
+		0xD5, 0x15, // TFI (pn532ToHost), SAMConfiguration response
+		0x16, 0x00, // DCS, postamble
+	}
+	transport := newCallbackTransport(func(w, readBuf []byte) error {
+		if len(w) > 0 {
+			return nil // writes (sendFrame, sendNack) are no-ops
+		}
+		readBuf[0] = pn532Ready
+		if len(readBuf) > 1 {
+			copy(readBuf[1:], badLCSFrame)
+		}
+		return nil
+	})
+
+	data, shouldRetry, err := transport.receiveFrameAttempt(context.Background())
+
+	assert.Nil(t, data, "no data expected for a frame with bad LCS")
+	assert.True(t, shouldRetry, "bad LCS must set shouldRetry=true so the NACK+retry path is taken")
+	assert.NoError(t, err, "bad LCS must not return a hard error")
+}
+
+// TestI2C_NACKFromDevice_ReturnsErrNACKReceived verifies that a NACK frame
+// sent by the PN532 is detected promptly and returns ErrNACKReceived.
+//
+// Before the fix, waitAck() compared each 6-byte read against ackFrame only.
+// A NACK frame was silently ignored and the loop ran until the 100 ms timeout,
+// returning ErrNoACK instead of the correct ErrNACKReceived.
+func TestI2C_NACKFromDevice_ReturnsErrNACKReceived(t *testing.T) {
+	transport := newCallbackTransport(func(w, readBuf []byte) error {
+		if len(w) > 0 {
+			return nil // writes are no-ops
+		}
+		readBuf[0] = pn532Ready
+		if len(readBuf) == 7 { // 1 status byte + 6 ACK/NACK bytes (readI2C(ackBuf))
+			copy(readBuf[1:], nackFrame)
+		}
+		return nil
+	})
+
+	start := time.Now()
+	err := transport.waitAck(context.Background())
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, pn532.ErrNACKReceived,
+		"NACK from device must return ErrNACKReceived")
+	assert.Less(t, elapsed, 50*time.Millisecond,
+		"NACK must be detected immediately, not after full timeout (%s elapsed)", elapsed)
+}
+
+// TestI2C_ImplementsReconnecter documents and verifies at runtime that
+// *Transport satisfies pn532.Reconnecter. The compile-time assertion in i2c.go
+// is the primary guard; this test acts as a regression marker so that if the
+// assertion is removed, at least a test failure alerts the developer.
+func TestI2C_ImplementsReconnecter(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	transport := newTestI2CTransport(sim)
+
+	_, ok := any(transport).(pn532.Reconnecter)
+	assert.True(t, ok, "i2c.Transport must implement pn532.Reconnecter")
 }
