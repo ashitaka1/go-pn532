@@ -55,7 +55,7 @@ var (
 // Transport implements the pn532.Transport interface for I2C communication
 type Transport struct {
 	dev          *i2c.Dev
-	bus          i2c.BusCloser    // Held so Close() can release the OS file descriptor
+	bus          i2c.BusCloser      // Held so Close() can release the OS file descriptor
 	currentTrace *pn532.TraceBuffer // Trace buffer for current command (error-only)
 	busName      string
 	timeout      time.Duration
@@ -265,7 +265,20 @@ func (*Transport) Type() pn532.TransportType {
 	return pn532.TransportI2C
 }
 
-// checkReady checks if the PN532 is ready by reading the ready status.
+// checkReadyOnce performs a single I2C ready-status read.
+// Returns (true, nil) if ready, (false, nil) if not yet ready, (false, err) on bus error.
+func (t *Transport) checkReadyOnce() (bool, error) {
+	ready := frame.GetSmallBuffer(1)
+	err := t.dev.Tx(nil, ready)
+	isReady := err == nil && ready[0] == pn532Ready
+	frame.PutBuffer(ready)
+	if err != nil {
+		return false, fmt.Errorf("I2C ready check failed: %w", err)
+	}
+	return isReady, nil
+}
+
+// checkReady polls the PN532 ready status with exponential backoff.
 // Uses context-aware sleeps so cancellation stops the retry loop promptly,
 // preventing in-flight I2C reads from overlapping with a new transport instance.
 func (t *Transport) checkReady(ctx context.Context) error {
@@ -277,30 +290,14 @@ func (t *Transport) checkReady(ctx context.Context) error {
 			return err
 		}
 
-		// Use buffer pool for ready status check - small optimization
-		ready := frame.GetSmallBuffer(1)
-
-		err := t.dev.Tx(nil, ready)
+		isReady, err := t.checkReadyOnce()
 		if err != nil {
-			frame.PutBuffer(ready)
-			lastErr = fmt.Errorf("I2C ready check failed: %w", err)
-			// Exponential backoff: 1ms, 2ms, 4ms, 8ms, 16ms
-			if attempt < pn532.TransportI2CFrameRetries-1 {
-				if sleepErr := sleepCtx(ctx, baseDelay*time.Duration(1<<attempt)); sleepErr != nil {
-					return sleepErr
-				}
-				continue
-			}
-			return lastErr
-		}
-
-		if ready[0] == pn532Ready {
-			frame.PutBuffer(ready)
+			lastErr = err
+		} else if isReady {
 			return nil
 		}
 
-		frame.PutBuffer(ready)
-		// Device not ready yet, wait with context-aware backoff
+		// Not ready or bus error: backoff then retry (skip sleep on last attempt)
 		if attempt < pn532.TransportI2CFrameRetries-1 {
 			if sleepErr := sleepCtx(ctx, baseDelay*time.Duration(1<<attempt)); sleepErr != nil {
 				return sleepErr
@@ -308,6 +305,9 @@ func (t *Transport) checkReady(ctx context.Context) error {
 		}
 	}
 
+	if lastErr != nil {
+		return lastErr
+	}
 	return pn532.NewTransportNotReadyError("checkReady", t.busName)
 }
 
@@ -375,6 +375,50 @@ func (t *Transport) sendFrame(cmd byte, args []byte) error {
 	return nil
 }
 
+// ackKind classifies a 6-byte I2C read as ACK, NACK, or something else.
+type ackKind int
+
+const (
+	ackKindACK   ackKind = iota
+	ackKindNACK          // PN532 requests retransmission
+	ackKindOther         // unknown — caller should loop
+)
+
+// readAckKind performs one readI2C(buf) and classifies the result.
+func (t *Transport) readAckKind(buf []byte) (ackKind, error) {
+	if err := t.readI2C(buf); err != nil {
+		return ackKindOther, fmt.Errorf("I2C ACK read failed: %w", err)
+	}
+	if bytes.Equal(buf, ackFrame) {
+		t.traceRX(ackFrame, "ACK")
+		return ackKindACK, nil
+	}
+	if bytes.Equal(buf, nackFrame) {
+		t.traceRX(nackFrame, "NACK")
+		return ackKindNACK, nil
+	}
+	return ackKindOther, nil
+}
+
+// pollReady checks readiness once and handles the error cases inline.
+// Returns (true, nil) when the device is ready to be read.
+// Returns (false, nil) when not yet ready (caller should loop).
+// Returns (false, err) on context expiry or unrecoverable error.
+func (t *Transport) pollReady(ackCtx context.Context) (bool, error) {
+	if err := t.checkReady(ackCtx); err != nil {
+		if ackCtx.Err() != nil {
+			t.traceTimeout("No ACK received")
+			return false, pn532.NewNoACKError("waitAck", t.busName)
+		}
+		if sleepErr := sleepCtx(ackCtx, time.Millisecond); sleepErr != nil {
+			t.traceTimeout("No ACK received")
+			return false, pn532.NewNoACKError("waitAck", t.busName)
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
 // waitAck waits for an ACK frame from the PN532.
 // A deadline-bounded context is created so that checkReady's internal retry
 // loop cannot overshoot the transport timeout.
@@ -393,31 +437,24 @@ func (t *Transport) waitAck(ctx context.Context) error {
 		default:
 		}
 
-		if err := t.checkReady(ackCtx); err != nil {
-			if ackCtx.Err() != nil {
-				t.traceTimeout("No ACK received")
-				return pn532.NewNoACKError("waitAck", t.busName)
-			}
-			if sleepErr := sleepCtx(ackCtx, time.Millisecond); sleepErr != nil {
-				t.traceTimeout("No ACK received")
-				return pn532.NewNoACKError("waitAck", t.busName)
-			}
+		ready, err := t.pollReady(ackCtx)
+		if err != nil {
+			return err
+		}
+		if !ready {
 			continue
 		}
 
-		if err := t.readI2C(ackBuf); err != nil {
-			return fmt.Errorf("I2C ACK read failed: %w", err)
+		kind, err := t.readAckKind(ackBuf)
+		if err != nil {
+			return err
 		}
-
-		if bytes.Equal(ackBuf, ackFrame) {
-			t.traceRX(ackFrame, "ACK")
+		switch kind {
+		case ackKindACK:
 			return nil
-		}
-
-		// PN532 sent NACK: it wants the command retransmitted.
-		if bytes.Equal(ackBuf, nackFrame) {
-			t.traceRX(nackFrame, "NACK")
+		case ackKindNACK:
 			return pn532.NewNACKReceivedError("waitAck", t.busName)
+		case ackKindOther: // unknown frame, sleep and retry
 		}
 
 		if sleepErr := sleepCtx(ackCtx, time.Millisecond); sleepErr != nil {
