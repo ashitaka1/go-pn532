@@ -55,6 +55,7 @@ var (
 // Transport implements the pn532.Transport interface for I2C communication
 type Transport struct {
 	dev          *i2c.Dev
+	bus          i2c.BusCloser    // Held so Close() can release the OS file descriptor
 	currentTrace *pn532.TraceBuffer // Trace buffer for current command (error-only)
 	busName      string
 	timeout      time.Duration
@@ -109,6 +110,7 @@ func New(busName string) (*Transport, error) {
 
 	transport := &Transport{
 		dev:     dev,
+		bus:     bus,
 		busName: busName,
 		// Match UART's unified timeout - originally 50ms but increased to 100ms
 		// for better I2C bus compatibility across different hardware
@@ -206,9 +208,17 @@ func (t *Transport) SetTimeout(timeout time.Duration) error {
 	return nil
 }
 
-// Close closes the transport connection
-func (*Transport) Close() error {
-	// periph.io handles cleanup automatically
+// Close closes the transport connection and releases the I2C bus file descriptor.
+// Must be called when the transport is no longer needed to prevent file descriptor
+// leaks that can corrupt the I2C bus on rapid destroy/recreate cycles.
+func (t *Transport) Close() error {
+	if t.bus != nil {
+		if err := t.bus.Close(); err != nil {
+			return fmt.Errorf("failed to close I2C bus: %w", err)
+		}
+		t.bus = nil
+		t.dev = nil // IsConnected() returns false after Close
+	}
 	return nil
 }
 
@@ -222,13 +232,18 @@ func (*Transport) Type() pn532.TransportType {
 	return pn532.TransportI2C
 }
 
-// checkReady checks if the PN532 is ready by reading the ready status
-// Now includes retry logic with exponential backoff for better hardware compatibility
-func (t *Transport) checkReady() error {
+// checkReady checks if the PN532 is ready by reading the ready status.
+// Uses context-aware sleeps so cancellation stops the retry loop promptly,
+// preventing in-flight I2C reads from overlapping with a new transport instance.
+func (t *Transport) checkReady(ctx context.Context) error {
 	baseDelay := time.Millisecond
 
 	var lastErr error
 	for attempt := range pn532.TransportI2CFrameRetries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		// Use buffer pool for ready status check - small optimization
 		ready := frame.GetSmallBuffer(1)
 
@@ -238,7 +253,9 @@ func (t *Transport) checkReady() error {
 			lastErr = fmt.Errorf("I2C ready check failed: %w", err)
 			// Exponential backoff: 1ms, 2ms, 4ms, 8ms, 16ms
 			if attempt < pn532.TransportI2CFrameRetries-1 {
-				time.Sleep(baseDelay * time.Duration(1<<attempt))
+				if sleepErr := sleepCtx(ctx, baseDelay*time.Duration(1<<attempt)); sleepErr != nil {
+					return sleepErr
+				}
 				continue
 			}
 			return lastErr
@@ -250,9 +267,11 @@ func (t *Transport) checkReady() error {
 		}
 
 		frame.PutBuffer(ready)
-		// Device not ready yet, wait with backoff
+		// Device not ready yet, wait with context-aware backoff
 		if attempt < pn532.TransportI2CFrameRetries-1 {
-			time.Sleep(baseDelay * time.Duration(1<<attempt))
+			if sleepErr := sleepCtx(ctx, baseDelay*time.Duration(1<<attempt)); sleepErr != nil {
+				return sleepErr
+			}
 		}
 	}
 
@@ -340,7 +359,7 @@ func (t *Transport) waitAck(ctx context.Context) error {
 		}
 
 		// Check if PN532 is ready
-		if err := t.checkReady(); err != nil {
+		if err := t.checkReady(ctx); err != nil {
 			if err := sleepCtx(ctx, time.Millisecond); err != nil {
 				return err
 			}
@@ -439,7 +458,7 @@ func (t *Transport) receiveFrameAttempt(ctx context.Context) (data []byte, shoul
 	}
 
 	// Check if PN532 is ready
-	if readyErr := t.checkReady(); readyErr != nil {
+	if readyErr := t.checkReady(ctx); readyErr != nil {
 		if sleepErr := sleepCtx(ctx, time.Millisecond); sleepErr != nil {
 			return nil, false, sleepErr
 		}
@@ -476,84 +495,74 @@ func (t *Transport) receiveFrameAttempt(ctx context.Context) (data []byte, shoul
 	return t.extractI2CFrameData(buf, off, frameLen)
 }
 
-// readFrameData reads frame data from I2C using incremental reads
-// This fixes the critical bug where we were reading a fixed-size buffer without
-// knowing how much data was actually received from the PN532
+// readFrameData reads a complete PN532 response frame in a single I2C transaction.
+//
+// Each call to readI2C() is a separate I2C transaction (START → addr+R → bytes → STOP).
+// On the PN532, every new read transaction restarts from byte 0 of its output buffer —
+// there is no "continue from where you left off" across transactions. A two-transaction
+// approach (read header, then read remaining bytes) would therefore re-read from the
+// beginning on the second call, producing corrupted frame data.
+//
+// By reading the maximum possible frame size (frame.MaxFrameDataLength + framing overhead)
+// in one transaction, we get the complete frame correctly and avoid a second transaction.
 func (t *Transport) readFrameData() (buf []byte, actualLen int, err error) {
-	// PHASE 1: Read frame header to determine frame size
-	// Frame header structure: [preamble] [0x00] [0xFF] [LEN] [LCS] = 5 bytes minimum
-	// We read a bit more to get the TFI byte and start of data
-	headerSize := 32 // Read enough to get header + some data
-	headerBuf := frame.GetSmallBuffer(headerSize)
+	// frame.MaxFrameDataLength = 263; add framing bytes (preamble, start code,
+	// LEN, LCS, DCS, postamble) for the largest buffer we may need.
+	const maxBufSize = frame.MaxFrameDataLength + 8
 
-	if err := t.readI2C(headerBuf); err != nil {
-		frame.PutBuffer(headerBuf)
-		return nil, 0, fmt.Errorf("I2C frame header read failed: %w", err)
+	buf = frame.GetBuffer(maxBufSize)
+
+	if err := t.readI2C(buf); err != nil {
+		frame.PutBuffer(buf)
+		return nil, 0, fmt.Errorf("I2C frame read failed: %w", err)
 	}
 
-	// Find frame start in header
+	// Locate frame start (0x00 0xFF) to determine actual frame length.
 	frameStart := -1
-	for i := range headerSize - 1 {
-		if headerBuf[i] == 0x00 && headerBuf[i+1] == 0xFF {
-			frameStart = i + 2 // Point to length byte
+	for i := range maxBufSize - 1 {
+		if buf[i] == 0x00 && buf[i+1] == 0xFF {
+			frameStart = i + 2 // index of LEN byte
 			break
 		}
 	}
 
-	if frameStart == -1 || frameStart+1 >= headerSize {
-		frame.PutBuffer(headerBuf)
-		return nil, 0, &pn532.TransportError{
-			Op:        "readFrameData",
-			Port:      t.busName,
-			Err:       pn532.ErrFrameCorrupted,
-			Type:      pn532.ErrorTypeTransient,
-			Retryable: true,
-		}
-	}
-
-	// Parse frame length
-	frameLen := int(headerBuf[frameStart])
-	lengthChecksum := headerBuf[frameStart+1]
-
-	// Validate length checksum
-	if ((frameLen + int(lengthChecksum)) & 0xFF) != 0 {
-		frame.PutBuffer(headerBuf)
-		return nil, 0, &pn532.TransportError{
-			Op:        "readFrameData",
-			Port:      t.busName,
-			Err:       pn532.ErrFrameCorrupted,
-			Type:      pn532.ErrorTypeTransient,
-			Retryable: true,
-		}
-	}
-
-	// PHASE 2: Calculate total frame size and check if we need more data
-	// Total frame: [preamble] [0x00] [0xFF] [LEN] [LCS] [TFI] [data...] [DCS] [postamble]
-	// = frameStart + 2 (LEN+LCS) + frameLen + 1 (DCS) + 1 (postamble)
-	totalFrameSize := frameStart + 2 + frameLen + 2
-
-	// If header buffer has all the data, use it
-	if totalFrameSize <= headerSize {
-		return headerBuf, totalFrameSize, nil
-	}
-
-	// PHASE 3: Need to read more data - allocate bigger buffer and copy header
-	buf = frame.GetBuffer(totalFrameSize)
-	copy(buf, headerBuf[:headerSize])
-	frame.PutBuffer(headerBuf) // Return small buffer to pool
-
-	// Read remaining data
-	remainingSize := totalFrameSize - headerSize
-	remainingBuf := frame.GetSmallBuffer(remainingSize)
-	defer frame.PutBuffer(remainingBuf)
-
-	if err := t.readI2C(remainingBuf); err != nil {
+	if frameStart == -1 || frameStart+1 >= maxBufSize {
 		frame.PutBuffer(buf)
-		return nil, 0, fmt.Errorf("I2C remaining frame data read failed: %w", err)
+		return nil, 0, &pn532.TransportError{
+			Op:        "readFrameData",
+			Port:      t.busName,
+			Err:       pn532.ErrFrameCorrupted,
+			Type:      pn532.ErrorTypeTransient,
+			Retryable: true,
+		}
 	}
 
-	// Copy remaining data to main buffer
-	copy(buf[headerSize:], remainingBuf[:remainingSize])
+	frameLen := int(buf[frameStart])
+	lcs := int(buf[frameStart+1])
+
+	if (frameLen+lcs)&0xFF != 0 {
+		frame.PutBuffer(buf)
+		return nil, 0, &pn532.TransportError{
+			Op:        "readFrameData",
+			Port:      t.busName,
+			Err:       pn532.ErrFrameCorrupted,
+			Type:      pn532.ErrorTypeTransient,
+			Retryable: true,
+		}
+	}
+
+	// Total: bytes up to and including LCS, plus LEN data bytes, plus DCS + postamble
+	totalFrameSize := frameStart + 2 + frameLen + 2
+	if totalFrameSize > maxBufSize {
+		frame.PutBuffer(buf)
+		return nil, 0, &pn532.TransportError{
+			Op:        "readFrameData",
+			Port:      t.busName,
+			Err:       pn532.ErrFrameCorrupted,
+			Type:      pn532.ErrorTypeTransient,
+			Retryable: true,
+		}
+	}
 
 	return buf, totalFrameSize, nil
 }
