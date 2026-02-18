@@ -791,3 +791,149 @@ func TestI2C_ImplementsReconnecter(t *testing.T) {
 	_, ok := any(transport).(pn532.Reconnecter)
 	assert.True(t, ok, "i2c.Transport must implement pn532.Reconnecter")
 }
+
+// --- Lifecycle Tests ---
+// These test the I2C transport's Close/reconnect lifecycle for safety in
+// process-managed environments (e.g., Viam modules) where Close() may be
+// called while SendCommand is actively polling the PN532.
+
+// closableCallbackBus extends callbackI2CBus with a Close that records whether
+// it was called, so tests can verify the bus teardown sequence.
+type closableCallbackBus struct {
+	onTx     func(w, r []byte) error
+	closeCh  chan struct{} // closed when Close() is called
+	isClosed bool
+}
+
+func (c *closableCallbackBus) Tx(_ uint16, w, r []byte) error {
+	if c.isClosed {
+		return errBusClosed
+	}
+	return c.onTx(w, r)
+}
+
+func (*closableCallbackBus) SetSpeed(_ physic.Frequency) error { return nil }
+
+func (c *closableCallbackBus) Close() error {
+	c.isClosed = true
+	if c.closeCh != nil {
+		select {
+		case <-c.closeCh:
+		default:
+			close(c.closeCh)
+		}
+	}
+	return nil
+}
+
+func (*closableCallbackBus) String() string { return "mock://closable-callback-i2c" }
+
+func newClosableCallbackTransport(
+	bus *closableCallbackBus,
+) *Transport {
+	return &Transport{
+		dev:     &i2c.Dev{Addr: pn532Addr, Bus: bus},
+		bus:     bus,
+		busName: "mock://closable-callback-i2c",
+		timeout: 100 * time.Millisecond,
+	}
+}
+
+// TestI2C_CloseDuringSendCommand_NoNilDeref verifies that calling Close()
+// while SendCommand is blocked inside a Tx() ioctl does not cause a nil
+// pointer dereference. This is the primary crash from issue #1: in a Viam
+// module, Close() races with an in-flight InListPassiveTarget poll.
+//
+// The test uses a channel handshake to guarantee ordering:
+// 1. SendCommand goroutine enters Tx (signals txEntered)
+// 2. Main goroutine calls Close() (bus.Close sets isClosed, Tx will fail)
+// 3. SendCommand goroutine's Tx returns errBusClosed, goroutine exits
+//
+// After the fix (dual-mutex), Close() closes the bus under closeMu (causing
+// the in-flight Tx to fail), then acquires mu to nil dev. SendCommand holds
+// mu during Tx, so dev cannot become nil while Tx is in progress.
+func TestI2C_CloseDuringSendCommand_NoNilDeref(t *testing.T) {
+	txEntered := make(chan struct{})
+	closeCh := make(chan struct{})
+
+	bus := &closableCallbackBus{
+		closeCh: closeCh,
+		onTx: func(w, r []byte) error {
+			// Ready-check reads: block until the bus is closed to simulate
+			// a long InListPassiveTarget poll that gets interrupted by Close().
+			if len(w) == 0 && len(r) == 1 {
+				select {
+				case <-txEntered:
+				default:
+					close(txEntered)
+				}
+				// Block here until bus.Close() fires, simulating a blocking ioctl
+				<-closeCh
+				return errBusClosed
+			}
+			// Writes (sendFrame, abort ACK): succeed
+			if len(w) > 0 {
+				return nil
+			}
+			return nil
+		},
+	}
+
+	transport := newClosableCallbackTransport(bus)
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := transport.SendCommand(context.Background(), 0x02, nil)
+		errCh <- err
+	}()
+
+	// Wait until Tx is definitely entered
+	<-txEntered
+
+	// Close from the main goroutine (simulates Viam module Close).
+	// This sends abort ACK (write, succeeds), then bus.Close() which
+	// closes closeCh and unblocks the Tx goroutine.
+	closeErr := transport.Close()
+	assert.NoError(t, closeErr)
+
+	// Verify SendCommand returned an error (not a panic)
+	err := <-errCh
+	require.Error(t, err, "SendCommand must return an error when Close() races with it")
+
+	// Verify transport is in closed state
+	assert.False(t, transport.IsConnected(), "transport must be disconnected after Close")
+}
+
+// TestI2C_Close_SendsAbortACK verifies that Close() sends an ACK frame to the
+// PN532 before closing the bus. Per PN532 datasheet section 6.2.1.3, a host-
+// sent ACK aborts any in-flight command and returns the PN532 to idle. Without
+// this, the PN532 is left mid-transaction and the next process that opens the
+// bus finds a stuck device.
+func TestI2C_Close_SendsAbortACK(t *testing.T) {
+	var writtenFrames [][]byte
+
+	bus := &closableCallbackBus{
+		closeCh: make(chan struct{}),
+		onTx: func(w, r []byte) error {
+			if len(w) > 0 {
+				frame := make([]byte, len(w))
+				copy(frame, w)
+				writtenFrames = append(writtenFrames, frame)
+			}
+			return nil
+		},
+	}
+
+	transport := newClosableCallbackTransport(bus)
+	err := transport.Close()
+	require.NoError(t, err)
+
+	// Verify an ACK frame was written before the bus was closed
+	require.NotEmpty(t, writtenFrames,
+		"Close() must send an abort ACK frame before closing the bus")
+
+	lastWrite := writtenFrames[len(writtenFrames)-1]
+	assert.Equal(t, ackFrame, lastWrite,
+		"the frame sent by Close() must be an ACK (abort) frame")
+}
+

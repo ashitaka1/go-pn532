@@ -26,6 +26,7 @@ import (
 
 	pn532 "github.com/ZaparooProject/go-pn532"
 	"github.com/ZaparooProject/go-pn532/internal/frame"
+	"github.com/ZaparooProject/go-pn532/internal/syncutil"
 	"periph.io/x/conn/v3/i2c"
 	"periph.io/x/conn/v3/i2c/i2creg"
 	"periph.io/x/conn/v3/physic"
@@ -57,6 +58,8 @@ type Transport struct {
 	dev          *i2c.Dev
 	bus          i2c.BusCloser      // Held so Close() can release the OS file descriptor
 	currentTrace *pn532.TraceBuffer // Trace buffer for current command (error-only)
+	mu           syncutil.Mutex     // Serializes SendCommand, SetTimeout, IsConnected, Reconnect
+	closeMu      syncutil.Mutex     // Serializes Close; taken before mu during teardown
 	busName      string
 	timeout      time.Duration
 }
@@ -117,6 +120,10 @@ func New(busName string) (*Transport, error) {
 		timeout: 100 * time.Millisecond,
 	}
 
+	// Send an abort ACK to clear any in-flight command left by a previous
+	// process that was killed mid-transaction (issue #1, bug C).
+	_ = transport.sendAbortACK()
+
 	return transport, nil
 }
 
@@ -128,6 +135,17 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// sendAbortACK sends an ACK frame to the PN532 to abort any in-flight command.
+// Per datasheet §6.2.1.3, a host-sent ACK causes the PN532 to abandon the
+// current command and return to idle. Best-effort: errors are returned but
+// callers typically ignore them.
+func (t *Transport) sendAbortACK() error {
+	if t.dev == nil {
+		return pn532.ErrTransportClosed
+	}
+	return t.dev.Tx(ackFrame, nil)
 }
 
 // isTransientACKError returns true if the error is a transient ACK-level error worth retrying.
@@ -182,6 +200,13 @@ func (t *Transport) SendCommand(ctx context.Context, cmd byte, args []byte) ([]b
 		return nil, err
 	}
 
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.dev == nil {
+		return nil, pn532.ErrTransportClosed
+	}
+
 	// Create trace buffer for this command (only used on error)
 	t.currentTrace = pn532.NewTraceBuffer("I2C", t.busName, 16)
 	defer func() { t.currentTrace = nil }()
@@ -204,21 +229,41 @@ func (t *Transport) SendCommand(ctx context.Context, cmd byte, args []byte) ([]b
 
 // SetTimeout sets the read timeout for the transport
 func (t *Transport) SetTimeout(timeout time.Duration) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.timeout = timeout
 	return nil
 }
 
 // Close closes the transport connection and releases the I2C bus file descriptor.
-// Must be called when the transport is no longer needed to prevent file descriptor
-// leaks that can corrupt the I2C bus on rapid destroy/recreate cycles.
+// Uses a separate mutex (closeMu) so it can interrupt an in-flight SendCommand
+// without deadlocking: closing the bus fd causes any blocking Tx ioctl to fail
+// with EBADF, allowing SendCommand to release mu promptly.
 func (t *Transport) Close() error {
-	if t.bus != nil {
-		if err := t.bus.Close(); err != nil {
+	t.closeMu.Lock()
+	defer t.closeMu.Unlock()
+
+	dev := t.dev
+	bus := t.bus
+	if bus != nil {
+		// Best-effort abort: tell PN532 to drop any in-flight command so the
+		// next opener doesn't find a stuck device.
+		if dev != nil {
+			_ = dev.Tx(ackFrame, nil)
+		}
+		// Close the bus fd — this interrupts any blocking Tx ioctl in SendCommand
+		if err := bus.Close(); err != nil {
 			return fmt.Errorf("failed to close I2C bus: %w", err)
 		}
-		t.bus = nil
-		t.dev = nil // IsConnected() returns false after Close
 	}
+
+	// Acquire mu to nil state (still holding closeMu). This blocks until any
+	// in-flight SendCommand finishes (immediate now that the bus fd is closed).
+	t.mu.Lock()
+	t.bus = nil
+	t.dev = nil
+	t.mu.Unlock()
+
 	return nil
 }
 
@@ -232,6 +277,9 @@ func (t *Transport) Close() error {
 // low), a software reconnect alone may not recover it. In that case a
 // hardware reset via a GPIO RST line, or a power-cycle, is required.
 func (t *Transport) Reconnect() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	if t.bus != nil {
 		_ = t.bus.Close()
 		t.bus = nil
@@ -252,11 +300,17 @@ func (t *Transport) Reconnect() error {
 	_ = bus.SetSpeed(maxClockFreq)
 	t.bus = bus
 	t.dev = &i2c.Dev{Addr: pn532Addr, Bus: bus}
+
+	// Clear any stuck state from the previous session
+	_ = t.sendAbortACK()
+
 	return nil
 }
 
 // IsConnected returns true if the transport is connected
 func (t *Transport) IsConnected() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.dev != nil
 }
 
@@ -268,6 +322,9 @@ func (*Transport) Type() pn532.TransportType {
 // checkReadyOnce performs a single I2C ready-status read.
 // Returns (true, nil) if ready, (false, nil) if not yet ready, (false, err) on bus error.
 func (t *Transport) checkReadyOnce() (bool, error) {
+	if t.dev == nil {
+		return false, pn532.ErrTransportClosed
+	}
 	ready := frame.GetSmallBuffer(1)
 	err := t.dev.Tx(nil, ready)
 	isReady := err == nil && ready[0] == pn532Ready
@@ -314,6 +371,9 @@ func (t *Transport) checkReady(ctx context.Context) error {
 // readI2C reads from the PN532, stripping the status byte that the hardware
 // prepends to every I2C read transaction (see datasheet section 6.2.4).
 func (t *Transport) readI2C(buf []byte) error {
+	if t.dev == nil {
+		return pn532.ErrTransportClosed
+	}
 	tmpSize := 1 + len(buf)
 	tmpBuf := frame.GetSmallBuffer(tmpSize)
 	defer frame.PutBuffer(tmpBuf)
@@ -365,6 +425,10 @@ func (t *Transport) sendFrame(cmd byte, args []byte) error {
 
 	frm[7+len(args)] = ^checksum + 1 // data checksum
 	frm[8+len(args)] = 0x00          // postamble
+
+	if t.dev == nil {
+		return pn532.ErrTransportClosed
+	}
 
 	// Send frame via I2C (slice to exact size)
 	t.traceTX(frm[:totalFrameSize], fmt.Sprintf("Cmd 0x%02X", cmd))
@@ -466,6 +530,9 @@ func (t *Transport) waitAck(ctx context.Context) error {
 
 // sendAck sends an ACK frame to the PN532
 func (t *Transport) sendAck() error {
+	if t.dev == nil {
+		return pn532.ErrTransportClosed
+	}
 	t.traceTX(ackFrame, "ACK")
 	if err := t.dev.Tx(ackFrame, nil); err != nil {
 		return fmt.Errorf("failed to send ACK: %w", err)
@@ -475,6 +542,9 @@ func (t *Transport) sendAck() error {
 
 // sendNack sends a NACK frame to the PN532
 func (t *Transport) sendNack() error {
+	if t.dev == nil {
+		return pn532.ErrTransportClosed
+	}
 	t.traceTX(nackFrame, "NACK")
 	if err := t.dev.Tx(nackFrame, nil); err != nil {
 		return fmt.Errorf("failed to send NACK: %w", err)

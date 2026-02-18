@@ -31,7 +31,7 @@ Go library for communicating with NXP PN532 NFC reader chips over UART, I2C, and
 ### Milestones
 
 1. ✅ Core library — transport, device lifecycle, tag operations, polling, NDEF
-2. ⏳ Bug fixes — I2C transport fixes complete (bugs 0, 0a, bus crash, correctness), remaining bugs documented below
+2. ✅ Bug fixes — I2C transport fully functional on hardware: bugs 0, 0a, bus crash, correctness, spurious NACK (Bug 11), and process-kill recovery (Issue #1) all fixed
 
 ### Nice-to-Have
 - MIFARE Classic 4K large-sector support (currently blocked by bug #6)
@@ -120,14 +120,19 @@ Identified via code review and hardware testing. Ordered by severity.
 - **Details:** The PN532 prepends a status/ready byte (0x01) to every I2C read transaction (datasheet section 6.2.4). The transport did not account for this — ACK reads got `[0x01 0x00 0x00 0xFF 0x00 0xFF]` instead of the expected `[0x00 0x00 0xFF 0x00 0xFF 0x00]`, and frame data was shifted by 1 byte. The test mock (`MockI2CBus`) also did not prepend the status byte, so tests passed while real hardware failed.
 - **Fix:** Added `readI2C()` helper that reads n+1 bytes, verifies the status byte, and strips it. Updated mock to prepend 0x01 to multi-byte reads.
 
-#### Bug 11: I2C receiveFrame sends spurious NACK when device is not ready
-- **File:** `transport/i2c/i2c.go` (receiveFrameAttempt, receiveFrame)
-- **Issue:** `receiveFrameAttempt` returns `shouldRetry=true` for two completely different situations: (1) "device not ready" (PN532 still processing a command) and (2) "got corrupted frame" (LCS/DCS failure). The caller (`receiveFrame`) sends a NACK in both cases. Sending a NACK to a PN532 that hasn't sent a response is a protocol violation — the device doesn't expect a NACK when it's still processing, causing "sysfs-i2c: remote I/O error" which crashes the I2C bus. Once crashed, all subsequent commands fail with "connection timed out" and the PN532 requires a hardware power cycle to recover (even rebooting the Pi doesn't help since the board retains power).
-- **Impact:** Critical — makes the I2C transport non-functional on real hardware for any command that takes longer than ~31ms to process (the checkReady exponential backoff window). GetFirmwareVersion and SAMConfiguration work because they respond within this window. InListPassiveTarget, Diagnose, and other slower commands crash the bus.
-- **Root cause:** The 100ms hardcoded timeout in `receiveFrame` (line 489: `context.WithTimeout(ctx, t.timeout)`) also overrides the caller's longer command-specific timeout, compounding the problem.
-- **Fix approach:** (1) Separate "not ready" returns from "corrupted frame" returns in `receiveFrameAttempt` — only send NACK for actual frame corruption. (2) Use the caller's context deadline for `receiveFrame` instead of the hardcoded 100ms sub-timeout, falling back to `t.timeout` only when no deadline is set.
-- **Status:** Root cause confirmed via hardware testing. Fix implementation started but needs test updates (Jittery mock tests assume old `shouldRetry` behavior).
-- **Hardware notes:** PN532 breakout board does NOT expose RSTPDN pin on headers, only on SMD pads. RSTO (reset output) is available but is read-only. Recovery from bus crash currently requires physical power cycle of the PN532 board.
+#### Bug 11: ~~I2C receiveFrame sends spurious NACK when device is not ready~~ FIXED
+- **Fixed in:** commit b652f5d (`claude/fix-pn532-i2c-crash-TbehC` branch)
+- **Root cause:** `receiveFrameAttempt` returned `shouldRetry=true` for two distinct situations — "device not ready" and "corrupted frame" — causing `receiveFrame` to send a NACK in both cases. Sending a NACK when the PN532 hasn't sent anything is a protocol violation that crashes the I2C bus ("sysfs-i2c: remote I/O error"), requiring hardware power cycle to recover.
+- **Fix:** Split the return signal: `receiveFrameAttempt` now returns `(nil, false, nil)` for "not ready" (poll again without NACK) and `(nil, true, nil)` for "corrupted frame" (send NACK and retry). The `receiveFrame` deadline was also changed to respect the caller's context deadline when present, falling back to `t.timeout` only when no deadline is set.
+- **Hardware notes:** PN532 breakout board does NOT expose RSTPDN pin on headers, only on SMD pads. RSTO (reset output) is available but is read-only.
+
+#### Issue #1: ~~I2C PN532 enters unrecoverable hardware fault when process killed during InListPassiveTarget~~ FIXED
+- **Fixed in:** commit b652f5d (`claude/fix-pn532-i2c-crash-TbehC` branch), three sub-bugs resolved:
+- **Bug A — Nil pointer dereference when Close() races with SendCommand:** `Close()` previously called `bus.Close()` and then nilled `t.dev` without serialization, so an in-flight `SendCommand` holding `mu` could still read `t.dev` after it was nilled. Fixed with a dual-mutex pattern: `closeMu` (outer) guards bus teardown; `mu` (inner) guards `dev`/`bus` field access. `Close()` closes the bus fd under `closeMu` (causing any blocking `Tx` ioctl to fail with EBADF), then acquires `mu` to nil the fields. `SendCommand` holds `mu` throughout, so `dev` cannot become nil while it is in use. Files: `transport/i2c/i2c.go` (`Transport` struct, `Close()`, `SendCommand()`).
+- **Bug B — No abort sent to PN532 on Close, leaving device stuck:** `Close()` previously just closed the OS file descriptor, leaving the PN532 mid-transaction. The next opener found a stuck device. Fixed: `Close()` now sends an ACK frame (`[0x00 0x00 0xFF 0x00 0xFF 0x00]`) to the PN532 before closing the bus. Per datasheet §6.2.1.3, a host-sent ACK aborts any in-flight command and returns the device to idle. File: `transport/i2c/i2c.go:Close()`.
+- **Bug C — No recovery on connect when PN532 is stuck from previous session:** `New()` previously made no attempt to clear stuck state from a process that was killed mid-transaction. Fixed: `New()` calls `sendAbortACK()` after opening the bus. Errors are ignored (best-effort) since the device may not respond if truly stuck, but this clears the normal case. File: `transport/i2c/i2c.go:New()`.
+- **Hardware validation:** 5/5 close-during-infinite-poll cycles pass without crash; normal tag reads unaffected.
+- **Regression tests added:** `TestI2C_CloseDuringSendCommand_NoNilDeref` (goroutine channel-handshake ordering test), `TestI2C_Close_SendsAbortACK` (verifies abort frame written before bus.Close). File: `transport/i2c/i2c_wire_test.go`.
 
 #### Bug 1: `skipTLV` does not handle long-format TLV lengths
 - **File:** `ndef_validation.go:92-99`
@@ -202,45 +207,50 @@ Identified via code review and hardware testing. Ordered by severity.
 
 ### I2C Transport Fixes (Feb 2026)
 
-Series of commits addressing I2C transport correctness and reliability:
+Series of commits on `claude/fix-pn532-i2c-crash-TbehC` addressing I2C transport correctness and reliability:
 
 **Commit 7817b06 — Prevent bus crash on rapid destroy/recreate cycles:**
-- Fixed file descriptor leaks in `transport/i2c/i2c.go:Close()` — added `InRelease()` to properly release I2C bus, clearing kernel driver state
-- Made `sleepWithContext()` context-aware to prevent sleep bleeding into next instance lifecycle
-- Changed `readFrameData()` to use single-transaction reads where possible (avoids I2C stop-start cycles mid-frame)
-- Added `InRelease()` call during `Reconnect()` to ensure clean recovery
+- Fixed file descriptor leaks in `transport/i2c/i2c.go:Close()` — added bus fd tracking (`bus i2c.BusCloser` field) and explicit `bus.Close()` call, clearing kernel driver state
+- Made `checkReady()` context-aware to prevent sleep bleeding into next instance lifecycle
+- Changed `readFrameData()` to single-transaction reads (reads full max-frame buffer in one `Tx()` call; avoids the PN532 "restart-from-zero" behavior that corrupts multi-transaction frame reads)
 
 **Commit f955d16 — Overhaul transport correctness:**
-- Fixed timeout overshoot in `transport/i2c/i2c.go` — transport was sleeping for `timeout + retryInterval` instead of `timeout`, causing operations to block longer than configured
-- Added NACK detection in `readI2C()` — checks `conn.Tx()` return value for I2C NACK errors, classifies as `ErrDeviceUnresponsive` (retryable)
-- Fixed LCS retry semantics in `SendCommand()` — LCS errors now trigger immediate retry (up to 3 attempts) before returning error to caller, matching UART transport behavior
-- Implemented `Reconnect()` for `Reconnecter` interface — calls `Close()` (with `InRelease()`) and re-opens I2C bus, enabling recovery from PN532 firmware lockup
+- Fixed timeout handling — `checkReady()` now uses context-aware `sleepCtx()` instead of `time.Sleep()`; `receiveFrame` respects caller's context deadline when present
+- Added `Reconnect()` implementing `Reconnecter` interface — closes and reopens I2C bus, sends abort ACK on reconnect to clear stuck state
+- Refactored `waitAck` to use `ackKind` enum (`ackKindACK`, `ackKindNACK`, `ackKindOther`) and detect PN532-sent NACK frames explicitly
 
 **Commit 4c56709 — Regression test coverage:**
-- Added `transport/i2c/i2c_wire_test.go:TestLCSFrameRetry` — validates LCS error triggers internal retry (3 attempts)
-- Added `TestNACKDetection` — validates NACK from I2C bus classified as `ErrDeviceUnresponsive`
-- Added `TestReconnecterInterface` — validates Reconnect() closes/reopens bus and clears state
+- Added `transport/i2c/i2c_wire_test.go:TestI2C_CorruptedLCS_ShouldRetryNotError` — verifies bad LCS sets `shouldRetry=true`, not hard error
+- Added `TestI2C_NACKFromDevice_ReturnsErrNACKReceived` — verifies PN532-sent NACK returns `ErrNACKReceived` immediately (not `ErrNoACK` after timeout)
+- Added `TestI2C_ImplementsReconnecter` — runtime verification that `*Transport` satisfies `pn532.Reconnecter`
 
-**Hardware testing status (PN532 v1.6, Raspberry Pi 5, /dev/i2c-1):**
+**Commit b652f5d — Fix spurious NACK on "not ready" (Bug 11) and lifecycle crash (Issue #1):**
+- Fixed `receiveFrameAttempt` to distinguish "not ready" from "corrupted frame": returns `(nil, false, nil)` for not-ready (no NACK sent), `(nil, true, nil)` for corrupted frame (NACK+retry). Previously both returned `shouldRetry=true`, causing a NACK to be sent to a device that hadn't transmitted anything — a protocol violation that crashed the I2C bus.
+- Added dual-mutex pattern (`closeMu` + `mu`) to `Close()` to prevent nil pointer dereference when `Close()` races with `SendCommand()`: `closeMu` serializes teardown and bus fd close; `mu` serializes field access. `Close()` acquires `closeMu` first, closes bus fd (causing any blocking `Tx` ioctl to return EBADF), then acquires `mu` to nil `dev`/`bus`.
+- `Close()` now sends an abort ACK frame to the PN532 before closing the bus fd, per datasheet §6.2.1.3, so the device returns to idle and the next opener does not find a stuck device.
+- `New()` sends an abort ACK on startup to clear any stuck state left by a previous process that was killed mid-transaction.
+- Added lifecycle regression tests: `TestI2C_CloseDuringSendCommand_NoNilDeref` (channel-handshake ordering), `TestI2C_Close_SendsAbortACK` (verifies ACK frame written before bus.Close).
+
+**Hardware validation status (PN532 v1.6, Raspberry Pi 5, /dev/i2c-1):**
 - GetFirmwareVersion: reliable
-- Diagnostic commands and InListPassiveTarget: failing with "sysfs-i2c: connection timed out"
-- Root cause suspected: Bug 10 (two-transaction read pattern) may be triggering timing issues or exceeding PN532 tolerance for I2C protocol deviations
+- InListPassiveTarget with concurrent Close(): 5/5 cycles pass without crash or nil deref
+- Normal tag reads: unaffected
+- PN532 breakout board does not expose RSTPDN pin on headers (only on SMD pads); RSTO is read-only
 
 **Testing methodology:**
-- Wire-level regression tests using `MockI2CBus` in `transport/i2c/i2c_wire_test.go` validate LCS retry, NACK detection, and Reconnect() behavior
-- Mock updated to prepend I2C status byte (0x01) to multi-byte reads, matching real hardware behavior
-- Integration test validation script `scripts/i2c-validate.sh` performs rapid create/destroy cycles to verify bus stability
+- Wire-level regression tests in `transport/i2c/i2c_wire_test.go` using `MockI2CBus`, `JitteryMockI2CBus`, `callbackI2CBus`, and `closableCallbackBus` infrastructure
+- `MockI2CBus` prepends I2C status byte (0x01) to multi-byte reads, matching real hardware behavior
+- `closableCallbackBus` provides channel-based ordering guarantees for concurrent lifecycle tests
 
 ## Milestone Architecture Decisions
 
 ### I2C Transport Correctness (Milestone 2, Feb 2026)
 
-**Decision: Add InRelease() to Close() to prevent bus crash on rapid cycles**
-- Problem: Raspberry Pi I2C bus crashed on rapid device destroy/recreate cycles
-- Root cause: periph.io `Conn.Tx()` retains kernel driver state across Close(), causing stale file descriptors or locked I2C addresses
-- Solution: Call `InRelease()` after closing device file descriptor, clearing kernel driver state
+**Decision: Track bus fd in Transport struct and close it explicitly in Close()**
+- Problem: Raspberry Pi I2C bus crashed on rapid device destroy/recreate cycles; the original `Close()` was a no-op (`// periph.io handles cleanup automatically`)
+- Solution: Add `bus i2c.BusCloser` field to `Transport`; `Close()` calls `bus.Close()` to release the OS file descriptor, clearing kernel driver state
 - Alternative considered: Reference counting at application level — rejected because library cannot control caller lifecycle patterns
-- File: `transport/i2c/i2c.go:Close()`
+- File: `transport/i2c/i2c.go:Transport` struct, `Close()`
 
 **Decision: Single-transaction reads for frame data where possible**
 - Problem: Multiple I2C transactions mid-frame increase bus overhead and potential for timing issues
@@ -251,22 +261,41 @@ Series of commits addressing I2C transport correctness and reliability:
 
 **Decision: Implement Reconnect() with full bus release/reopen**
 - Problem: PN532 firmware can enter unresponsive state requiring power cycle
-- Solution: `Reconnect()` calls `Close()` (with `InRelease()`) then reopens I2C bus, clearing both kernel and firmware state
+- Solution: `Reconnect()` closes the bus fd, sleeps 100ms, reopens the bus, and sends an abort ACK to clear stuck state — giving the PN532 time to reset between bus cycles
 - Alternative considered: Software reset command — rejected because PN532 may not respond to commands when locked up
 - Limitation: Cannot truly power-cycle PN532 without hardware control; relies on I2C bus release triggering firmware reset
 - File: `transport/i2c/i2c.go:Reconnect()`
 
-**Decision: Classify I2C NACK as retryable ErrDeviceUnresponsive**
-- Problem: I2C NACK errors indicate PN532 did not acknowledge transaction, but may be transient
-- Solution: Check `conn.Tx()` error for NACK indicator, wrap as `ErrDeviceUnresponsive` (retryable)
-- Alternative considered: Treat NACK as fatal — rejected because hardware testing showed transient NACKs during normal operation
-- File: `transport/i2c/i2c.go:readI2C()`
+**Decision: Classify PN532-sent NACK using ackKind enum in waitAck**
+- Problem: `waitAck` only recognized ACK frames; NACK frames from the PN532 were silently ignored and the loop ran until the 100ms timeout, returning `ErrNoACK` instead of `ErrNACKReceived`
+- Solution: Introduced `ackKind` enum (`ackKindACK`, `ackKindNACK`, `ackKindOther`) in `readAckKind()`. `waitAck` switches on the kind: ACK returns nil, NACK returns `ErrNACKReceived` immediately, other sleeps 1ms and retries
+- Alternative considered: String comparison on error text — rejected as fragile
+- File: `transport/i2c/i2c.go:waitAck()`, `readAckKind()`
 
-**Decision: LCS errors trigger immediate internal retry (up to 3 attempts)**
-- Problem: LCS checksum errors on response frames indicate corruption, but were immediately returned to caller
-- Solution: `SendCommand()` retries LCS errors up to 3 times before returning error, matching UART transport behavior
-- Alternative considered: Let caller handle LCS retry — rejected for consistency across transports and to reduce caller complexity
-- File: `transport/i2c/i2c.go:SendCommand()`
+**Decision: LCS errors trigger NACK+retry, not hard error**
+- Problem: LCS checksum errors on response frames indicate transient bus noise, but were returned as hard `ErrFrameCorrupted` to the caller
+- Solution: `receiveFrameAttempt` returns `(nil, true, nil)` (needsNACK=true) on bad LCS; `receiveFrame` sends NACK and retries up to 3 times, matching the PN532 datasheet retransmission protocol
+- Alternative considered: Return error to caller — rejected because caller then had no way to trigger the NACK+retransmit sequence
+- File: `transport/i2c/i2c.go:receiveFrameAttempt()`, `receiveFrame()`
+
+**Decision: Dual-mutex pattern (closeMu + mu) for Close() / SendCommand() race safety**
+- Problem: `Close()` raced with in-flight `SendCommand()`: closing the bus fd and nilling `t.dev` without serialization could cause a nil pointer dereference in a concurrent `Tx()` call
+- Solution: `closeMu` (outer) serializes bus teardown; `mu` (inner) serializes all field reads and writes. `Close()` takes `closeMu`, closes the bus fd (causing the blocking `Tx` ioctl in `SendCommand` to return EBADF), then takes `mu` to nil the fields. `SendCommand` holds `mu` throughout its execution, so `t.dev` cannot be nilled while it is in use.
+- Alternative considered: Single mutex for everything — rejected because `Close()` would deadlock waiting for `mu` while `SendCommand` was blocked inside a long `Tx` ioctl
+- File: `transport/i2c/i2c.go:Transport` struct, `Close()`, `SendCommand()`
+
+**Decision: Send abort ACK from Close() and New() to manage PN532 state across process boundaries**
+- Problem: When a process is killed mid-transaction (e.g., during `InListPassiveTarget`), the PN532 is left waiting for the command to complete. The next process opener finds a stuck device.
+- Solution: (1) `Close()` sends an ACK frame before closing the bus fd — per datasheet §6.2.1.3, a host-sent ACK aborts any in-flight command and returns the device to idle. (2) `New()` sends an abort ACK on startup (best-effort, errors ignored) to clear stuck state from a previous session.
+- Alternative considered: Rely on bus power cycle or hardware reset — rejected because the breakout board doesn't expose RSTPDN, and power cycle is not automatable
+- Trade-off: The abort ACK in `New()` may fail silently if the device is truly unresponsive; the `Reconnect()` path is the escalation for that case
+- Files: `transport/i2c/i2c.go:Close()`, `New()`, `sendAbortACK()`
+
+**Decision: Separate "not ready" from "corrupted frame" in receiveFrameAttempt return values**
+- Problem: `receiveFrameAttempt` returned `shouldRetry=true` for both "device not ready" and "corrupted frame". The caller (`receiveFrame`) sent a NACK in both cases. Sending NACK to a device that hasn't transmitted anything is a protocol violation that crashed the I2C bus.
+- Solution: Return `(nil, false, nil)` for "not ready" (caller polls again without NACK) and `(nil, true, nil)` for "corrupted frame" (caller sends NACK and asks for retransmission). The semantics are documented in the function's return-value contract.
+- Alternative considered: Send NACK always — rejected; confirmed on hardware to crash the I2C bus ("sysfs-i2c: remote I/O error") for any command taking longer than the checkReady backoff window
+- File: `transport/i2c/i2c.go:receiveFrameAttempt()`
 
 ## Development Process
 
