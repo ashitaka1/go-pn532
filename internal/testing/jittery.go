@@ -272,6 +272,14 @@ func (j *BufferedJitteryConnection) ResetStallState() {
 	j.stallTriggered = false
 }
 
+// HasBufferedData returns true if the jittery connection has data in its
+// internal read buffer that hasn't been delivered yet. This happens when the
+// backend was drained in a previous Read but fragmentation caused only partial
+// delivery to the caller.
+func (j *BufferedJitteryConnection) HasBufferedData() bool {
+	return len(j.readBuf) > 0
+}
+
 // ClearBuffer clears any buffered read data.
 func (j *BufferedJitteryConnection) ClearBuffer() {
 	j.readBuf = j.readBuf[:0]

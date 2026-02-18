@@ -427,9 +427,12 @@ func (m *JitteryMockI2CBus) Tx(_ uint16, w, r []byte) error {
 		return errBusClosed
 	}
 
-	// Handle ready status check (read-only with single byte)
+	// Handle ready status check (read-only with single byte).
+	// Data may be pending in the sim's txBuffer OR already drained into the
+	// jittery connection's internal read buffer (e.g. response bytes read
+	// ahead during a previous ACK read). Both indicate "ready".
 	if len(w) == 0 && len(r) == 1 {
-		if m.sim.HasPendingResponse() {
+		if m.sim.HasPendingResponse() || m.jittery.HasBufferedData() {
 			r[0] = pn532Ready
 		} else {
 			r[0] = 0x00

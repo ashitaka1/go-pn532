@@ -483,15 +483,28 @@ func (t *Transport) sendNack() error {
 }
 
 // receiveFrame reads a response frame from the PN532.
-// A deadline-bounded context is created so that checkReady's internal retry
-// loop cannot overshoot the transport timeout.
+//
+// If the caller's context already carries a deadline (e.g. the command-specific
+// timeout set by the device layer), that deadline is honoured directly.
+// Otherwise a sub-context bounded by t.timeout is created so the polling loop
+// does not run forever.
+//
+// Only corrupted frames (LCS/DCS failure) trigger a NACK+retry. When the
+// device is simply not ready yet, we poll again without sending a NACK —
+// sending a NACK to a device that hasn't transmitted anything is a protocol
+// violation that can crash the I2C bus.
 func (t *Transport) receiveFrame(ctx context.Context) ([]byte, error) {
-	frameCtx, cancel := context.WithTimeout(ctx, t.timeout)
-	defer cancel()
+	frameCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		frameCtx, cancel = context.WithTimeout(ctx, t.timeout)
+		defer cancel()
+	}
 
-	const maxTries = 3
+	const maxNACKRetries = 3
+	nackRetries := 0
 
-	for range maxTries {
+	for {
 		select {
 		case <-frameCtx.Done():
 			t.traceTimeout("receiveFrame deadline exceeded")
@@ -504,33 +517,39 @@ func (t *Transport) receiveFrame(ctx context.Context) ([]byte, error) {
 		default:
 		}
 
-		data, shouldRetry, err := t.receiveFrameAttempt(frameCtx)
+		data, needsNACK, err := t.receiveFrameAttempt(frameCtx)
 		if err != nil {
 			return nil, err
 		}
-		if !shouldRetry {
+		if data != nil {
 			return data, nil
 		}
 
-		// Send NACK and retry
-		if err := t.sendNack(); err != nil {
-			return nil, err
+		if needsNACK {
+			if nackRetries >= maxNACKRetries {
+				return nil, &pn532.TransportError{
+					Op: "receiveFrame", Port: t.busName,
+					Err:       pn532.ErrCommunicationFailed,
+					Type:      pn532.ErrorTypeTransient,
+					Retryable: true,
+				}
+			}
+			if err := t.sendNack(); err != nil {
+				return nil, err
+			}
+			nackRetries++
 		}
-	}
-
-	// All retries exhausted
-	return nil, &pn532.TransportError{
-		Op: "receiveFrame", Port: t.busName,
-		Err:       pn532.ErrCommunicationFailed,
-		Type:      pn532.ErrorTypeTransient,
-		Retryable: true,
 	}
 }
 
 // receiveFrameAttempt performs a single frame receive attempt.
-// ctx should be deadline-bounded (created by receiveFrame) so that the
-// checkReady polling loop cannot overshoot the outer timeout.
-func (t *Transport) receiveFrameAttempt(ctx context.Context) (data []byte, shouldRetry bool, err error) {
+//
+// Returns (data, needsNACK, err):
+//   - (data, false, nil) — valid frame received
+//   - (nil, false, nil)  — device not ready; caller should poll again (no NACK)
+//   - (nil, true, nil)   — corrupted frame; caller should send NACK and retry
+//   - (nil, false, err)  — unrecoverable error
+func (t *Transport) receiveFrameAttempt(ctx context.Context) (data []byte, needsNACK bool, err error) {
 	select {
 	case <-ctx.Done():
 		return nil, false, ctx.Err()
@@ -546,7 +565,7 @@ func (t *Transport) receiveFrameAttempt(ctx context.Context) (data []byte, shoul
 		if sleepErr := sleepCtx(ctx, time.Millisecond); sleepErr != nil {
 			return nil, false, sleepErr
 		}
-		return nil, true, nil
+		return nil, false, nil
 	}
 
 	// Read the complete frame in one I2C transaction. off is the index of the
@@ -570,9 +589,9 @@ func (t *Transport) receiveFrameAttempt(ctx context.Context) (data []byte, shoul
 		return nil, true, nil
 	}
 
-	shouldRetry, err = t.validateI2CFrameChecksum(buf, off, frameLen)
-	if err != nil || shouldRetry {
-		return nil, shouldRetry, err
+	needsNACK, err = t.validateI2CFrameChecksum(buf, off, frameLen)
+	if err != nil || needsNACK {
+		return nil, needsNACK, err
 	}
 
 	return t.extractI2CFrameData(buf, off, frameLen)
