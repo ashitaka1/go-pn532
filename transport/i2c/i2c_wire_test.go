@@ -427,9 +427,12 @@ func (m *JitteryMockI2CBus) Tx(_ uint16, w, r []byte) error {
 		return errBusClosed
 	}
 
-	// Handle ready status check (read-only with single byte)
+	// Handle ready status check (read-only with single byte).
+	// Data may be pending in the sim's txBuffer OR already drained into the
+	// jittery connection's internal read buffer (e.g. response bytes read
+	// ahead during a previous ACK read). Both indicate "ready".
 	if len(w) == 0 && len(r) == 1 {
-		if m.sim.HasPendingResponse() {
+		if m.sim.HasPendingResponse() || m.jittery.HasBufferedData() {
 			r[0] = pn532Ready
 		} else {
 			r[0] = 0x00
@@ -689,3 +692,248 @@ func TestI2C_Jittery_AggressiveFragmentation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x00), resp[1])
 }
+
+// --- Regression Tests ---
+// Each test targets a specific bug present in the original I2C transport.
+
+// callbackI2CBus is a minimal i2c.Bus that lets individual regression tests
+// inject precisely-crafted byte sequences without the full VirtualPN532 simulator.
+type callbackI2CBus struct {
+	onTx func(w, r []byte) error
+}
+
+func (c *callbackI2CBus) Tx(_ uint16, w, r []byte) error  { return c.onTx(w, r) }
+func (*callbackI2CBus) SetSpeed(_ physic.Frequency) error { return nil }
+func (*callbackI2CBus) Close() error                      { return nil }
+func (*callbackI2CBus) String() string                    { return "mock://callback-i2c" }
+
+var _ i2c.Bus = (*callbackI2CBus)(nil)
+
+func newCallbackTransport(onTx func(w, r []byte) error) *Transport {
+	return &Transport{
+		dev:     &i2c.Dev{Addr: pn532Addr, Bus: &callbackI2CBus{onTx: onTx}},
+		busName: "mock://callback-i2c",
+		timeout: 100 * time.Millisecond,
+	}
+}
+
+// TestI2C_CorruptedLCS_ShouldRetryNotError verifies that a corrupted length
+// checksum (LCS) triggers a NACK+retry (shouldRetry=true, err=nil) instead of
+// a hard ErrFrameCorrupted.
+//
+// Before the fix, readFrameData() performed the LCS check and returned
+// ErrFrameCorrupted on failure, bypassing the retry path entirely. The correct
+// behaviour per the PN532 spec is to treat a bad LCS as a transient bus-noise
+// event: send NACK and ask the device to retransmit.
+func TestI2C_CorruptedLCS_ShouldRetryNotError(t *testing.T) {
+	// LEN=0x02, LCS=0xFF: sum = 0x02+0xFF = 0x101, &0xFF = 0x01 ≠ 0 → bad LCS.
+	// (correct LCS for LEN=0x02 is 0xFE so that 0x02+0xFE = 0x00)
+	badLCSFrame := []byte{
+		0x00, 0x00, 0xFF, // preamble + start code
+		0x02, 0xFF, // LEN=2, LCS=0xFF (corrupted)
+		0xD5, 0x15, // TFI (pn532ToHost), SAMConfiguration response
+		0x16, 0x00, // DCS, postamble
+	}
+	transport := newCallbackTransport(func(w, readBuf []byte) error {
+		if len(w) > 0 {
+			return nil // writes (sendFrame, sendNack) are no-ops
+		}
+		readBuf[0] = pn532Ready
+		if len(readBuf) > 1 {
+			copy(readBuf[1:], badLCSFrame)
+		}
+		return nil
+	})
+
+	data, shouldRetry, err := transport.receiveFrameAttempt(context.Background())
+
+	assert.Nil(t, data, "no data expected for a frame with bad LCS")
+	assert.True(t, shouldRetry, "bad LCS must set shouldRetry=true so the NACK+retry path is taken")
+	assert.NoError(t, err, "bad LCS must not return a hard error")
+}
+
+// TestI2C_NACKFromDevice_ReturnsErrNACKReceived verifies that a NACK frame
+// sent by the PN532 is detected promptly and returns ErrNACKReceived.
+//
+// Before the fix, waitAck() compared each 6-byte read against ackFrame only.
+// A NACK frame was silently ignored and the loop ran until the 100 ms timeout,
+// returning ErrNoACK instead of the correct ErrNACKReceived.
+func TestI2C_NACKFromDevice_ReturnsErrNACKReceived(t *testing.T) {
+	transport := newCallbackTransport(func(w, readBuf []byte) error {
+		if len(w) > 0 {
+			return nil // writes are no-ops
+		}
+		readBuf[0] = pn532Ready
+		if len(readBuf) == 7 { // 1 status byte + 6 ACK/NACK bytes (readI2C(ackBuf))
+			copy(readBuf[1:], nackFrame)
+		}
+		return nil
+	})
+
+	start := time.Now()
+	err := transport.waitAck(context.Background())
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, pn532.ErrNACKReceived,
+		"NACK from device must return ErrNACKReceived")
+	assert.Less(t, elapsed, 50*time.Millisecond,
+		"NACK must be detected immediately, not after full timeout (%s elapsed)", elapsed)
+}
+
+// TestI2C_ImplementsReconnecter documents and verifies at runtime that
+// *Transport satisfies pn532.Reconnecter. The compile-time assertion in i2c.go
+// is the primary guard; this test acts as a regression marker so that if the
+// assertion is removed, at least a test failure alerts the developer.
+func TestI2C_ImplementsReconnecter(t *testing.T) {
+	sim := virt.NewVirtualPN532()
+	transport := newTestI2CTransport(sim)
+
+	_, ok := any(transport).(pn532.Reconnecter)
+	assert.True(t, ok, "i2c.Transport must implement pn532.Reconnecter")
+}
+
+// --- Lifecycle Tests ---
+// These test the I2C transport's Close/reconnect lifecycle for safety in
+// process-managed environments (e.g., Viam modules) where Close() may be
+// called while SendCommand is actively polling the PN532.
+
+// closableCallbackBus extends callbackI2CBus with a Close that records whether
+// it was called, so tests can verify the bus teardown sequence.
+type closableCallbackBus struct {
+	onTx     func(w, r []byte) error
+	closeCh  chan struct{} // closed when Close() is called
+	isClosed bool
+}
+
+func (c *closableCallbackBus) Tx(_ uint16, w, r []byte) error {
+	if c.isClosed {
+		return errBusClosed
+	}
+	return c.onTx(w, r)
+}
+
+func (*closableCallbackBus) SetSpeed(_ physic.Frequency) error { return nil }
+
+func (c *closableCallbackBus) Close() error {
+	c.isClosed = true
+	if c.closeCh != nil {
+		select {
+		case <-c.closeCh:
+		default:
+			close(c.closeCh)
+		}
+	}
+	return nil
+}
+
+func (*closableCallbackBus) String() string { return "mock://closable-callback-i2c" }
+
+func newClosableCallbackTransport(
+	bus *closableCallbackBus,
+) *Transport {
+	return &Transport{
+		dev:     &i2c.Dev{Addr: pn532Addr, Bus: bus},
+		bus:     bus,
+		busName: "mock://closable-callback-i2c",
+		timeout: 100 * time.Millisecond,
+	}
+}
+
+// TestI2C_CloseDuringSendCommand_NoNilDeref verifies that calling Close()
+// while SendCommand is blocked inside a Tx() ioctl does not cause a nil
+// pointer dereference. This is the primary crash from issue #1: in a Viam
+// module, Close() races with an in-flight InListPassiveTarget poll.
+//
+// The test uses a channel handshake to guarantee ordering:
+// 1. SendCommand goroutine enters Tx (signals txEntered)
+// 2. Main goroutine calls Close() (bus.Close sets isClosed, Tx will fail)
+// 3. SendCommand goroutine's Tx returns errBusClosed, goroutine exits
+//
+// After the fix (dual-mutex), Close() closes the bus under closeMu (causing
+// the in-flight Tx to fail), then acquires mu to nil dev. SendCommand holds
+// mu during Tx, so dev cannot become nil while Tx is in progress.
+func TestI2C_CloseDuringSendCommand_NoNilDeref(t *testing.T) {
+	txEntered := make(chan struct{})
+	closeCh := make(chan struct{})
+
+	bus := &closableCallbackBus{
+		closeCh: closeCh,
+		onTx: func(w, r []byte) error {
+			// Ready-check reads: block until the bus is closed to simulate
+			// a long InListPassiveTarget poll that gets interrupted by Close().
+			if len(w) == 0 && len(r) == 1 {
+				select {
+				case <-txEntered:
+				default:
+					close(txEntered)
+				}
+				// Block here until bus.Close() fires, simulating a blocking ioctl
+				<-closeCh
+				return errBusClosed
+			}
+			// Writes (sendFrame, abort ACK): succeed
+			if len(w) > 0 {
+				return nil
+			}
+			return nil
+		},
+	}
+
+	transport := newClosableCallbackTransport(bus)
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := transport.SendCommand(context.Background(), 0x02, nil)
+		errCh <- err
+	}()
+
+	// Wait until Tx is definitely entered
+	<-txEntered
+
+	// Close from the main goroutine (simulates Viam module Close).
+	// This sends abort ACK (write, succeeds), then bus.Close() which
+	// closes closeCh and unblocks the Tx goroutine.
+	closeErr := transport.Close()
+	assert.NoError(t, closeErr)
+
+	// Verify SendCommand returned an error (not a panic)
+	err := <-errCh
+	require.Error(t, err, "SendCommand must return an error when Close() races with it")
+
+	// Verify transport is in closed state
+	assert.False(t, transport.IsConnected(), "transport must be disconnected after Close")
+}
+
+// TestI2C_Close_SendsAbortACK verifies that Close() sends an ACK frame to the
+// PN532 before closing the bus. Per PN532 datasheet section 6.2.1.3, a host-
+// sent ACK aborts any in-flight command and returns the PN532 to idle. Without
+// this, the PN532 is left mid-transaction and the next process that opens the
+// bus finds a stuck device.
+func TestI2C_Close_SendsAbortACK(t *testing.T) {
+	var writtenFrames [][]byte
+
+	bus := &closableCallbackBus{
+		closeCh: make(chan struct{}),
+		onTx: func(w, r []byte) error {
+			if len(w) > 0 {
+				frame := make([]byte, len(w))
+				copy(frame, w)
+				writtenFrames = append(writtenFrames, frame)
+			}
+			return nil
+		},
+	}
+
+	transport := newClosableCallbackTransport(bus)
+	err := transport.Close()
+	require.NoError(t, err)
+
+	// Verify an ACK frame was written before the bus was closed
+	require.NotEmpty(t, writtenFrames,
+		"Close() must send an abort ACK frame before closing the bus")
+
+	lastWrite := writtenFrames[len(writtenFrames)-1]
+	assert.Equal(t, ackFrame, lastWrite,
+		"the frame sent by Close() must be an ACK (abort) frame")
+}
+

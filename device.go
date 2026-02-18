@@ -446,8 +446,18 @@ func (d *Device) CycleRFField(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the device connection
+// Close closes the device connection.
+//
+// Before closing the transport, a best-effort InRelease is sent to release any
+// targets selected on the PN532. This returns the PN532 to a known idle state so
+// that the next session can initialize cleanly without reading stale responses left
+// in the PN532's I2C output buffer from the previous session.
 func (d *Device) Close() error {
+	if d.transport != nil && d.transport.IsConnected() {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		_ = d.InRelease(ctx) // Best-effort; errors ignored intentionally
+	}
 	if d.transport != nil {
 		if err := d.transport.Close(); err != nil {
 			return fmt.Errorf("failed to close transport: %w", err)
