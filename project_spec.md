@@ -120,6 +120,15 @@ Identified via code review and hardware testing. Ordered by severity.
 - **Details:** The PN532 prepends a status/ready byte (0x01) to every I2C read transaction (datasheet section 6.2.4). The transport did not account for this — ACK reads got `[0x01 0x00 0x00 0xFF 0x00 0xFF]` instead of the expected `[0x00 0x00 0xFF 0x00 0xFF 0x00]`, and frame data was shifted by 1 byte. The test mock (`MockI2CBus`) also did not prepend the status byte, so tests passed while real hardware failed.
 - **Fix:** Added `readI2C()` helper that reads n+1 bytes, verifies the status byte, and strips it. Updated mock to prepend 0x01 to multi-byte reads.
 
+#### Bug 11: I2C receiveFrame sends spurious NACK when device is not ready
+- **File:** `transport/i2c/i2c.go` (receiveFrameAttempt, receiveFrame)
+- **Issue:** `receiveFrameAttempt` returns `shouldRetry=true` for two completely different situations: (1) "device not ready" (PN532 still processing a command) and (2) "got corrupted frame" (LCS/DCS failure). The caller (`receiveFrame`) sends a NACK in both cases. Sending a NACK to a PN532 that hasn't sent a response is a protocol violation — the device doesn't expect a NACK when it's still processing, causing "sysfs-i2c: remote I/O error" which crashes the I2C bus. Once crashed, all subsequent commands fail with "connection timed out" and the PN532 requires a hardware power cycle to recover (even rebooting the Pi doesn't help since the board retains power).
+- **Impact:** Critical — makes the I2C transport non-functional on real hardware for any command that takes longer than ~31ms to process (the checkReady exponential backoff window). GetFirmwareVersion and SAMConfiguration work because they respond within this window. InListPassiveTarget, Diagnose, and other slower commands crash the bus.
+- **Root cause:** The 100ms hardcoded timeout in `receiveFrame` (line 489: `context.WithTimeout(ctx, t.timeout)`) also overrides the caller's longer command-specific timeout, compounding the problem.
+- **Fix approach:** (1) Separate "not ready" returns from "corrupted frame" returns in `receiveFrameAttempt` — only send NACK for actual frame corruption. (2) Use the caller's context deadline for `receiveFrame` instead of the hardcoded 100ms sub-timeout, falling back to `t.timeout` only when no deadline is set.
+- **Status:** Root cause confirmed via hardware testing. Fix implementation started but needs test updates (Jittery mock tests assume old `shouldRetry` behavior).
+- **Hardware notes:** PN532 breakout board does NOT expose RSTPDN pin on headers, only on SMD pads. RSTO (reset output) is available but is read-only. Recovery from bus crash currently requires physical power cycle of the PN532 board.
+
 #### Bug 1: `skipTLV` does not handle long-format TLV lengths
 - **File:** `ndef_validation.go:92-99`
 - **Issue:** Only handles single-byte lengths. If the first length byte is `0xFF` (long-format marker), it reads 255 as the length instead of reading the subsequent 2-byte big-endian length. Inconsistent with `parseTLVLength` in the same file which handles both formats correctly.
@@ -175,9 +184,8 @@ Identified via code review and hardware testing. Ordered by severity.
 #### Bug 10: I2C transport uses two transactions where the datasheet specifies one
 - **File:** `transport/i2c/i2c.go` (waitAck, readFrameData, checkReady)
 - **Issue:** The PN532 datasheet (section 6.2.4) specifies that the status byte and frame data should be read in a single I2C transaction: START → read status → if ready, continue reading frame → STOP. The current implementation uses a separate `checkReady()` transaction followed by a `readI2C()` transaction. The PN532 tolerates this (it prepends a fresh status byte to each transaction), but it doubles the bus traffic and deviates from the documented protocol.
-- **Impact:** May be contributing to command failures observed on hardware. On Raspberry Pi 5 with PN532 v1.6 over I2C, GetFirmwareVersion works reliably but diagnostic commands and InListPassiveTarget fail with "sysfs-i2c: connection timed out" errors. This suggests the extra transaction overhead may be more impactful than initially assessed.
-- **Status:** Priority elevated due to hardware testing results. May be blocking reliable tag detection on I2C.
-- **Fix:** Combine ready check and data read into a single `Tx()` call per read path. Remove `checkReady()` from frame read paths.
+- **Impact:** Low Priority — This is a separate issue from the bus crashes. The two-transaction pattern deviates from the datasheet and adds bus overhead, but is NOT the root cause of the "sysfs-i2c: connection timed out" errors observed on hardware (see Bug 11 for actual cause).
+- **Status:** Deferred — Fix approach would combine ready check and data read into a single `Tx()` call per read path, but this is a code quality improvement, not a critical fix.
 
 #### Bug 9: `WaitForTag` returns (nil, nil) on transient errors
 - **File:** `detection.go:46-65`
