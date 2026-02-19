@@ -37,6 +37,7 @@ Go library for communicating with NXP PN532 NFC reader chips over UART, I2C, and
 ### Nice-to-Have
 - MIFARE Classic 4K large-sector support (currently blocked by bug #6)
 - FeliCa block list format cleanup (bug #7)
+- Write a proper README with API overview, usage examples, transport setup, and polling session documentation
 
 ## Tech Stack
 
