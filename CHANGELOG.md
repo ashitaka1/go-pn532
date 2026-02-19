@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `docs/polling-architecture-review.md` documenting polling concurrency architecture, timing model issues, and future refactoring ideas
 - Add `PauseAndRun(ctx, fn)` method on `polling.Session` for safe synchronous device access during an active polling loop
 - Add `ErrPauseAckTimeout` sentinel error for callers to detect genuine pause timeout vs. other errors
 - Add `loopRunning` atomic flag to `polling.Session` to distinguish an idle device from a stuck polling loop
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix `pauseWithAck` ack timeout increased from 100ms to `pollCycleTimeout + 1s` (11s), preventing false `ErrPauseAckTimeout` on I2C transport where poll cycles block for ~5s
 - Fix `pauseWithAck` to return `ErrPauseAckTimeout` on genuine timeout instead of silently succeeding
 - Fix `handleContextAndPause` to send the pause ack signal (was missing, causing spurious timeouts for callers)
 - Fix pre-existing data race in `TestSession_WriteToTagPausesBehavior`

@@ -2158,6 +2158,7 @@ func TestSession_PauseWithAck_ErrorOnTimeout(t *testing.T) {
 	// Simulate a running loop that consumes the pause signal but never acks
 	session.loopRunning.Store(true)
 	defer session.loopRunning.Store(false)
+	session.pauseAckTimeout = 50 * time.Millisecond // short timeout for test speed
 	go func() {
 		<-session.pauseChan
 		// deliberately don't send ack

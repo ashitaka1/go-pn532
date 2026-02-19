@@ -30,6 +30,12 @@ import (
 // Prevents PN532 from hanging indefinitely after bad auth attempts.
 const pollCycleTimeout = 10 * time.Second
 
+// defaultPauseAckTimeout is derived from pollCycleTimeout: the ack can't arrive
+// until the current poll cycle completes, and pollCycleTimeout is the ceiling on
+// cycle duration. The extra second covers loop overhead between the poll returning
+// and the pause check point. See docs/polling-architecture-review.md.
+const defaultPauseAckTimeout = pollCycleTimeout + time.Second
+
 // writeStabilizationDelay is the time to wait after tag detection before
 // attempting a write. This allows the card to settle in position when the
 // user may still be positioning the card as the write is triggered.
@@ -54,6 +60,7 @@ type Session struct {
 	state                CardState
 	stateMutex           syncutil.RWMutex
 	writeMutex           syncutil.Mutex
+	pauseAckTimeout      time.Duration
 	closed               atomic.Bool
 	isPaused             atomic.Bool
 	loopRunning          atomic.Bool
@@ -69,12 +76,13 @@ func NewSession(device *pn532.Device, config *Config) *Session {
 	}
 
 	session := &Session{
-		device:     device,
-		config:     config,
-		state:      CardState{},
-		pauseChan:  make(chan struct{}, 1),
-		resumeChan: make(chan struct{}, 1),
-		ackChan:    make(chan struct{}, 1),
+		device:          device,
+		config:          config,
+		state:           CardState{},
+		pauseChan:       make(chan struct{}, 1),
+		resumeChan:      make(chan struct{}, 1),
+		ackChan:         make(chan struct{}, 1),
+		pauseAckTimeout: defaultPauseAckTimeout,
 	}
 
 	// Auto-create recoverer when sleep recovery is enabled
@@ -253,7 +261,7 @@ func (s *Session) pauseWithAck(ctx context.Context) error {
 		select {
 		case <-s.ackChan:
 			return nil
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(s.pauseAckTimeout):
 			// Loop exited while we were waiting — device is now idle
 			if !s.loopRunning.Load() {
 				return nil

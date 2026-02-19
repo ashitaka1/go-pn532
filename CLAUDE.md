@@ -13,6 +13,7 @@ Known bugs under investigation — see `project_spec.md` "Known Bugs" section.
 Go library for NXP PN532 NFC readers. Supports UART/I2C/SPI transports and NTAG21X/MIFARE Classic/FeliCa tags with NDEF read/write.
 
 See `project_spec.md` for technical architecture, milestones, and implementation decisions.
+See `docs/polling-architecture-review.md` for polling concurrency architecture, timing model issues, and future refactoring ideas.
 
 ## Project-Specific Conventions
 

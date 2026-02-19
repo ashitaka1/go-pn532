@@ -32,7 +32,7 @@ Go library for communicating with NXP PN532 NFC reader chips over UART, I2C, and
 
 1. ✅ Core library — transport, device lifecycle, tag operations, polling, NDEF
 2. ✅ Bug fixes — I2C transport fully functional on hardware: bugs 0, 0a, bus crash, correctness, spurious NACK (Bug 11), and process-kill recovery (Issue #1) all fixed
-3. ✅ Polling correctness — Issue #2 (PauseAndRun exported API) and Issue #3 (pauseWithAck timeout and handleContextAndPause ack) fixed in polling package
+3. ✅ Polling correctness — Issue #2 (PauseAndRun exported API), Issue #3 (pauseWithAck timeout and handleContextAndPause ack), and Issue #4 (pauseWithAck ack timeout too short for I2C) fixed in polling package
 
 ### Nice-to-Have
 - MIFARE Classic 4K large-sector support (currently blocked by bug #6)
@@ -142,6 +142,12 @@ Identified via code review and hardware testing. Ordered by severity.
 - **Fix:** `pauseWithAck` now returns `ErrPauseAckTimeout` (new sentinel in `polling/state.go:54`) when the ack wait expires and `loopRunning` is still true. `handleContextAndPause` was corrected to call `handlePauseSignal`, which sends to `ackChan` and then waits on `resumeChan`. The `loopRunning` atomic.Bool (set true at loop start, deferred false at loop exit in `polling/session.go:462-463`) allows `pauseWithAck` to distinguish loop-exited-while-waiting from loop-stuck-mid-op.
 - **Files:** `polling/session.go` (`pauseWithAck`, `handleContextAndPause`, `handlePauseSignal`, polling loop start/end); `polling/state.go` (`ErrPauseAckTimeout`)
 
+#### Issue #4: ~~pauseWithAck ack timeout too short for I2C, causing false ErrPauseAckTimeout~~ FIXED
+- **Fixed in:** `claude/fix-pause-ack-timeout` branch
+- **Root cause:** The ack-wait timeout in `pauseWithAck` was hardcoded to 100ms. On I2C, `InListPassiveTarget` blocks for approximately 5 seconds per poll cycle while the PN532 scans for tags. The 100ms window expired before the poll loop reached its pause-check point, causing `pauseWithAck` to return `ErrPauseAckTimeout` even when the loop was functioning correctly.
+- **Fix:** Introduced `defaultPauseAckTimeout = pollCycleTimeout + time.Second` (11s) as a named constant, derived from `pollCycleTimeout` (10s) — the context deadline applied to each poll cycle — plus 1 second of overhead margin for loop bookkeeping between poll return and the pause-check point. The `Session` struct stores `pauseAckTimeout time.Duration` (defaulting to `defaultPauseAckTimeout`) so tests can override it to a short value without changing production behavior.
+- **Files:** `polling/session.go` (`defaultPauseAckTimeout` constant at line 37, `pauseAckTimeout` field at line 63, `NewSession` initialization at line 85, `pauseWithAck` use at line 264)
+
 #### Issue #2: ~~No exported API for safe device access during polling~~ FIXED
 - **Fixed in:** `claude/fix-pause-and-run` branch
 - **Details:** Callers needed a way to perform device-level operations (firmware queries, diagnostics, raw commands) while a `polling.Session` was running, without racing against the polling loop. No such API existed.
@@ -227,7 +233,9 @@ The `polling.Session` pause/resume handshake uses three channels plus one atomic
 - `resumeChan` (buffered 1): caller deposits signal after `fn` completes; loop waits on it
 - `loopRunning atomic.Bool`: set `true` at poll-loop start, deferred `false` at exit
 
-`pauseWithAck` drains any stale ack from a previous timed-out attempt before sending the new pause signal, preventing false-positive acks from crossing attempts. If `loopRunning` is false before or during the ack-wait, the device is already idle and the pause succeeds without an ack. If ack does not arrive within 100ms and `loopRunning` is still true, `ErrPauseAckTimeout` is returned so callers can distinguish "safe to proceed" from "loop may still be running."
+`pauseWithAck` drains any stale ack from a previous timed-out attempt before sending the new pause signal, preventing false-positive acks from crossing attempts. If `loopRunning` is false before or during the ack-wait, the device is already idle and the pause succeeds without an ack. If ack does not arrive within `pauseAckTimeout` and `loopRunning` is still true, `ErrPauseAckTimeout` is returned so callers can distinguish "safe to proceed" from "loop may still be running."
+
+The default ack timeout is `defaultPauseAckTimeout = pollCycleTimeout + 1s = 11s`. The 100ms value used previously was too short for I2C, where `InListPassiveTarget` blocks ~5s per cycle. The timeout is stored as `Session.pauseAckTimeout` so tests can set a short value (e.g., 50ms) without affecting production behavior. See `polling/session.go:33-37` and `polling/session.go:63`.
 
 `TestSession_WriteToTagPausesBehavior` in `polling/session_test.go:583` previously had a data race on a plain `bool` shared between the poll goroutine and the test goroutine. Fixed by replacing with `atomic.Bool`.
 
@@ -335,6 +343,12 @@ Series of commits on `claude/fix-pn532-i2c-crash-TbehC` addressing I2C transport
 - Problem: `pauseWithAck` needed to know whether a polling loop was active without acquiring a lock (acquiring a lock would be deadlock-prone since the loop itself holds no lock). The existing `isPaused` and `closed` atomics did not encode "loop is currently running."
 - Solution: Add `loopRunning atomic.Bool` to `Session`. The polling loop sets it true immediately before the main for-loop and defers `Store(false)`. `pauseWithAck` reads it to decide whether to expect an ack at all, and to re-check after ack timeout whether the loop exited cleanly.
 - File: `polling/session.go:Session` struct, `polling/session.go:462-463` (loop start/end)
+
+**Decision: Derive pauseAckTimeout from pollCycleTimeout rather than a fixed constant**
+- Problem: The 100ms ack-wait timeout in `pauseWithAck` caused false `ErrPauseAckTimeout` on I2C, where `InListPassiveTarget` blocks ~5s per cycle. Callers using `PauseAndRun` or `WriteToTag` could not complete a pause because the loop was mid-poll and the ack could not arrive before the timeout expired.
+- Solution: Replace the 100ms literal with `defaultPauseAckTimeout = pollCycleTimeout + time.Second` (11s). `pollCycleTimeout` (10s) is the `context.WithTimeout` deadline applied to every poll cycle, so it is the theoretical ceiling on how long the loop can be blocked before it returns to the pause-check point. The extra second covers loop overhead. The value is stored in `Session.pauseAckTimeout` (set in `NewSession`) so tests can inject a short timeout without a build tag.
+- Alternative considered: A fixed larger constant (e.g., 10s) — rejected because it would become stale if `pollCycleTimeout` ever changes; deriving from it keeps them in sync.
+- Files: `polling/session.go:29-37` (`pollCycleTimeout`, `defaultPauseAckTimeout`), `polling/session.go:63` (`pauseAckTimeout` field), `polling/session.go:85` (`NewSession` initialization)
 
 **Decision: PauseAndRun acquires writeMutex before pauseWithAck**
 - Problem: A caller using `PauseAndRun` for exclusive device access could race with a concurrent `WriteToTag` call which also acquires `writeMutex` and calls `pauseWithAck`.
