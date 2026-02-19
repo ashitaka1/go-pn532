@@ -56,6 +56,7 @@ type Session struct {
 	writeMutex           syncutil.Mutex
 	closed               atomic.Bool
 	isPaused             atomic.Bool
+	loopRunning          atomic.Bool
 }
 
 // NewSession creates a new card monitoring session.
@@ -216,48 +217,74 @@ func (s *Session) Resume() {
 	}
 }
 
-// pauseWithAck pauses polling and waits for acknowledgment
+// pauseWithAck pauses polling and waits for acknowledgment from the polling loop.
+// If the pause signal is delivered and the loop acknowledges, the device is guaranteed
+// idle. If no polling loop is running (signal cannot be delivered), the device is
+// already idle and the pause succeeds immediately. Returns ErrPauseAckTimeout if the
+// signal was delivered but no ack arrived — the loop consumed it but may still be
+// mid-operation.
 func (s *Session) pauseWithAck(ctx context.Context) error {
-	// Check if context is already cancelled
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 
-	// Check if already paused to avoid redundant operations
 	if s.isPaused.Load() {
 		return nil
 	}
 
-	// Use atomic operation to set pause state safely
 	if !s.isPaused.CompareAndSwap(false, true) {
 		return nil // Another goroutine beat us to it
 	}
 
-	// Send pause signal with context-aware non-blocking send
+	// Drain any stale ack from a previously timed-out pause attempt
+	select {
+	case <-s.ackChan:
+	default:
+	}
+
+	// No polling loop running — device is already idle, pause flag is set.
+	if !s.loopRunning.Load() {
+		return nil
+	}
+
 	select {
 	case s.pauseChan <- struct{}{}:
-		// Successfully sent pause signal, now wait for acknowledgment with timeout
+		// Signal delivered to the loop — wait for ack
 		select {
 		case <-s.ackChan:
-			// Polling goroutine has acknowledged the pause
 			return nil
 		case <-time.After(100 * time.Millisecond):
-			// No acknowledgment received - likely no polling loop running
-			// This is OK for testing scenarios, pause state is already set
-			return nil
+			// Loop exited while we were waiting — device is now idle
+			if !s.loopRunning.Load() {
+				return nil
+			}
+			// Loop consumed the signal but didn't ack — device may still be in use
+			s.isPaused.Store(false)
+			return ErrPauseAckTimeout
 		case <-ctx.Done():
-			// Context cancelled, restore pause state and return error
 			s.isPaused.Store(false)
 			return ctx.Err()
 		}
 	case <-ctx.Done():
-		// Context cancelled, restore pause state and return error
 		s.isPaused.Store(false)
 		return ctx.Err()
-	default:
-		// Channel full or no receiver - that's OK since isPaused flag is set
-		return nil
 	}
+}
+
+// PauseAndRun pauses the polling loop, runs fn with exclusive device access, and
+// resumes polling. It acquires writeMutex to serialize against concurrent WriteToTag
+// calls. Use this for device-level operations (firmware queries, diagnostics) that
+// must not overlap with polling.
+func (s *Session) PauseAndRun(ctx context.Context, fn func(device *pn532.Device) error) error {
+	s.writeMutex.Lock()
+	defer s.writeMutex.Unlock()
+
+	if err := s.pauseWithAck(ctx); err != nil {
+		return fmt.Errorf("failed to pause polling: %w", err)
+	}
+	defer s.Resume()
+
+	return fn(s.GetDevice())
 }
 
 // executeWriteToTag creates a tag from detected tag and executes the write function.
@@ -431,6 +458,9 @@ func (s *Session) runPollingLoop(ctx context.Context, cycleFunc func(context.Con
 	if err := s.device.SetTimeout(hwTimeout); err != nil {
 		return fmt.Errorf("failed to set device timeout: %w", err)
 	}
+
+	s.loopRunning.Store(true)
+	defer s.loopRunning.Store(false)
 
 	ticker := time.NewTicker(s.config.PollInterval)
 	defer ticker.Stop()
@@ -638,7 +668,7 @@ func (s *Session) handleContextAndPause(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-s.pauseChan:
-		return s.waitForResume(ctx)
+		return s.handlePauseSignal(ctx)
 	default:
 		return nil
 	}

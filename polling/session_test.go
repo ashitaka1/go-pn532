@@ -591,7 +591,7 @@ func TestSession_WriteToTagPausesBehavior(t *testing.T) {
 
 	detectedTag := createTestDetectedTag()
 
-	var pauseDetected, resumeDetected bool
+	var pauseDetected, resumeDetected atomic.Bool
 	var wg sync.WaitGroup
 	wg.Add(1)
 
@@ -605,16 +605,14 @@ func TestSession_WriteToTagPausesBehavior(t *testing.T) {
 		for {
 			select {
 			case <-timeout:
-				// Timeout reached, exit to prevent hanging
 				return
 			case <-ticker.C:
 				if session.isPaused.Load() {
-					pauseDetected = true
+					pauseDetected.Store(true)
 				}
 
-				// Break when write is complete
-				if pauseDetected && !session.isPaused.Load() {
-					resumeDetected = true
+				if pauseDetected.Load() && !session.isPaused.Load() {
+					resumeDetected.Store(true)
 					return
 				}
 			}
@@ -624,17 +622,16 @@ func TestSession_WriteToTagPausesBehavior(t *testing.T) {
 	err := session.WriteToTag(
 		context.Background(), context.Background(), detectedTag,
 		func(_ context.Context, _ pn532.Tag) error {
-			// During write, session should be paused
 			assert.True(t, session.isPaused.Load())
-			time.Sleep(20 * time.Millisecond) // Simulate write operation
+			time.Sleep(20 * time.Millisecond)
 			return nil
 		})
 
 	wg.Wait()
 
 	require.NoError(t, err)
-	assert.True(t, pauseDetected, "Session should have been paused during write")
-	assert.True(t, resumeDetected, "Session should have been resumed after write")
+	assert.True(t, pauseDetected.Load(), "Session should have been paused during write")
+	assert.True(t, resumeDetected.Load(), "Session should have been resumed after write")
 	assert.False(t, session.isPaused.Load(), "Session should be resumed after write")
 }
 
@@ -2131,3 +2128,141 @@ func (m *minimalMockTransport) IsConnected() bool {
 }
 
 func (*minimalMockTransport) Type() pn532.TransportType { return pn532.TransportMock }
+
+// --- Issue #2 / #3: PauseAndRun and pauseWithAck fixes ---
+
+// TestSession_PauseWithAck_NoLoopRunning verifies that pauseWithAck succeeds
+// immediately when no polling loop is running (the default branch fires because
+// nobody is reading pauseChan). This is correct because the device is idle.
+func TestSession_PauseWithAck_NoLoopRunning(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// No polling loop started — default branch: no receiver, device is idle
+	err := session.pauseWithAck(context.Background())
+	require.NoError(t, err, "pauseWithAck must succeed when no loop is running")
+	assert.True(t, session.isPaused.Load(), "isPaused must be set")
+
+	session.Resume()
+}
+
+// TestSession_PauseWithAck_ErrorOnTimeout verifies that pauseWithAck returns
+// ErrPauseAckTimeout when the pause signal is consumed by the loop but the ack
+// never arrives. This simulates a loop that is stuck mid-operation.
+func TestSession_PauseWithAck_ErrorOnTimeout(t *testing.T) {
+	t.Parallel()
+	device, _ := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	// Simulate a running loop that consumes the pause signal but never acks
+	session.loopRunning.Store(true)
+	defer session.loopRunning.Store(false)
+	go func() {
+		<-session.pauseChan
+		// deliberately don't send ack
+	}()
+
+	err := session.pauseWithAck(context.Background())
+	require.Error(t, err, "pauseWithAck must error when ack times out")
+	assert.ErrorIs(t, err, ErrPauseAckTimeout)
+	assert.False(t, session.isPaused.Load(),
+		"isPaused must be rolled back after ack timeout")
+}
+
+// TestSession_HandleContextAndPause_SendsAck verifies that the top-of-loop
+// pause check (handleContextAndPause) sends an ack, not just the bottom-of-loop
+// check (handlePauseSignal). Before the fix, handleContextAndPause consumed the
+// pause signal but never sent an ack, causing pauseWithAck to time out even
+// though the loop had actually paused.
+func TestSession_HandleContextAndPause_SendsAck(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	mockTransport.SetResponse(0x4A, []byte{0xD5, 0x4B, 0x00})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pollingStarted := make(chan struct{})
+	go func() {
+		close(pollingStarted)
+		_ = session.Start(ctx)
+	}()
+	<-pollingStarted
+	time.Sleep(50 * time.Millisecond)
+
+	// pauseWithAck should succeed (not time out) regardless of which
+	// code path in the loop consumes the pause signal
+	err := session.pauseWithAck(context.Background())
+	require.NoError(t, err, "pauseWithAck must succeed when polling loop is running")
+	assert.True(t, session.isPaused.Load())
+
+	session.Resume()
+}
+
+// TestSession_PauseAndRun verifies the exported PauseAndRun method:
+// it pauses polling, runs the function with the device, and resumes.
+func TestSession_PauseAndRun(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	mockTransport.SetResponse(0x4A, []byte{0xD5, 0x4B, 0x00})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pollingStarted := make(chan struct{})
+	go func() {
+		close(pollingStarted)
+		_ = session.Start(ctx)
+	}()
+	<-pollingStarted
+	time.Sleep(50 * time.Millisecond)
+
+	var fnCalled bool
+	var wasPausedDuringFn bool
+
+	err := session.PauseAndRun(context.Background(), func(dev *pn532.Device) error {
+		fnCalled = true
+		wasPausedDuringFn = session.isPaused.Load()
+		assert.NotNil(t, dev, "device must not be nil")
+		return nil
+	})
+
+	require.NoError(t, err)
+	assert.True(t, fnCalled, "fn must be called")
+	assert.True(t, wasPausedDuringFn, "polling must be paused during fn")
+	assert.False(t, session.isPaused.Load(), "polling must resume after PauseAndRun")
+}
+
+// TestSession_PauseAndRun_PropagatesFnError verifies that PauseAndRun returns
+// the error from the user's function and still resumes polling.
+func TestSession_PauseAndRun_PropagatesFnError(t *testing.T) {
+	t.Parallel()
+	device, mockTransport := createMockDeviceWithTransport(t)
+	session := NewSession(device, nil)
+
+	mockTransport.SetResponse(0x4A, []byte{0xD5, 0x4B, 0x00})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pollingStarted := make(chan struct{})
+	go func() {
+		close(pollingStarted)
+		_ = session.Start(ctx)
+	}()
+	<-pollingStarted
+	time.Sleep(50 * time.Millisecond)
+
+	fnErr := errors.New("diagnostics failed")
+	err := session.PauseAndRun(context.Background(), func(_ *pn532.Device) error {
+		return fnErr
+	})
+
+	require.ErrorIs(t, err, fnErr)
+	assert.False(t, session.isPaused.Load(), "polling must resume even when fn errors")
+}

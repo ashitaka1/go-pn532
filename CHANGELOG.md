@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `PauseAndRun(ctx, fn)` method on `polling.Session` for safe synchronous device access during an active polling loop
+- Add `ErrPauseAckTimeout` sentinel error for callers to detect genuine pause timeout vs. other errors
+- Add `loopRunning` atomic flag to `polling.Session` to distinguish an idle device from a stuck polling loop
 - Add `Reconnect()` method to I2C transport implementing `pn532.Reconnecter` interface for hardware-fault recovery
 - Add regression tests for I2C LCS retry behavior, NACK detection, and Reconnecter interface
 - Add dual-mutex pattern (`closeMu` + `mu`) to I2C transport for safe concurrent `Close`/`SendCommand` operation
@@ -17,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix `pauseWithAck` to return `ErrPauseAckTimeout` on genuine timeout instead of silently succeeding
+- Fix `handleContextAndPause` to send the pause ack signal (was missing, causing spurious timeouts for callers)
+- Fix pre-existing data race in `TestSession_WriteToTagPausesBehavior`
 - Fix I2C transport nil pointer dereference when `Close()` is called concurrently with an active `SendCommand`
 - Fix I2C transport `Close()` to send abort ACK to PN532 before closing the bus, preventing stuck device state on next session
 - Fix I2C transport `New()` to send abort ACK on connect, recovering a PN532 left stuck by a previous process

@@ -45,8 +45,14 @@ type CardState struct {
 	Present                   bool
 }
 
-// ErrNoTagInPoll indicates no tag was detected during polling (not an error condition)
-var ErrNoTagInPoll = errors.New("no tag detected in polling cycle")
+var (
+	// ErrNoTagInPoll indicates no tag was detected during polling (not an error condition)
+	ErrNoTagInPoll = errors.New("no tag detected in polling cycle")
+
+	// ErrPauseAckTimeout indicates pauseWithAck timed out waiting for the polling
+	// loop to acknowledge the pause. This means the device may still be in use.
+	ErrPauseAckTimeout = errors.New("pause acknowledgment timed out")
+)
 
 // safeTimerStop safely stops a timer and drains its channel to prevent resource leaks
 func safeTimerStop(timer *time.Timer) {

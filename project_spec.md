@@ -32,6 +32,7 @@ Go library for communicating with NXP PN532 NFC reader chips over UART, I2C, and
 
 1. ✅ Core library — transport, device lifecycle, tag operations, polling, NDEF
 2. ✅ Bug fixes — I2C transport fully functional on hardware: bugs 0, 0a, bus crash, correctness, spurious NACK (Bug 11), and process-kill recovery (Issue #1) all fixed
+3. ✅ Polling correctness — Issue #2 (PauseAndRun exported API) and Issue #3 (pauseWithAck timeout and handleContextAndPause ack) fixed in polling package
 
 ### Nice-to-Have
 - MIFARE Classic 4K large-sector support (currently blocked by bug #6)
@@ -134,6 +135,18 @@ Identified via code review and hardware testing. Ordered by severity.
 - **Hardware validation:** 5/5 close-during-infinite-poll cycles pass without crash; normal tag reads unaffected.
 - **Regression tests added:** `TestI2C_CloseDuringSendCommand_NoNilDeref` (goroutine channel-handshake ordering test), `TestI2C_Close_SendsAbortACK` (verifies abort frame written before bus.Close). File: `transport/i2c/i2c_wire_test.go`.
 
+#### Issue #3: ~~pauseWithAck silently succeeded on genuine timeout; handleContextAndPause missing ack~~ FIXED
+- **Fixed in:** `claude/fix-pause-and-run` branch
+- **Root cause A:** `pauseWithAck` had a 100ms ack-wait timeout that returned `nil` instead of an error when the polling loop consumed the pause signal but never sent an acknowledgment. The caller could not distinguish "device is idle" from "device is still mid-operation."
+- **Root cause B:** `handleContextAndPause` (called at the top of each poll iteration) received the pause signal from `pauseChan` and called `handlePauseSignal`, but an earlier version of `handleContextAndPause` did not call `handlePauseSignal` at all — it consumed the signal without sending an ack, so `pauseWithAck` always hit the 100ms timeout path.
+- **Fix:** `pauseWithAck` now returns `ErrPauseAckTimeout` (new sentinel in `polling/state.go:54`) when the ack wait expires and `loopRunning` is still true. `handleContextAndPause` was corrected to call `handlePauseSignal`, which sends to `ackChan` and then waits on `resumeChan`. The `loopRunning` atomic.Bool (set true at loop start, deferred false at loop exit in `polling/session.go:462-463`) allows `pauseWithAck` to distinguish loop-exited-while-waiting from loop-stuck-mid-op.
+- **Files:** `polling/session.go` (`pauseWithAck`, `handleContextAndPause`, `handlePauseSignal`, polling loop start/end); `polling/state.go` (`ErrPauseAckTimeout`)
+
+#### Issue #2: ~~No exported API for safe device access during polling~~ FIXED
+- **Fixed in:** `claude/fix-pause-and-run` branch
+- **Details:** Callers needed a way to perform device-level operations (firmware queries, diagnostics, raw commands) while a `polling.Session` was running, without racing against the polling loop. No such API existed.
+- **Fix:** New exported method `PauseAndRun(ctx context.Context, fn func(*pn532.Device) error) error` on `*Session` in `polling/session.go:278`. It acquires `writeMutex` (serializes against concurrent `WriteToTag` calls), calls `pauseWithAck` to guarantee the polling loop is idle, runs `fn` with exclusive device access, then calls `Resume`. Returns a wrapped `ErrPauseAckTimeout` if the loop cannot be paused cleanly.
+
 #### Bug 1: `skipTLV` does not handle long-format TLV lengths
 - **File:** `ndef_validation.go:92-99`
 - **Issue:** Only handles single-byte lengths. If the first length byte is `0xFF` (long-format marker), it reads 255 as the length instead of reading the subsequent 2-byte big-endian length. Inconsistent with `parseTLVLength` in the same file which handles both formats correctly.
@@ -204,6 +217,19 @@ Identified via code review and hardware testing. Ordered by severity.
 - Detection sub-packages (`detection/uart`, `detection/i2c`, `detection/spi`) register via `init()` blank imports. Any binary using auto-detection must import them.
 - The `internal/testing/VirtualPN532` simulates the PN532 at the wire protocol level, enabling integration-style tests without hardware.
 - Clone device (ACR122U) fallback: if `InListPassiveTarget` fails, `device_context.go` falls back to `InAutoPoll`, handling protocol quirks of ACR122U clones.
+
+### Polling Pause Protocol (Feb 2026)
+
+The `polling.Session` pause/resume handshake uses three channels plus one atomic:
+
+- `pauseChan` (buffered 1): caller deposits a signal; loop reads it on the next check
+- `ackChan` (buffered 1): loop deposits ack after receiving pause; caller waits on it
+- `resumeChan` (buffered 1): caller deposits signal after `fn` completes; loop waits on it
+- `loopRunning atomic.Bool`: set `true` at poll-loop start, deferred `false` at exit
+
+`pauseWithAck` drains any stale ack from a previous timed-out attempt before sending the new pause signal, preventing false-positive acks from crossing attempts. If `loopRunning` is false before or during the ack-wait, the device is already idle and the pause succeeds without an ack. If ack does not arrive within 100ms and `loopRunning` is still true, `ErrPauseAckTimeout` is returned so callers can distinguish "safe to proceed" from "loop may still be running."
+
+`TestSession_WriteToTagPausesBehavior` in `polling/session_test.go:583` previously had a data race on a plain `bool` shared between the poll goroutine and the test goroutine. Fixed by replacing with `atomic.Bool`.
 
 ### I2C Transport Fixes (Feb 2026)
 
@@ -296,6 +322,25 @@ Series of commits on `claude/fix-pn532-i2c-crash-TbehC` addressing I2C transport
 - Solution: Return `(nil, false, nil)` for "not ready" (caller polls again without NACK) and `(nil, true, nil)` for "corrupted frame" (caller sends NACK and asks for retransmission). The semantics are documented in the function's return-value contract.
 - Alternative considered: Send NACK always — rejected; confirmed on hardware to crash the I2C bus ("sysfs-i2c: remote I/O error") for any command taking longer than the checkReady backoff window
 - File: `transport/i2c/i2c.go:receiveFrameAttempt()`
+
+### Polling Pause/Resume Correctness (Milestone 3, Feb 2026)
+
+**Decision: ErrPauseAckTimeout as explicit error rather than silent success**
+- Problem: The previous 100ms timeout path returned `nil`, so callers had no signal that the device might still be mid-operation. This made `PauseAndRun` and `WriteToTag` unsafe — they would proceed even when the loop had not actually acknowledged the pause.
+- Solution: Return `ErrPauseAckTimeout` when the ack window expires and `loopRunning` is still true. Callers (including the new `PauseAndRun`) propagate this as a wrapped error so the device operation is not attempted in an unsafe state.
+- Alternative considered: Infinite wait — rejected because it would deadlock if the loop exits without acking (e.g., loop returns an error mid-operation and sets `loopRunning=false` after the caller checked it).
+- File: `polling/session.go:pauseWithAck()`, `polling/state.go:ErrPauseAckTimeout`
+
+**Decision: loopRunning atomic.Bool for non-blocking loop liveness checks**
+- Problem: `pauseWithAck` needed to know whether a polling loop was active without acquiring a lock (acquiring a lock would be deadlock-prone since the loop itself holds no lock). The existing `isPaused` and `closed` atomics did not encode "loop is currently running."
+- Solution: Add `loopRunning atomic.Bool` to `Session`. The polling loop sets it true immediately before the main for-loop and defers `Store(false)`. `pauseWithAck` reads it to decide whether to expect an ack at all, and to re-check after ack timeout whether the loop exited cleanly.
+- File: `polling/session.go:Session` struct, `polling/session.go:462-463` (loop start/end)
+
+**Decision: PauseAndRun acquires writeMutex before pauseWithAck**
+- Problem: A caller using `PauseAndRun` for exclusive device access could race with a concurrent `WriteToTag` call which also acquires `writeMutex` and calls `pauseWithAck`.
+- Solution: `PauseAndRun` takes `writeMutex` first, then calls `pauseWithAck`. This serializes all write-class operations (tag writes, device-level operations) through the same mutex without needing a separate lock category.
+- Alternative considered: Separate mutex for device-level vs tag-level operations — rejected as unnecessary complexity given both require the same exclusion guarantee.
+- File: `polling/session.go:PauseAndRun()`
 
 ## Development Process
 
