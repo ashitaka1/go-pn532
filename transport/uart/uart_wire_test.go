@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532"
-	virt "github.com/ZaparooProject/go-pn532/internal/testing"
+	"github.com/ashitaka1/go-pn532"
+	virt "github.com/ashitaka1/go-pn532/internal/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.bug.st/serial"

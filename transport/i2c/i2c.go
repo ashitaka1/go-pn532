@@ -24,9 +24,9 @@ import (
 	"strings"
 	"time"
 
-	pn532 "github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/internal/frame"
-	"github.com/ZaparooProject/go-pn532/internal/syncutil"
+	pn532 "github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/internal/frame"
+	"github.com/ashitaka1/go-pn532/internal/syncutil"
 	"periph.io/x/conn/v3/i2c"
 	"periph.io/x/conn/v3/i2c/i2creg"
 	"periph.io/x/conn/v3/physic"

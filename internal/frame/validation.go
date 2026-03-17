@@ -16,7 +16,7 @@
 package frame
 
 import (
-	"github.com/ZaparooProject/go-pn532"
+	"github.com/ashitaka1/go-pn532"
 )
 
 // ValidateFrameLength validates the frame length field and length checksum

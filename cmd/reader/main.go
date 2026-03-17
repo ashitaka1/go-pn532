@@ -26,16 +26,16 @@ import (
 	"syscall"
 	"time"
 
-	pn532 "github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/detection"
-	_ "github.com/ZaparooProject/go-pn532/detection/i2c"
-	_ "github.com/ZaparooProject/go-pn532/detection/spi"
-	_ "github.com/ZaparooProject/go-pn532/detection/uart"
-	"github.com/ZaparooProject/go-pn532/polling"
-	"github.com/ZaparooProject/go-pn532/tagops"
-	"github.com/ZaparooProject/go-pn532/transport/i2c"
-	"github.com/ZaparooProject/go-pn532/transport/spi"
-	"github.com/ZaparooProject/go-pn532/transport/uart"
+	pn532 "github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/detection"
+	_ "github.com/ashitaka1/go-pn532/detection/i2c"
+	_ "github.com/ashitaka1/go-pn532/detection/spi"
+	_ "github.com/ashitaka1/go-pn532/detection/uart"
+	"github.com/ashitaka1/go-pn532/polling"
+	"github.com/ashitaka1/go-pn532/tagops"
+	"github.com/ashitaka1/go-pn532/transport/i2c"
+	"github.com/ashitaka1/go-pn532/transport/spi"
+	"github.com/ashitaka1/go-pn532/transport/uart"
 )
 
 type config struct {

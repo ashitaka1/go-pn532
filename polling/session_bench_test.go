@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	pn532 "github.com/ZaparooProject/go-pn532"
+	pn532 "github.com/ashitaka1/go-pn532"
 )
 
 // createMockDeviceWithTransportForBench creates a device with mock transport for benchmarks

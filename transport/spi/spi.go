@@ -23,8 +23,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/internal/frame"
+	"github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/internal/frame"
 	"periph.io/x/conn/v3/physic"
 	"periph.io/x/conn/v3/spi"
 	"periph.io/x/conn/v3/spi/spireg"

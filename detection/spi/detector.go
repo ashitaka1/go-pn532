@@ -24,9 +24,9 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/detection"
-	"github.com/ZaparooProject/go-pn532/transport/spi"
+	"github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/detection"
+	"github.com/ashitaka1/go-pn532/transport/spi"
 )
 
 // Config represents SPI device configuration

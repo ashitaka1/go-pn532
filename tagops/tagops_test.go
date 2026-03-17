@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532"
+	"github.com/ashitaka1/go-pn532"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

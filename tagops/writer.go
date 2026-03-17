@@ -20,7 +20,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ZaparooProject/go-pn532"
+	"github.com/ashitaka1/go-pn532"
 )
 
 // WriteBlocks writes data to the tag starting at the specified block.

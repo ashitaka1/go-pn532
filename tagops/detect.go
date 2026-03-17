@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ZaparooProject/go-pn532"
+	"github.com/ashitaka1/go-pn532"
 )
 
 const (

@@ -31,7 +31,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ZaparooProject/go-pn532/internal/syncutil"
+	"github.com/ashitaka1/go-pn532/internal/syncutil"
 )
 
 // PN532 Protocol Constants from PN532 User Manual §6.2.1

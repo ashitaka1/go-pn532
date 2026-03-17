@@ -5,7 +5,7 @@ package i2c
 import (
 	"context"
 
-	"github.com/ZaparooProject/go-pn532/detection"
+	"github.com/ashitaka1/go-pn532/detection"
 )
 
 // detectLinux is a stub for non-Linux platforms

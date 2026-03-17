@@ -16,7 +16,7 @@ The PN532 is a popular NFC controller found in many hobbyist modules (like the A
 ## Install
 
 ```bash
-go get github.com/ZaparooProject/go-pn532
+go get github.com/ashitaka1/go-pn532
 ```
 
 Requires Go 1.24+.
@@ -33,8 +33,8 @@ import (
     "fmt"
     "log"
 
-    pn532 "github.com/ZaparooProject/go-pn532"
-    "github.com/ZaparooProject/go-pn532/transport/uart"
+    pn532 "github.com/ashitaka1/go-pn532"
+    "github.com/ashitaka1/go-pn532/transport/uart"
 )
 
 func main() {
@@ -69,10 +69,10 @@ Or use `ConnectDevice` with auto-detection to find the PN532 automatically:
 
 ```go
 import (
-    pn532 "github.com/ZaparooProject/go-pn532"
+    pn532 "github.com/ashitaka1/go-pn532"
     // Blank-import detection drivers for the transports you want to scan
-    _ "github.com/ZaparooProject/go-pn532/detection/uart"
-    _ "github.com/ZaparooProject/go-pn532/detection/i2c"
+    _ "github.com/ashitaka1/go-pn532/detection/uart"
+    _ "github.com/ashitaka1/go-pn532/detection/i2c"
 )
 
 device, err := pn532.ConnectDevice(ctx, "",
@@ -147,7 +147,7 @@ if err := t.WriteNDEF(ctx, msg); err != nil {
 For applications that need to continuously monitor for tags (readers, kiosks, access control), use `polling.Session`. It runs a detection loop in a goroutine and calls your functions when tags appear or disappear.
 
 ```go
-import "github.com/ZaparooProject/go-pn532/polling"
+import "github.com/ashitaka1/go-pn532/polling"
 
 session := polling.NewSession(device, polling.DefaultConfig())
 
@@ -228,7 +228,7 @@ The PN532 supports three physical interfaces. Each transport is in its own sub-p
 ### UART
 
 ```go
-import "github.com/ZaparooProject/go-pn532/transport/uart"
+import "github.com/ashitaka1/go-pn532/transport/uart"
 
 transport, err := uart.New("/dev/ttyUSB0")             // Linux
 transport, err := uart.New("/dev/tty.usbserial-1420")  // macOS
@@ -240,7 +240,7 @@ transport, err := uart.New("COM3")                     // Windows
 ### I2C
 
 ```go
-import "github.com/ZaparooProject/go-pn532/transport/i2c"
+import "github.com/ashitaka1/go-pn532/transport/i2c"
 
 transport, err := i2c.New("/dev/i2c-1")
 ```
@@ -252,7 +252,7 @@ Note: I2C poll cycles block for several seconds while the PN532 retries tag dete
 ### SPI
 
 ```go
-import "github.com/ZaparooProject/go-pn532/transport/spi"
+import "github.com/ashitaka1/go-pn532/transport/spi"
 
 transport, err := spi.New("/dev/spidev0.0")
 ```
@@ -265,10 +265,10 @@ The `detection` package scans for connected PN532 devices across transports. Imp
 
 ```go
 import (
-    "github.com/ZaparooProject/go-pn532/detection"
-    _ "github.com/ZaparooProject/go-pn532/detection/uart"
-    _ "github.com/ZaparooProject/go-pn532/detection/i2c"
-    _ "github.com/ZaparooProject/go-pn532/detection/spi"
+    "github.com/ashitaka1/go-pn532/detection"
+    _ "github.com/ashitaka1/go-pn532/detection/uart"
+    _ "github.com/ashitaka1/go-pn532/detection/i2c"
+    _ "github.com/ashitaka1/go-pn532/detection/spi"
 )
 
 devices, err := detection.DetectAll(ctx, nil) // nil = default options

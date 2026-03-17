@@ -19,8 +19,8 @@ import (
 	"context"
 	"time"
 
-	pn532 "github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/internal/syncutil"
+	pn532 "github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/internal/syncutil"
 )
 
 // DeviceRecoverer handles device recovery after sleep/wake or errors

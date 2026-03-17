@@ -26,10 +26,10 @@ import (
 	"strings"
 	"time"
 
-	pn532 "github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/internal/syncutil"
-	"github.com/ZaparooProject/go-pn532/polling"
-	"github.com/ZaparooProject/go-pn532/tagops"
+	pn532 "github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/internal/syncutil"
+	"github.com/ashitaka1/go-pn532/polling"
+	"github.com/ashitaka1/go-pn532/tagops"
 )
 
 const (

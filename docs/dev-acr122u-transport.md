@@ -25,8 +25,8 @@ The ACR122U transport provides dual-mode communication with ACR122U NFC readers,
 
 ```go
 import (
-    "github.com/ZaparooProject/go-pn532"
-    "github.com/ZaparooProject/go-pn532/transport/acr122u"
+    "github.com/ashitaka1/go-pn532"
+    "github.com/ashitaka1/go-pn532/transport/acr122u"
 )
 
 // Create transport with automatic mode selection

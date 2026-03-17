@@ -18,7 +18,7 @@ package frame
 import (
 	"sync"
 
-	"github.com/ZaparooProject/go-pn532"
+	"github.com/ashitaka1/go-pn532"
 )
 
 // BufferPool manages reusable byte slices for different size categories

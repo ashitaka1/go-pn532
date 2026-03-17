@@ -366,4 +366,4 @@ Series of commits on `claude/fix-pn532-i2c-crash-TbehC` addressing I2C transport
 - Fuzz tests: frame protocol validation in `internal/frame/`
 
 **Deployment:**
-- Library: published as Go module at `github.com/ZaparooProject/go-pn532`
+- Library: published as Go module at `github.com/ashitaka1/go-pn532`

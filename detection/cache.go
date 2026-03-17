@@ -18,7 +18,7 @@ package detection
 import (
 	"time"
 
-	"github.com/ZaparooProject/go-pn532/internal/syncutil"
+	"github.com/ashitaka1/go-pn532/internal/syncutil"
 )
 
 // cacheEntry holds cached detection results.

@@ -22,8 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/internal/syncutil"
+	"github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/internal/syncutil"
 )
 
 // pollCycleTimeout limits how long a single poll cycle can take.

@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532/detection"
-	testutil "github.com/ZaparooProject/go-pn532/internal/testing"
+	"github.com/ashitaka1/go-pn532/detection"
+	testutil "github.com/ashitaka1/go-pn532/internal/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

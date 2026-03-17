@@ -577,7 +577,7 @@ func checkUSBPermissions() error {
 **Go Libraries**:
 - `github.com/ebfe/scard` - PC/SC wrapper for Go
 - `github.com/google/gousb` - USB communication library
-- `github.com/ZaparooProject/go-pn532` - This project's PN532 implementation
+- `github.com/ashitaka1/go-pn532` - This project's PN532 implementation
 
 **Python Libraries**:
 - `pyscard` - Python PC/SC wrapper

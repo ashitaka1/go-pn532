@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532/internal/syncutil"
+	"github.com/ashitaka1/go-pn532/internal/syncutil"
 )
 
 // Transport defines the interface for communication with PN532 devices.

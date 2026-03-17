@@ -19,7 +19,7 @@ import (
 	"context"
 	"runtime"
 
-	"github.com/ZaparooProject/go-pn532/detection"
+	"github.com/ashitaka1/go-pn532/detection"
 )
 
 const (

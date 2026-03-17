@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532"
+	"github.com/ashitaka1/go-pn532"
 )
 
 // Retry constants for tag initialization.

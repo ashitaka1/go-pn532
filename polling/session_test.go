@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	pn532 "github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/internal/syncutil"
+	pn532 "github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/internal/syncutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

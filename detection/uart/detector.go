@@ -21,9 +21,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/detection"
-	"github.com/ZaparooProject/go-pn532/transport/uart"
+	"github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/detection"
+	"github.com/ashitaka1/go-pn532/transport/uart"
 )
 
 // detector implements the Detector interface for UART devices.

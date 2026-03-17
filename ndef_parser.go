@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ZaparooProject/go-pn532/pkg/ndef"
+	"github.com/ashitaka1/go-pn532/pkg/ndef"
 )
 
 // ParseNDEFMessage parses a complete NDEF message using go-ndef

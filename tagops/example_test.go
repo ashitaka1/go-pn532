@@ -66,7 +66,7 @@ func Example_writeNDEF() {
 	// Create NDEF message
 	_, _ = fmt.Println("Creating NDEF message with text and URI records...")
 	_, _ = fmt.Println("Text record: Hello from go-pn532!")
-	_, _ = fmt.Println("URI record: https://github.com/ZaparooProject/go-pn532")
+	_, _ = fmt.Println("URI record: https://github.com/ashitaka1/go-pn532")
 
 	// Write NDEF - works transparently for both NTAG and MIFARE
 	// For MIFARE, authentication is handled automatically
@@ -81,7 +81,7 @@ func Example_writeNDEF() {
 	// Detected MIFARE Classic tag
 	// Creating NDEF message with text and URI records...
 	// Text record: Hello from go-pn532!
-	// URI record: https://github.com/ZaparooProject/go-pn532
+	// URI record: https://github.com/ashitaka1/go-pn532
 	// Writing NDEF message...
 	// Authenticating with MIFARE key...
 	// NDEF message written successfully

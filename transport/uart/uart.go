@@ -25,9 +25,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ZaparooProject/go-pn532"
-	"github.com/ZaparooProject/go-pn532/internal/frame"
-	"github.com/ZaparooProject/go-pn532/internal/syncutil"
+	"github.com/ashitaka1/go-pn532"
+	"github.com/ashitaka1/go-pn532/internal/frame"
+	"github.com/ashitaka1/go-pn532/internal/syncutil"
 	"go.bug.st/serial"
 )
 
