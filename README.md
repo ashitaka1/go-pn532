@@ -13,6 +13,8 @@ The PN532 is a popular NFC controller found in many hobbyist modules (like the A
 - Handles sleep/wake recovery, RF field management, and device reconnection
 - Auto-detects connected PN532 devices
 
+PC/SC (CCID) readers such as the ACR122U and MIFARE key recovery are out of scope.
+
 ## Install
 
 ```bash
@@ -349,6 +351,14 @@ go run ./cmd/reader -debug                   # Enable debug output
 - Use `polling.Session` -- it manages device access internally
 - Use `session.PauseAndRun()` or `session.WriteToTag()` for safe device access during polling
 - Or protect the `Device` with your own mutex if not using polling sessions
+
+## Known Issues
+
+Open bugs are tracked as [GitHub issues labeled `bug`](https://github.com/ashitaka1/go-pn532/issues?q=is%3Aissue+is%3Aopen+label%3Abug). The ones that most affect users:
+
+- The SPI transport reads frames in two transactions and returns corrupted data.
+- MIFARE Classic 4K blocks 128–255 fail authentication.
+- FeliCa read and write commands send a malformed block list.
 
 ## License
 
