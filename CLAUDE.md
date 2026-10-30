@@ -2,18 +2,17 @@
 
 This file provides project-specific guidance to Claude Code (claude.ai/code) for this repository.
 
-## Current Status
-
-Project phase: Active Development
-
-Known bugs under investigation — see `project_spec.md` "Known Bugs" section.
+Tracking: GitHub issues (ashitaka1/go-pn532)
 
 ## About This Project
 
 Go library for NXP PN532 NFC readers. Supports UART/I2C/SPI transports and NTAG21X/MIFARE Classic/FeliCa tags with NDEF read/write.
 
-See `project_spec.md` for technical architecture, milestones, and implementation decisions.
-See `docs/polling-architecture-review.md` for polling concurrency architecture, timing model issues, and future refactoring ideas.
+- `README.md` — usage and API overview
+- `CONTRIBUTING.md` — build, test, lint, release
+- `ARCHITECTURE.md` — layers, codemap, invariants
+- `docs/decisions/` — decision records
+- `docs/polling-architecture-review.md` — polling pause/ack protocol and timing model
 
 ## Project-Specific Conventions
 
