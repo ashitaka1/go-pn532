@@ -2,7 +2,7 @@
 
 This file provides project-specific guidance to Claude Code (claude.ai/code) for this repository.
 
-Tracking: GitHub issues (ashitaka1/go-pn532); owner ashitaka1
+Tracking: GitHub issues (ashitaka1/go-pn532); owner ashitaka1; model 2
 
 ## About This Project
 
